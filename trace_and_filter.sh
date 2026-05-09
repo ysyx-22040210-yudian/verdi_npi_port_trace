@@ -1,18 +1,19 @@
 #!/bin/bash
-# trace_and_filter.sh - Run NPI trace and filter results by keywords
+# trace_and_filter.sh - Run NPI trace and filter rows by driver/load owner module
 #
 # Usage:
 #   ./trace_and_filter.sh -module <target_module> -lib <kdb.elab++> \
-#                         -keywords <keyword1,keyword2,...> \
+#                         -keywords <filter_module> \
 #                         [-output <output.csv>] [-ports <port1,port2,...>]
 #
 # Example:
 #   ./trace_and_filter.sh -module ysyx_22050058_id \
 #                         -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
-#                         -keywords "Memory,RegCombo" \
+#                         -keywords ysyx_22050058_regfile \
 #                         -output id_filtered.csv
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FIND_INST_TCL="$SCRIPT_DIR/npi_find_instances.tcl"
 
 MODULE=""
 LIB=""
@@ -38,7 +39,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <kw1,kw2,...> [-output <out.csv>] [-ports <p1,p2,...>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>]" >&2
     exit 1
 fi
 
@@ -48,7 +49,12 @@ if [ -z "$LIB" ] && { [ -z "$FILELIST" ] || [ -z "$TOP" ]; }; then
 fi
 
 if [ -z "$KEYWORDS" ]; then
-    echo "[ERROR] -keywords parameter is required (comma-separated list)" >&2
+    echo "[ERROR] -keywords parameter is required; pass the module name whose instances should own driver/load signals." >&2
+    exit 1
+fi
+
+if [[ "$KEYWORDS" == *","* ]]; then
+    echo "[ERROR] -keywords now expects one module name, not a comma-separated keyword list." >&2
     exit 1
 fi
 
@@ -59,11 +65,15 @@ fi
 
 # Full trace output file (in current directory)
 FULL_TRACE="${MODULE}_full.csv"
+MODULE_TRACE="${MODULE}_module_connections.csv"
+INSTANCE_LIST="${MODULE}_${KEYWORDS}_instances.txt"
+BOUNDARY_FILTERED="${OUTPUT%.csv}_boundary.csv"
+FULL_FILTERED="${OUTPUT%.csv}_full_owner.csv"
 
 echo "Running NPI trace for module: $MODULE"
 
 # Build npi_trace.sh command
-TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE"
+TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
 if [ -n "$LIB" ]; then
     TRACE_CMD="$TRACE_CMD -lib $LIB"
 fi
@@ -89,18 +99,50 @@ if [ ! -s "$FULL_TRACE" ]; then
     exit 1
 fi
 
+if [ ! -s "$MODULE_TRACE" ]; then
+    echo "[ERROR] Module-boundary trace failed or produced no output" >&2
+    exit 1
+fi
+
 TOTAL_LINES=$(wc -l < "$FULL_TRACE")
+MODULE_LINES=$(wc -l < "$MODULE_TRACE")
 echo "Trace completed: $TOTAL_LINES lines (including header)"
 echo "Full trace saved to: $FULL_TRACE"
+echo "Module-boundary trace saved to: $MODULE_TRACE ($MODULE_LINES lines including header)"
 
-# Convert comma-separated keywords to space-separated for Python
-IFS=',' read -ra KW_ARRAY <<< "$KEYWORDS"
+echo "Finding instances of module: $KEYWORDS"
+export NPI_FILELIST="$FILELIST"
+export NPI_TOP="$TOP"
+export NPI_INCDIR="$INCDIR"
+export NPI_LIB="$LIB"
+export NPI_FILTER_MODULE="$KEYWORDS"
+export NPI_INSTANCE_OUTFILE="$INSTANCE_LIST"
 
-echo "Filtering by keywords: ${KW_ARRAY[*]}"
+verdi -batch -nologo -play "$FIND_INST_TCL" >/dev/null 2>&1
 
-# Run Python filter
-python3 "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$OUTPUT" "${KW_ARRAY[@]}"
+if [ ! -s "$INSTANCE_LIST" ]; then
+    echo "[ERROR] no instances found for filter module: $KEYWORDS" >&2
+    rm -f "$INSTANCE_LIST"
+    exit 1
+fi
+
+INSTANCE_COUNT=$(wc -l < "$INSTANCE_LIST")
+echo "Found $INSTANCE_COUNT filter instances"
+echo "Filtering module-boundary rows whose driver/load signal belongs to module instances: $KEYWORDS"
+python3 "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column
+
+echo "Filtering full-trace rows whose driver/load signal belongs to module instances: $KEYWORDS"
+python3 "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$FULL_FILTERED" --instances "$INSTANCE_LIST"
+
+echo "Merging boundary and full-trace filtered rows"
+python3 "$SCRIPT_DIR/filter_trace.py" - "$OUTPUT" --merge "$BOUNDARY_FILTERED" "$FULL_FILTERED" --split-by-trace-instance
 
 echo ""
 echo "Full trace: $FULL_TRACE"
+echo "Module-boundary trace: $MODULE_TRACE"
+echo "Filter instances: $INSTANCE_LIST"
+echo "Boundary filtered output: $BOUNDARY_FILTERED"
+echo "Full-trace filtered output: $FULL_FILTERED"
 echo "Filtered output: $OUTPUT"
+echo "If multiple instances of $MODULE are present, per-instance CSV files are written as:"
+echo "  ${OUTPUT%.csv}__<inst_full_name>.csv"

@@ -189,10 +189,73 @@ proc get_port_direction { port_hdl } {
 # -----------------------------------------------------------------------
 # Resolve a driver/load handle to its full signal name
 # -----------------------------------------------------------------------
+proc is_const_literal_name { name } {
+    if { $name eq "" } {
+        return 0
+    }
+    if { [string match "Const:*" $name] } {
+        return 1
+    }
+    if { [regexp {^'[bBoOdDhH][0-9a-fA-F_xXzZ]+$} $name] } {
+        return 1
+    }
+    if { [regexp {^[0-9]+('[bBoOdDhH][0-9a-fA-F_xXzZ]+)$} $name] } {
+        return 1
+    }
+    if { [regexp {^[0-9]+$} $name] } {
+        return 1
+    }
+    return 0
+}
+
+proc normalize_signal_name { name } {
+    if { [is_const_literal_name $name] && ![string match "Const:*" $name] } {
+        return "Const:$name"
+    }
+    return $name
+}
+
+proc is_self_port_signal { signame inst_path portname } {
+    set signame [normalize_signal_name $signame]
+    if { [is_const_literal_name $signame] } {
+        return 0
+    }
+
+    set suffix "${inst_path}.${portname}"
+    if { [string equal $signame $suffix] ||
+         [string first "${suffix}\[" $signame] == 0 } {
+        return 1
+    }
+
+    set inst_parts [split $inst_path "."]
+    set common_prefix [join [lrange $inst_parts 0 end-2] "."]
+    set short_name $signame
+    if { $common_prefix ne "" && [string match "${common_prefix}.*" $short_name] } {
+        set short_name [string range $short_name [expr {[string length $common_prefix] + 1}] end]
+    }
+    set short_suffix "[lindex $inst_parts end].${portname}"
+    if { [string equal $short_name $short_suffix] ||
+         [string first "${short_suffix}\[" $short_name] == 0 } {
+        return 1
+    }
+    return 0
+}
+
 proc hdl_to_name { hdl } {
+    set is_literal 0
+    catch { set is_literal [::npi_L1::npi_nl_ut_get_actual_is_literal $hdl] }
+    if { $is_literal == 1 } {
+        set value ""
+        catch { set value [::npi_L1::npi_nl_ut_get_actual_value $hdl] }
+        if { $value ne "" } {
+            return "Const:$value"
+        }
+    }
+
     set info ""
     catch { set info [::npi_L1::npi_nl_ut_get_hdl_info $hdl] }
-    return [string trim [lindex [split $info ","] 1]]
+    set signame [string trim [lindex [split $info ","] 1]]
+    return [normalize_signal_name $signame]
 }
 
 # -----------------------------------------------------------------------
@@ -203,6 +266,10 @@ proc hdl_to_name { hdl } {
 proc is_module_boundary_signal { signame } {
     if { $signame eq "" } {
         return 0
+    }
+
+    if { [is_const_literal_name $signame] } {
+        return 1
     }
 
     foreach bad {
@@ -223,6 +290,12 @@ proc is_module_boundary_signal { signame } {
 # Remove common prefix and simplify the output
 # -----------------------------------------------------------------------
 proc format_signal_name { signame inst_path } {
+    set signame [normalize_signal_name $signame]
+
+    if { [string match "Const:*" $signame] } {
+        return $signame
+    }
+
     # Extract the common prefix (up to the target module's parent)
     set inst_parts [split $inst_path "."]
     set common_prefix [join [lrange $inst_parts 0 end-2] "."]
@@ -386,6 +459,11 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             if { $signame eq "" } {
                 continue
             }
+            set signame [normalize_signal_name $signame]
+
+            if { $module_outfh ne "" && [is_const_literal_name $signame] } {
+                lappend module_drivers $signame
+            }
 
             # Trace drivers
             set driverList {}
@@ -464,6 +542,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             if { $signame eq "" } {
                 continue
             }
+            set signame [normalize_signal_name $signame]
 
             # Trace loads
             set loadList {}
@@ -500,6 +579,22 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 }
             }
         }
+
+        set filtered_drivers {}
+        foreach sig $all_drivers {
+            if { ![is_self_port_signal $sig $inst_path $portname] } {
+                lappend filtered_drivers $sig
+            }
+        }
+        set all_drivers $filtered_drivers
+
+        set filtered_module_drivers {}
+        foreach sig $module_drivers {
+            if { ![is_self_port_signal $sig $inst_path $portname] } {
+                lappend filtered_module_drivers $sig
+            }
+        }
+        set module_drivers $filtered_module_drivers
 
         # Remove duplicates
         set all_drivers [lsort -unique $all_drivers]
@@ -542,6 +637,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         }
                     }
                     if { $signame ne "" } {
+                        set signame [normalize_signal_name $signame]
+                        if { [is_self_port_signal $signame $inst_path $portname] } {
+                            continue
+                        }
                         set formatted_sig [format_signal_name $signame $inst_path]
                         puts $outfh "$inst_path,$portname,driver,$formatted_sig"
                     }

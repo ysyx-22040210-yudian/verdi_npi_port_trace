@@ -1,30 +1,97 @@
 #!/usr/bin/env python3
 """
-Filter NPI trace CSV output based on keyword patterns.
+Filter NPI trace CSV output by driver/load ownership.
 
 Usage:
-    python filter_trace.py <input.csv> <output.csv> <keyword1> [keyword2 ...]
+    python filter_trace.py <input.csv> <output.csv> --instances <instances.txt>
 
 Example:
-    python filter_trace.py trace.csv filtered.csv "Memory" "RegCombo"
+    python filter_trace.py trace.csv filtered.csv --instances module_instances.txt
 
-The script will copy rows containing ANY of the specified keywords to the output file.
+The script copies rows whose signal_full_name belongs to any instance listed in the
+instance file. This is intended for filtering driver/load rows that come from a
+given module's instantiated instances.
 """
 
 import sys
 import csv
+import os
+import re
 
-def filter_csv(input_file, output_file, keywords):
-    """
-    Filter CSV rows that contain any of the specified keywords.
+def load_instances(instance_file):
+    instances = []
+    with open(instance_file, 'r', encoding='utf-8') as infile:
+        for line in infile:
+            inst = line.strip()
+            if inst:
+                instances.append(inst)
+    return instances
 
-    Args:
-        input_file: Path to input CSV file
-        output_file: Path to output CSV file
-        keywords: List of keyword strings to match
-    """
+def strip_instance_prefix(signal_name, inst):
+    if signal_name == inst:
+        return ""
+    if signal_name.startswith(inst + "."):
+        return signal_name[len(inst) + 1:]
+    if signal_name.startswith(inst + "/"):
+        return signal_name[len(inst) + 1:]
+    return None
+
+def is_direct_instance_node(rest):
+    if rest is None:
+        return False
+    if rest == "":
+        return True
+
+    # Expression instances are generated for port-connection expressions. They
+    # are not a concrete signal owned by the filter module, so do not report
+    # them as module-origin driver/load rows.
+    if rest.startswith("_ExprInst__:"):
+        return False
+
+    # Keep logic generated in the filter instance itself, such as:
+    #   ysyx_22050058_gshare/Always0:...
+    if "/" in rest:
+        head = rest.split("/", 1)[0]
+        if "." in head:
+            return False
+        return True
+
+    # Plain nets/ports directly under the instance are acceptable, but a deeper
+    # hierarchy like child_inst.child_module.signal belongs to the child instance.
+    return rest.count(".") <= 1
+
+def signal_belongs_to_instance(signal_name, instances):
+    if not signal_name or signal_name.startswith("Const:"):
+        return False
+
+    for inst in instances:
+        if is_direct_instance_node(strip_instance_prefix(signal_name, inst)):
+            return True
+
+        # npi_port_trace.tcl may remove a common top prefix for readability.
+        parts = inst.split(".")
+        for idx in range(1, len(parts)):
+            suffix = ".".join(parts[idx:])
+            if is_direct_instance_node(strip_instance_prefix(signal_name, suffix)):
+                return True
+
+    return False
+
+def get_signal_column(header):
+    if "signal_full_name" in header:
+        return header.index("signal_full_name")
+    return header.index("module_signal_full_name")
+
+def normalized_header(header):
+    header = list(header)
+    if "module_signal_full_name" in header and "signal_full_name" not in header:
+        header[header.index("module_signal_full_name")] = "signal_full_name"
+    return header
+
+def filter_csv_by_instances(input_file, output_file, instance_file, normalize_header=False):
     matched_count = 0
     total_count = 0
+    instances = load_instances(instance_file)
 
     with open(input_file, 'r', encoding='utf-8') as infile, \
          open(output_file, 'w', encoding='utf-8', newline='') as outfile:
@@ -32,18 +99,101 @@ def filter_csv(input_file, output_file, keywords):
         reader = csv.reader(infile)
         writer = csv.writer(outfile)
 
-        # Copy header
         header = next(reader)
-        writer.writerow(header)
+        writer.writerow(normalized_header(header) if normalize_header else header)
+        signal_idx = get_signal_column(header)
 
-        # Process data rows
         for row in reader:
             total_count += 1
-            # Join all fields in the row to search
-            row_text = ','.join(row)
+            if len(row) > signal_idx and signal_belongs_to_instance(row[signal_idx], instances):
+                writer.writerow(row)
+                matched_count += 1
 
-            # Check if any keyword is in the row
-            if any(keyword in row_text for keyword in keywords):
+    print("Loaded {} filter instances".format(len(instances)))
+    print("Filtered {} out of {} rows".format(matched_count, total_count))
+    print("Output written to: {}".format(output_file))
+
+def merge_csvs(output_file, input_files):
+    header = None
+    seen = set()
+    written = 0
+
+    with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+        writer = csv.writer(outfile)
+        for input_file in input_files:
+            with open(input_file, 'r', encoding='utf-8') as infile:
+                reader = csv.reader(infile)
+                input_header = next(reader)
+                input_header = normalized_header(input_header)
+                if header is None:
+                    header = input_header
+                    writer.writerow(header)
+                elif input_header != header:
+                    raise ValueError("CSV headers do not match: {}".format(input_file))
+
+                for row in reader:
+                    key = tuple(row)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    writer.writerow(row)
+                    written += 1
+
+    print("Merged {} rows into {}".format(written, output_file))
+
+def safe_filename(text):
+    text = re.sub(r'[^A-Za-z0-9_.-]+', '_', text)
+    text = text.strip('._')
+    return text or "unnamed"
+
+def split_csv_by_trace_instance(input_file):
+    with open(input_file, 'r', encoding='utf-8') as infile:
+        reader = csv.reader(infile)
+        header = next(reader)
+        rows_by_inst = {}
+        inst_idx = header.index("inst_full_name")
+
+        for row in reader:
+            if len(row) <= inst_idx:
+                continue
+            inst = row[inst_idx]
+            rows_by_inst.setdefault(inst, []).append(row)
+
+    if len(rows_by_inst) <= 1:
+        print("Split output: skipped, {} trace instance found".format(len(rows_by_inst)))
+        return []
+
+    base, ext = os.path.splitext(input_file)
+    if not ext:
+        ext = ".csv"
+
+    outputs = []
+    for inst in sorted(rows_by_inst):
+        out_file = "{}__{}{}".format(base, safe_filename(inst), ext)
+        with open(out_file, 'w', encoding='utf-8', newline='') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(header)
+            writer.writerows(rows_by_inst[inst])
+        outputs.append(out_file)
+
+    print("Split output: wrote {} per-instance CSV files".format(len(outputs)))
+    for out_file in outputs:
+        print("  {}".format(out_file))
+    return outputs
+
+def filter_csv_by_keywords(input_file, output_file, keywords):
+    matched_count = 0
+    total_count = 0
+
+    with open(input_file, 'r', encoding='utf-8') as infile, \
+         open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+        reader = csv.reader(infile)
+        writer = csv.writer(outfile)
+        header = next(reader)
+        writer.writerow(header)
+        for row in reader:
+            total_count += 1
+            if any(keyword in ','.join(row) for keyword in keywords):
                 writer.writerow(row)
                 matched_count += 1
 
@@ -52,22 +202,49 @@ def filter_csv(input_file, output_file, keywords):
 
 def main():
     if len(sys.argv) < 4:
-        print("Usage: python filter_trace.py <input.csv> <output.csv> <keyword1> [keyword2 ...]")
+        print("Usage: python filter_trace.py <input.csv> <output.csv> --instances <instances.txt>")
         print("\nExample:")
-        print("  python filter_trace.py trace.csv filtered.csv Memory RegCombo")
+        print("  python filter_trace.py trace.csv filtered.csv --instances module_instances.txt")
         sys.exit(1)
 
     input_file = sys.argv[1]
     output_file = sys.argv[2]
-    keywords = sys.argv[3:]
 
     print("Input file: {}".format(input_file))
     print("Output file: {}".format(output_file))
-    print("Keywords: {}".format(keywords))
-    print()
 
     try:
-        filter_csv(input_file, output_file, keywords)
+        split_by_trace_instance = False
+        args = sys.argv[3:]
+        if "--split-by-trace-instance" in args:
+            split_by_trace_instance = True
+            args.remove("--split-by-trace-instance")
+
+        normalize_header = False
+        if "--normalize-signal-column" in args:
+            normalize_header = True
+            args.remove("--normalize-signal-column")
+
+        if args[0] == "--instances" and len(args) == 2:
+            instance_file = args[1]
+            print("Instance file: {}".format(instance_file))
+            print()
+            filter_csv_by_instances(input_file, output_file, instance_file, normalize_header)
+        elif args[0] == "--merge" and len(args) >= 2:
+            print("Merge inputs: {}".format(args[1:]))
+            print()
+            merge_csvs(output_file, args[1:])
+        elif args[0] == "--keywords" and len(args) >= 2:
+            keywords = args[1:]
+            print("Keywords: {}".format(keywords))
+            print()
+            filter_csv_by_keywords(input_file, output_file, keywords)
+        else:
+            print("Error: expected --instances <instances.txt> or --keywords <keyword...>")
+            sys.exit(1)
+
+        if split_by_trace_instance:
+            split_csv_by_trace_instance(output_file)
     except FileNotFoundError:
         print("Error: Input file '{}' not found".format(input_file))
         sys.exit(1)

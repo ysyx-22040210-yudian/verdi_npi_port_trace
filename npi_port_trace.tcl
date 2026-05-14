@@ -15,9 +15,18 @@
 #
 # All +tclarg_* values are passed as Tcl variables by Verdi's +tclarg mechanism.
 
+proc log_step {msg} {
+    puts stderr "\[npi_port_trace\] $msg"
+    flush stderr
+}
+
+log_step "start"
+
 if { [info exists env(VERDI_HOME)] } {
+    log_step "source NPI from VERDI_HOME=$env(VERDI_HOME)"
     source $env(VERDI_HOME)/share/NPI/L1/TCL/npi_L1.tcl
 } elseif { [info exists env(NPIL1_PATH)] } {
+    log_step "source NPI from NPIL1_PATH=$env(NPIL1_PATH)"
     source $env(NPIL1_PATH)/npi_L1.tcl
 } else {
     puts stderr "ERROR: VERDI_HOME or NPIL1_PATH must be set"
@@ -38,11 +47,13 @@ if { ![info exists env(NPI_MODULE)] || $env(NPI_MODULE) eq "" } {
     debExit
 }
 set target_mod $env(NPI_MODULE)
+log_step "target_module=$target_mod"
 
 # NPI_SRCFILE is optional (deprecated)
 set srcfile ""
 if { [info exists env(NPI_SRCFILE)] && $env(NPI_SRCFILE) ne "" } {
     set srcfile $env(NPI_SRCFILE)
+    log_step "deprecated_srcfile=$srcfile"
 }
 
 if { !$use_lib } {
@@ -58,6 +69,11 @@ if { !$use_lib } {
     }
 }
 set incdir [expr { [info exists env(NPI_INCDIR)] ? $env(NPI_INCDIR) : "" }]
+if { $use_lib } {
+    log_step "load_mode=lib lib=$env(NPI_LIB)"
+} else {
+    log_step "load_mode=filelist filelist=$filelist top=$top_module incdir=$incdir"
+}
 
 # Optional: comma-separated list of ports to filter (empty = all ports)
 set port_filter {}
@@ -67,12 +83,19 @@ if { [info exists env(NPI_PORTS)] && $env(NPI_PORTS) ne "" } {
         if { $p ne "" } { lappend port_filter $p }
     }
 }
+if { [llength $port_filter] > 0 } {
+    log_step "port_filter=[join $port_filter ,]"
+} else {
+    log_step "port_filter=<all ports>"
+}
 
 # Output file (written by shell via NPI_OUTFILE env var)
 if { [info exists env(NPI_OUTFILE)] && $env(NPI_OUTFILE) ne "" } {
     set outfh [open $env(NPI_OUTFILE) w]
+    log_step "full_trace_output=$env(NPI_OUTFILE)"
 } else {
     set outfh stdout
+    log_step "full_trace_output=stdout"
 }
 
 # Optional side output: module-boundary driver/load connections.
@@ -81,21 +104,28 @@ if { [info exists env(NPI_OUTFILE)] && $env(NPI_OUTFILE) ne "" } {
 set module_outfh ""
 if { [info exists env(NPI_MODULE_OUTFILE)] && $env(NPI_MODULE_OUTFILE) ne "" } {
     set module_outfh [open $env(NPI_MODULE_OUTFILE) w]
+    log_step "module_boundary_output=$env(NPI_MODULE_OUTFILE)"
+} else {
+    log_step "module_boundary_output=<disabled>"
 }
 
 # -----------------------------------------------------------------------
 # Load design
 # -----------------------------------------------------------------------
 if { $use_lib } {
+    log_step "import design by KDB"
     if { [catch { debImport -elab $env(NPI_LIB) } e] } {
         puts stderr "ERROR: debImport -elab failed: $e"
         debExit
     }
 } elseif { $incdir ne "" } {
+    log_step "import design by filelist with incdir"
     debImport -f $filelist +incdir+$incdir -top $top_module -sv
 } else {
+    log_step "import design by filelist"
     debImport -f $filelist -top $top_module -sv
 }
+log_step "design import done"
 
 # -----------------------------------------------------------------------
 # Build port -> direction map by parsing the module source file
@@ -320,8 +350,10 @@ proc format_signal_name { signame inst_path } {
 # Process one instance: emit CSV rows for all its ports
 # -----------------------------------------------------------------------
 proc process_instance { inst_path parent_path instname port_filter outfh module_outfh } {
+    log_step "process_instance=$inst_path parent=$parent_path instname=$instname"
     # Get IO handles for port direction lookup (needed for internal logic)
     set io_hdl_list [get_io_handles $inst_path]
+    log_step "io_handle_count=[llength $io_hdl_list] instance=$inst_path"
 
     # Build port name -> direction map from IO handles
     set port_dir_map {}
@@ -339,6 +371,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         puts stderr "WARNING: no ports found for $inst_path"
         return
     }
+    log_step "port_handle_count=[llength $port_hdl_list] instance=$inst_path"
 
     # Get high-side connections (parent scope nets) and low-side connections (child scope)
     set port2highList {}
@@ -353,6 +386,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
     } e] } {
         puts stderr "WARNING: npi_inst_port_2_low_conn_sig failed for $inst_path: $e"
     }
+    log_step "connection_maps high_entries=[llength $port2highList] low_entries=[llength $port2lowList] instance=$inst_path"
 
     # Build maps: port_handle -> list of signal handles
     set high_conn_map {}
@@ -376,6 +410,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
         # Skip if port filter is active and this port is not in the list
         if { [llength $port_filter] > 0 && [lsearch -exact $port_filter $portname] < 0 } {
+            log_step "skip_port port=$portname reason=not_in_filter instance=$inst_path"
             continue
         }
 
@@ -394,8 +429,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { [dict exists $low_conn_map $port_hdl] } {
             set low_sigs [dict get $low_conn_map $port_hdl]
         }
+        log_step "trace_port instance=$inst_path port=$portname dir=$dir high_conn_count=[llength $high_sigs] low_conn_count=[llength $low_sigs]"
 
         if { [llength $high_sigs] == 0 && [llength $low_sigs] == 0 } {
+            log_step "port_no_connections instance=$inst_path port=$portname"
             puts $outfh "$inst_path,$portname,driver,ERROR:no_connections"
             puts $outfh "$inst_path,$portname,load,ERROR:no_connections"
             continue
@@ -601,6 +638,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_loads [lsort -unique $all_loads]
         set module_drivers [lsort -unique $module_drivers]
         set module_loads [lsort -unique $module_loads]
+        log_step "trace_result instance=$inst_path port=$portname drivers=[llength $all_drivers] loads=[llength $all_loads] module_drivers=[llength $module_drivers] module_loads=[llength $module_loads]"
 
         # Output module-boundary connections to the side CSV.
         if { $module_outfh ne "" } {
@@ -690,6 +728,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 # Find all instances of target_mod and process each
 # -----------------------------------------------------------------------
 set hdlList {}
+log_step "find target instances for module definition: $target_mod"
 if { [catch {
     ::npi_L1::npi_find_inst_with_def_wildcard "" $target_mod hdlList
 } e] } {
@@ -701,8 +740,10 @@ if { [llength $hdlList] == 0 } {
     puts stderr "ERROR: no instances of module '$target_mod' found"
     debExit
 }
+log_step "found_target_instance_handles=[llength $hdlList]"
 
 # Print CSV header
+log_step "write CSV headers"
 puts $outfh "inst_full_name,port_name,role,signal_full_name"
 if { $module_outfh ne "" } {
     puts $module_outfh "inst_full_name,port_name,role,module_signal_full_name"
@@ -733,4 +774,5 @@ foreach ih $hdlList {
 
 if { $outfh ne "stdout" } { close $outfh }
 if { $module_outfh ne "" } { close $module_outfh }
+log_step "done"
 debExit

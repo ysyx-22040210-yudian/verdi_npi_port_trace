@@ -15,6 +15,10 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FIND_INST_TCL="$SCRIPT_DIR/npi_find_instances.tcl"
 
+log_step() {
+    echo "[trace_and_filter] $*" >&2
+}
+
 MODULE=""
 LIB=""
 KEYWORDS=""
@@ -70,7 +74,25 @@ INSTANCE_LIST="${MODULE}_${KEYWORDS}_instances.txt"
 BOUNDARY_FILTERED="${OUTPUT%.csv}_boundary.csv"
 FULL_FILTERED="${OUTPUT%.csv}_full_owner.csv"
 
-echo "Running NPI trace for module: $MODULE"
+log_step "script_dir=$SCRIPT_DIR"
+log_step "target_module=$MODULE"
+log_step "filter_module=$KEYWORDS"
+if [ -n "$LIB" ]; then
+    log_step "load_mode=lib lib=$LIB"
+else
+    log_step "load_mode=filelist filelist=$FILELIST top=$TOP incdir=$INCDIR"
+fi
+if [ -n "$PORTS" ]; then
+    log_step "port_filter=$PORTS"
+else
+    log_step "port_filter=<all ports>"
+fi
+log_step "full_trace=$FULL_TRACE"
+log_step "module_boundary_trace=$MODULE_TRACE"
+log_step "filter_instance_list=$INSTANCE_LIST"
+log_step "boundary_filtered=$BOUNDARY_FILTERED"
+log_step "full_owner_filtered=$FULL_FILTERED"
+log_step "final_output=$OUTPUT"
 
 # Build npi_trace.sh command
 TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
@@ -91,6 +113,8 @@ if [ -n "$PORTS" ]; then
 fi
 
 # Run trace
+log_step "step 1/5: run NPI trace for target module"
+log_step "command: $TRACE_CMD > $FULL_TRACE"
 $TRACE_CMD > "$FULL_TRACE"
 
 if [ ! -s "$FULL_TRACE" ]; then
@@ -106,11 +130,9 @@ fi
 
 TOTAL_LINES=$(wc -l < "$FULL_TRACE")
 MODULE_LINES=$(wc -l < "$MODULE_TRACE")
-echo "Trace completed: $TOTAL_LINES lines (including header)"
-echo "Full trace saved to: $FULL_TRACE"
-echo "Module-boundary trace saved to: $MODULE_TRACE ($MODULE_LINES lines including header)"
+log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$MODULE_LINES"
 
-echo "Finding instances of module: $KEYWORDS"
+log_step "step 2/5: find instances of filter module"
 export NPI_FILELIST="$FILELIST"
 export NPI_TOP="$TOP"
 export NPI_INCDIR="$INCDIR"
@@ -118,7 +140,8 @@ export NPI_LIB="$LIB"
 export NPI_FILTER_MODULE="$KEYWORDS"
 export NPI_INSTANCE_OUTFILE="$INSTANCE_LIST"
 
-verdi -batch -nologo -play "$FIND_INST_TCL" >/dev/null 2>&1
+log_step "command: verdi -batch -nologo -play $FIND_INST_TCL"
+verdi -batch -nologo -play "$FIND_INST_TCL" 1>&2
 
 if [ ! -s "$INSTANCE_LIST" ]; then
     echo "[ERROR] no instances found for filter module: $KEYWORDS" >&2
@@ -127,22 +150,24 @@ if [ ! -s "$INSTANCE_LIST" ]; then
 fi
 
 INSTANCE_COUNT=$(wc -l < "$INSTANCE_LIST")
-echo "Found $INSTANCE_COUNT filter instances"
-echo "Filtering module-boundary rows whose driver/load signal belongs to module instances: $KEYWORDS"
+log_step "found_filter_instances=$INSTANCE_COUNT"
+log_step "step 3/5: filter module-boundary rows by filter-module ownership"
+log_step "command: python3 $SCRIPT_DIR/filter_trace.py $MODULE_TRACE $BOUNDARY_FILTERED --instances $INSTANCE_LIST --normalize-signal-column"
 python3 "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column
 
-echo "Filtering full-trace rows whose driver/load signal belongs to module instances: $KEYWORDS"
+log_step "step 4/5: filter full-trace rows by filter-module ownership"
+log_step "command: python3 $SCRIPT_DIR/filter_trace.py $FULL_TRACE $FULL_FILTERED --instances $INSTANCE_LIST"
 python3 "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$FULL_FILTERED" --instances "$INSTANCE_LIST"
 
-echo "Merging boundary and full-trace filtered rows"
+log_step "step 5/5: merge filtered outputs and split by traced target instance when needed"
+log_step "command: python3 $SCRIPT_DIR/filter_trace.py - $OUTPUT --merge $BOUNDARY_FILTERED $FULL_FILTERED --split-by-trace-instance"
 python3 "$SCRIPT_DIR/filter_trace.py" - "$OUTPUT" --merge "$BOUNDARY_FILTERED" "$FULL_FILTERED" --split-by-trace-instance
 
-echo ""
-echo "Full trace: $FULL_TRACE"
-echo "Module-boundary trace: $MODULE_TRACE"
-echo "Filter instances: $INSTANCE_LIST"
-echo "Boundary filtered output: $BOUNDARY_FILTERED"
-echo "Full-trace filtered output: $FULL_FILTERED"
-echo "Filtered output: $OUTPUT"
-echo "If multiple instances of $MODULE are present, per-instance CSV files are written as:"
-echo "  ${OUTPUT%.csv}__<inst_full_name>.csv"
+FINAL_LINES=$(wc -l < "$OUTPUT")
+log_step "done final_output=$OUTPUT final_lines=$FINAL_LINES"
+log_step "full_trace=$FULL_TRACE"
+log_step "module_boundary_trace=$MODULE_TRACE"
+log_step "filter_instances=$INSTANCE_LIST"
+log_step "boundary_filtered_output=$BOUNDARY_FILTERED"
+log_step "full_trace_filtered_output=$FULL_FILTERED"
+log_step "per_instance_pattern=${OUTPUT%.csv}__<inst_full_name>.csv"

@@ -1,84 +1,28 @@
 # Verdi NPI Port Trace
 
-这个目录提供一组基于 Verdi NPI 的端口连接追踪工具，用来在已经 elaboration 的设计中查询某个 Verilog/SystemVerilog `module` 的所有实例，并输出每个端口的 driver/load 关系。
+This tool uses Verdi NPI L1 Tcl APIs to trace driver/load relationships for
+ports of all instances of a Verilog/SystemVerilog module from an elaborated
+Verdi/VCS KDB.
 
-当前主入口是 `trace_and_filter.sh`。它会自动完成完整 trace、module 边界 trace、过滤 module 实例查找、CSV 过滤、合并以及按被 trace 实例拆分输出。
+The main entry point is `trace_and_filter.sh`. It runs a full trace, generates a
+module-boundary trace, finds instances of a filter module, filters CSV rows,
+merges the results, and optionally splits output per traced instance.
 
-```bash
-./trace_and_filter.sh \
-  -module ysyx_22050058_id \
-  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
-  -keywords ysyx_22050058_regfile \
-  -output id_regfile_filtered.csv
-```
+## Files
 
-执行后通常会得到完整 trace、module 边界 trace、过滤结果和中间实例列表：
-
-- `ysyx_22050058_id_full.csv`
-- `ysyx_22050058_id_module_connections.csv`
-- `ysyx_22050058_id_ysyx_22050058_regfile_instances.txt`
-- `id_regfile_filtered_boundary.csv`
-- `id_regfile_filtered_full_owner.csv`
-- `id_regfile_filtered.csv`
-
-## 适用场景
-
-这个工具适合在 NPC/YSYX 工程里排查 RTL 端口连接问题，例如：
-
-- 某个子模块端口的 driver 来自哪里。
-- 某个 output 端口最终 load 到哪些信号或模块。
-- 一个 module 被实例化多次时，每个实例的端口连接是否一致。
-- 从完整 trace 中筛选出由某类子模块实例拥有的 driver/load 记录。
-
-## 重要约定
-
-`-module` 参数填写的是 **module 定义名**，不是实例名。
-
-例如 RTL 中有：
-
-```verilog
-ysyx_22050058_pht ysyx_22050058_pht_u0 (
-  ...
-);
-```
-
-运行时应写：
-
-```bash
--module ysyx_22050058_pht
-```
-
-不要写：
-
-```bash
--module ysyx_22050058_pht_u0
-```
-
-脚本内部通过 `npi_find_inst_with_def_wildcard "" $target_mod hdlList` 按 module 定义名查找实例。如果同一个 module 在设计中被实例化多次，脚本会处理所有匹配实例。
-
-## 文件说明
-
-| 文件 | 作用 |
+| File | Purpose |
 | --- | --- |
-| `trace_and_filter.sh` | 主入口脚本。执行 trace，查找过滤 module 实例，过滤、合并并按 trace 实例拆分 CSV。 |
-| `npi_trace.sh` | 底层 trace 脚本。设置环境变量并以 `verdi -batch` 方式运行 Tcl trace。 |
-| `npi_port_trace.tcl` | 当前主实现。导入 KDB/filelist，查找目标 module 的实例，追踪端口 driver/load，并生成 CSV。 |
-| `filter_trace.py` | CSV 过滤、合并和按 trace 实例拆分的辅助脚本。 |
-| `npi_find_instances.tcl` | 查找某个 module 定义对应的所有实例路径，供过滤流程使用。 |
-| `npi_port_trace.cpp` | 早期 C++ 版本，可通过 Makefile 构建；当前项目调试以 Tcl 版本为准。 |
-| `Makefile` | C++ 版本构建文件。 |
+| `trace_and_filter.sh` | Main flow. Runs trace, finds filter-module instances, filters, merges, and splits CSV output. |
+| `npi_trace.sh` | Lower-level trace wrapper. Sets `NPI_*` environment variables and runs Verdi batch Tcl. |
+| `npi_port_trace.tcl` | Core NPI trace implementation. Imports KDB/filelist, finds target-module instances, traces port drivers/loads, and writes CSV files. |
+| `npi_find_instances.tcl` | Finds all instances of a module definition for the filter flow. |
+| `filter_trace.py` | Filters CSV rows by instance ownership, merges CSV files, and splits by traced instance. |
+| `npi_port_trace.cpp` | Older C++ implementation. The Tcl flow is the current recommended path. |
+| `Makefile` | Build file for the older C++ implementation. |
 
-## 环境要求
+## Environment
 
-需要在带 Synopsys VCS/Verdi 的 Linux 环境中运行。至少需要：
-
-- `VERDI_HOME` 已设置。
-- `verdi` 命令在 `PATH` 中可直接执行。
-- 存在 VCS/Verdi 生成的 elaboration 数据库，例如 `/tmp/npc_build/simv.daidir/kdb.elab++`。
-- 脚本有执行权限。
-- 使用过滤功能时需要 `python3`。
-
-检查环境：
+Run on Linux with Synopsys Verdi/VCS available:
 
 ```bash
 echo "$VERDI_HOME"
@@ -86,27 +30,25 @@ which verdi
 ls -la /tmp/npc_build/simv.daidir/kdb.elab++
 ```
 
-如果脚本没有执行权限：
+If needed:
 
 ```bash
 chmod +x npi_trace.sh trace_and_filter.sh
 ```
 
-## 生成 KDB
-
-本工程推荐基于 VCS/Verdi 生成的 KDB 运行：
+The recommended input is a VCS/Verdi generated KDB:
 
 ```text
 simv.daidir/kdb.elab++
 ```
 
-编译参数中需要包含：
+The VCS build should include `-kdb`, for example:
 
 ```make
 -lca -kdb
 ```
 
-在 NPC 工程根目录重新编译：
+For this project:
 
 ```bash
 cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc
@@ -114,116 +56,103 @@ mkdir -p /tmp/npc_build
 make -f Makefile all
 ```
 
-生成后确认 KDB 目录存在且非空：
+## Important Conventions
 
-```bash
-ls -la /tmp/npc_build/simv.daidir/kdb.elab++
+`-module` is a module definition name, not an instance name. For:
+
+```verilog
+ysyx_22050058_pht ysyx_22050058_pht_u0 (...);
 ```
 
-如果出现 `[ERROR] no output generated`，优先确认 KDB 是用当前 RTL、当前 top，并带 `-kdb` 重新生成的。仅有空目录并不能保证 NPI 可以导入设计。
+use:
 
-## 基本用法
+```bash
+-module ysyx_22050058_pht
+```
 
-进入工具目录：
+not:
+
+```bash
+-module ysyx_22050058_pht_u0
+```
+
+The scripts use `npi_find_inst_with_def_wildcard` to find all instances whose
+definition name matches the requested module.
+
+## Full Flow
+
+Example: trace `ysyx_22050058_pht` ports, and keep rows whose driver/load
+endpoint belongs to an instance of `ysyx_22050058_gshare`:
 
 ```bash
 cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
-```
 
-主流程：追踪一个 module 的端口，并筛选 driver/load 信号属于另一个 module 实例的记录。
-
-```bash
 ./trace_and_filter.sh \
-  -module ysyx_22050058_id \
-  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
-  -keywords ysyx_22050058_regfile \
-  -output id_regfile_filtered.csv
-```
-
-参数含义：
-
-| 参数 | 含义 |
-| --- | --- |
-| `-module` | 被 trace 的目标 module 定义名。脚本会处理这个 module 的所有实例。 |
-| `-lib` | VCS/Verdi 生成的 `kdb.elab++` 路径。 |
-| `-keywords` | 过滤 module 定义名。脚本会查找该 module 的所有实例，并保留 driver/load 属于这些实例的记录。 |
-| `-output` | 最终合并后的过滤结果 CSV。 |
-
-这个命令会生成：
-
-```text
-ysyx_22050058_id_full.csv
-ysyx_22050058_id_module_connections.csv
-ysyx_22050058_id_ysyx_22050058_regfile_instances.txt
-id_regfile_filtered_boundary.csv
-id_regfile_filtered_full_owner.csv
-id_regfile_filtered.csv
-```
-
-如果 `ysyx_22050058_id` 在当前设计中被实例化多次，最终输出还会按 `inst_full_name` 额外拆分：
-
-```text
-id_regfile_filtered__<inst_full_name>.csv
-```
-
-注意：`-keywords` 当前参数名保留为历史名称，但实际含义是 **单个 module 定义名**，不是逗号分隔关键字列表。
-
-## 只追踪指定端口
-
-使用 `-ports` 传入逗号分隔的端口名：
-
-```bash
-./trace_and_filter.sh \
-  -module ysyx_22050058_id \
-  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
-  -keywords ysyx_22050058_regfile \
-  -ports clk,rst,we,waddr,wdata \
-  -output id_regfile_write_ports.csv
-```
-
-`-ports` 中的名字必须是 module 端口定义里的端口名，不是连接到端口上的 net 名。
-
-## 底层 trace 调试
-
-`trace_and_filter.sh` 内部会调用 `npi_trace.sh`，并固定生成：
-
-```text
-<module>_module_connections.csv
-```
-
-通常不需要直接调用 `npi_trace.sh`。如果只想看原始 trace，或需要调试 NPI 返回结果，可以直接运行底层脚本：
-
-```bash
-./npi_trace.sh \
-  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
   -module ysyx_22050058_pht \
-  > pht_trace.csv
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords ysyx_22050058_gshare \
+  -output pht_from_gshare.csv
 ```
 
-这会输出主 CSV 到 stdout，并生成默认边界连接 CSV：
+Generated files:
 
 ```text
+ysyx_22050058_pht_full.csv
 ysyx_22050058_pht_module_connections.csv
+ysyx_22050058_pht_ysyx_22050058_gshare_instances.txt
+pht_from_gshare_boundary.csv
+pht_from_gshare_full_owner.csv
+pht_from_gshare.csv
 ```
 
-直接调用底层脚本时，也可以通过 `-module-out` 指定边界连接 CSV 文件名。
+`-keywords` is a legacy option name. In `trace_and_filter.sh`, it now means one
+filter module definition name. It is not a comma-separated text keyword list.
 
-## 两类 CSV 的区别
+The flow is:
 
-主 CSV 来自标准输出，列格式为：
+1. Trace every instance of `-module`.
+2. Find every instance whose definition name is `-keywords`.
+3. Filter module-boundary rows whose driver/load endpoint belongs to those
+   filter instances.
+4. Filter full-trace rows whose driver/load endpoint is owned by those filter
+   instances.
+5. Merge boundary and full-owner filtered rows.
+
+Rows containing `_ExprInst__` are excluded from filtered output. Child-instance
+internals such as:
+
+```text
+ysyx_22050058_gshare_u0.ysyx_22050058_pht_u0.ysyx_22050058_pht(@1)/...
+```
+
+are also excluded, because they belong to a child instance rather than the
+filter module instance boundary.
+
+## Optional Port Filter
+
+Use `-ports` with comma-separated module port names:
+
+```bash
+./trace_and_filter.sh \
+  -module ysyx_22050058_pht \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords ysyx_22050058_gshare \
+  -ports clk,rst,we,waddr,wdata \
+  -output pht_write_ports_from_gshare.csv
+```
+
+`-ports` values must be port names from the module definition, not connected net
+names.
+
+## CSV Outputs
+
+Full trace CSV columns:
 
 ```csv
 inst_full_name,port_name,role,signal_full_name
 ```
 
-| 字段 | 含义 |
-| --- | --- |
-| `inst_full_name` | 当前被追踪 module 实例的完整层次路径。 |
-| `port_name` | 当前端口名。 |
-| `role` | `driver` 或 `load`。 |
-| `signal_full_name` | NPI trace 返回的信号、表达式、always 块、组合逻辑或存储节点。 |
-
-主 CSV 使用 `passMod=1`，会尽量穿过 module 边界继续追踪真实 driver/load。因此看到下面这类节点是正常的：
+The full trace uses module pass-through and can include Verdi internal nodes:
 
 ```text
 Always0
@@ -234,161 +163,176 @@ ComboMemory
 _ExprInst__
 ```
 
-module 边界连接 CSV 的列格式为：
+Module-boundary CSV columns:
 
 ```csv
 inst_full_name,port_name,role,module_signal_full_name
 ```
 
-它使用 `passMod=0`，trace 会停在 module 边界附近，并额外过滤内部综合节点。因此它更适合快速查看端口连接到了哪些上层 net 或其他 module 端口。
+The module-boundary trace uses `passMod=0` and keeps readable module-boundary
+endpoints. It filters common internal nodes and is usually better for quickly
+checking which upper-level net or sibling module is connected to a port.
 
-## 端口方向与 trace 规则
+Constant drivers are preserved and printed as `Const:<value>`, for example:
 
-脚本通过 NPI API 获取端口方向。处理规则如下：
-
-| 端口方向 | driver 从哪侧追踪 | load 从哪侧追踪 |
-| --- | --- | --- |
-| `input` | high-side，父层连接侧 | low-side，子模块内部侧 |
-| `output` | low-side，子模块内部侧 | high-side，父层连接侧 |
-| `inout` 或未知 | high-side 和 low-side 都追踪 | high-side 和 low-side 都追踪 |
-
-主 CSV 和边界 CSV 都会去重。主 CSV 还会尽量过滤掉指向当前实例自身端口的重复记录。
-
-## 手动过滤已有 CSV
-
-通常使用 `trace_and_filter.sh` 即可。若已经有 trace CSV 和实例列表，也可以直接调用 Python 脚本处理：
-
-```bash
-python3 filter_trace.py \
-  ysyx_22050058_id_module_connections.csv \
-  id_regfile_boundary.csv \
-  --instances ysyx_22050058_id_ysyx_22050058_regfile_instances.txt \
-  --normalize-signal-column
+```csv
+...,CEN,driver,Const:'b1
 ```
 
-保留的旧关键字过滤模式仍可直接调用：
+## Logging
+
+The runnable shell, Python, and Tcl files print step logs to `stderr`:
+
+- `trace_and_filter.sh`: prints the five main stages.
+- `npi_trace.sh`: prints trace parameters, output files, and line counts.
+- `npi_port_trace.tcl`: prints design import, found target instances, port
+  connections, and trace result counts.
+- `npi_find_instances.tcl`: prints design import and matched filter instances.
+- `filter_trace.py`: prints input/output files, headers, filter counts, merge
+  counts, and split results.
+
+Because logs go to `stderr`, CSV output remains clean:
 
 ```bash
-python3 filter_trace.py \
-  pht_trace.csv \
-  pht_internal_nodes.csv \
-  --keywords ComboMemory RegCombo _ExprInst__
+./npi_trace.sh \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -module ysyx_22050058_pht \
+  > pht_trace.csv \
+  2> pht_trace_debug.log
 ```
 
-## filelist 模式
-
-除 `-lib <kdb.elab++>` 外，主入口也保留 filelist 导入方式：
+For the full flow, save both normal messages and debug logs:
 
 ```bash
 ./trace_and_filter.sh \
-  -module ysyx_22050058_id \
-  -filelist filelist.f \
-  -top ysyx_22050058 \
-  -incdir ../../vsrc/include \
-  -keywords ysyx_22050058_regfile \
-  -output id_regfile_filtered.csv
+  -module ysyx_22050058_pht \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords ysyx_22050058_gshare \
+  -output pht_from_gshare.csv \
+  2>&1 | tee trace_debug.log
 ```
 
-当前项目推荐优先使用 `-lib` 方式，因为调试和验证主要基于 VCS 生成的 KDB。
+## Direct Tcl Debug
 
-## C++ 版本
+The Tcl scripts read configuration from `NPI_*` environment variables. This is
+useful when moving the tool to another machine and debugging Verdi/NPI directly,
+without the shell wrappers.
 
-`npi_port_trace.cpp` 是早期 C++ 实现，构建方式：
+Run `npi_port_trace.tcl` directly:
 
 ```bash
-make
+cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+
+export NPI_LIB=/tmp/npc_build/simv.daidir/kdb.elab++
+export NPI_MODULE=ysyx_22050058_pht
+export NPI_PORTS=
+export NPI_OUTFILE=pht_direct_full.csv
+export NPI_MODULE_OUTFILE=pht_direct_module_connections.csv
+
+verdi -batch -nologo -play ./npi_port_trace.tcl 2>&1 | tee pht_direct_tcl_debug.log
 ```
 
-要求 `VERDI_HOME` 已设置。构建后会生成：
+Check the outputs:
+
+```bash
+wc -l pht_direct_full.csv pht_direct_module_connections.csv
+head -n 20 pht_direct_full.csv
+head -n 20 pht_direct_module_connections.csv
+```
+
+Run `npi_find_instances.tcl` directly:
+
+```bash
+cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+
+export NPI_LIB=/tmp/npc_build/simv.daidir/kdb.elab++
+export NPI_FILTER_MODULE=ysyx_22050058_gshare
+export NPI_INSTANCE_OUTFILE=gshare_instances_direct.txt
+
+verdi -batch -nologo -play ./npi_find_instances.tcl 2>&1 | tee find_gshare_direct_debug.log
+```
+
+Check the instance list:
+
+```bash
+cat gshare_instances_direct.txt
+```
+
+When using KDB mode, `NPI_TOP` is not required because the elaborated top is
+already stored in `kdb.elab++`. `NPI_TOP` is only needed in filelist mode:
+
+```bash
+export NPI_LIB=
+export NPI_FILELIST=/path/to/filelist.f
+export NPI_TOP=tb_top
+export NPI_INCDIR=/path/to/include
+```
+
+## Per-Instance Split
+
+If `-module` has multiple instances, `trace_and_filter.sh` also writes one CSV
+per traced instance:
 
 ```text
-npi_port_trace
-npi_port_trace.sh
+<output_basename>__<inst_full_name>.csv
 ```
 
-当前 README 的主要用法以 Tcl 版本为准。除非需要对比 NPI C API 行为，一般不需要使用 C++ 版本。
-
-## 常见问题
-
-### `[ERROR] VERDI_HOME is not set.`
-
-说明尚未加载 Verdi 环境。需要先 source 对应 EDA 环境脚本，或手动设置：
+Example:
 
 ```bash
-export VERDI_HOME=/path/to/verdi
-export PATH="$VERDI_HOME/bin:$PATH"
+./trace_and_filter.sh \
+  -module S013HD1P_X32Y2D128_BW \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords S013HD1P_X32Y2D128_BW \
+  -output s013_from_self.csv
 ```
 
-### `[ERROR] no output generated`
+If 12 SRAM instances are found, 12 per-instance CSV files are generated.
 
-常见原因：
+## Validation Examples
 
-1. KDB 路径不存在或目录为空。
-2. KDB 不是由当前 RTL 生成。
-3. VCS 编译时没有加 `-kdb`。
-4. `-module` 写成了实例名，而不是 module 定义名。
-5. 目标 module 在当前 top 下没有被实例化。
-6. Verdi batch 导入失败，但 `npi_trace.sh` 默认屏蔽了 `verdi` 的 stdout/stderr。
-
-排查：
+Constant driver:
 
 ```bash
-ls -la /tmp/npc_build/simv.daidir/kdb.elab++
-grep -R "module <module_name>" /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/vsrc
-grep -R "<module_name> " /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/vsrc
+./npi_trace.sh \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -module S013HD1P_X32Y2D128_BW \
+  -ports CEN \
+  -module-out s013_cen_module.csv \
+  > s013_cen.csv
+
+grep -n 'Const:' s013_cen.csv
+grep -n 'Const:' s013_cen_module.csv
 ```
 
-必要时可临时修改 `npi_trace.sh` 中的 Verdi 调用，去掉重定向以查看详细错误：
+Same-parent module connection:
 
 ```bash
-verdi -batch -nologo -play "$TCL"
+./trace_and_filter.sh \
+  -module ysyx_22050058_gshare \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords ysyx_22050058_btb \
+  -output gshare_from_btb.csv
 ```
 
-### 主 CSV 里为什么有 `Always/Combo/RegCombo/_ExprInst__`？
+Expected rows include:
 
-这是正常现象。主 CSV 会穿过 module 边界和内部表达式继续追踪 driver/load，NPI 会把过程块、表达式实例、组合逻辑节点等作为 trace 结果返回。
-
-如果只想看端口边界连接，优先查看：
-
-```text
-<module>_module_connections.csv
+```csv
+gshare_btbop_i,driver,...ysyx_22050058_btb_u0.btb_op_o[2:0]
+gshare_btbhit_i,driver,...ysyx_22050058_btb_u0.btb_hit1_o
+gshare_btbhit_i,driver,...ysyx_22050058_btb_u0.btb_hit2_o
 ```
 
-### 为什么边界 CSV 中同一端口既有 driver 又有 load？
+## Cleanup
 
-在 `passMod=0` 模式下，NPI 可能把 module 端口本身也作为边界端点返回。这表示 trace 停在 module 边界。分析时应结合 `inst_full_name`、`port_name` 和 `module_signal_full_name` 的层次关系判断连接方向。
-
-### 表达式连接为什么在边界 CSV 中看不到内部表达式？
-
-例如：
-
-```verilog
-.raddr1(hashgshare_pc1_i[2+:`ysyx_22050058_BHRLEN] ^ phtbhr)
-```
-
-这类表达式在 KDB 中可能变成 `_ExprInst__`、`SigOp` 或 `Combo` 节点。主 CSV 会保留这些 trace 节点；边界 CSV 会过滤这类内部节点，只保留更适合查看 module 边界的信号。
-
-## 清理生成文件
-
-清理 Verdi 运行临时文件：
+Generated files can be removed with:
 
 ```bash
-rm -rf novas.conf novas.rc verdiLog
+rm -f *.csv *.err *.out *_instances.txt *_debug.log trace_debug*.log
+rm -rf novas.conf novas.rc verdiLog __pycache__
 ```
 
-清理常见 trace 输出：
-
-```bash
-rm -f \
-  *_full.csv \
-  *_module_connections.csv \
-  *_filtered.csv \
-  *_filtered_boundary.csv \
-  *_filtered_full_owner.csv \
-  *_instances.txt
-```
-
-不要删除这些工具文件：
+Do not remove these tool files:
 
 ```text
 filter_trace.py
@@ -401,10 +345,13 @@ README.md
 trace_and_filter.sh
 ```
 
-## 已知限制
+## Notes
 
-- 当前推荐路径是 `-lib <kdb.elab++>`。`-filelist/-top` 仍保留，但不是本工程优先验证路径。
-- CSV 是 NPI trace API 返回结果的文本化输出，不是严格语义化的 netlist 数据库。
-- module 边界 CSV 依赖名称规则过滤内部节点。如果未来 Verdi 版本改变节点命名，可能需要同步调整 `is_module_boundary_signal`。
-- 复杂表达式端口连接建议同时看主 CSV 和边界 CSV。主 CSV 更完整，边界 CSV 更适合看层次连接。
-- `npi_trace.sh` 默认把 Verdi batch 输出重定向到 `/dev/null`。调试导入失败时需要临时打开 Verdi 输出。
+- The recommended path is `-lib <kdb.elab++>`.
+- `-filelist/-top` is still supported but is not the primary verified path for
+  this project.
+- CSV output is a textual representation of NPI trace results, not a canonical
+  netlist database.
+- Verdi internal node names may vary across versions.
+- For complex expression port connections, inspect both the full trace and the
+  module-boundary CSV.

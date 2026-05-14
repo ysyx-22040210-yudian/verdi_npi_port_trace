@@ -18,13 +18,22 @@ import csv
 import os
 import re
 
+def log_step(message):
+    print("[filter_trace] {}".format(message), file=sys.stderr)
+
 def load_instances(instance_file):
+    log_step("loading instance list: {}".format(instance_file))
     instances = []
     with open(instance_file, 'r', encoding='utf-8') as infile:
         for line in infile:
-            inst = line.strip()
+            inst = line.strip().lstrip('\ufeff')
             if inst:
                 instances.append(inst)
+    log_step("loaded {} instances".format(len(instances)))
+    for idx, inst in enumerate(instances[:5], start=1):
+        log_step("instance[{}]={}".format(idx, inst))
+    if len(instances) > 5:
+        log_step("instance list truncated in log: {} more".format(len(instances) - 5))
     return instances
 
 def strip_instance_prefix(signal_name, inst):
@@ -89,10 +98,13 @@ def normalized_header(header):
     return header
 
 def filter_csv_by_instances(input_file, output_file, instance_file, normalize_header=False):
+    log_step("mode=instances")
     matched_count = 0
     total_count = 0
     instances = load_instances(instance_file)
 
+    log_step("opening input CSV: {}".format(input_file))
+    log_step("opening output CSV: {}".format(output_file))
     with open(input_file, 'r', encoding='utf-8') as infile, \
          open(output_file, 'w', encoding='utf-8', newline='') as outfile:
 
@@ -100,8 +112,12 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
         writer = csv.writer(outfile)
 
         header = next(reader)
+        log_step("input_header={}".format(",".join(header)))
         writer.writerow(normalized_header(header) if normalize_header else header)
         signal_idx = get_signal_column(header)
+        log_step("signal_column={} index={}".format(header[signal_idx], signal_idx))
+        if normalize_header:
+            log_step("normalizing module_signal_full_name header to signal_full_name")
 
         for row in reader:
             total_count += 1
@@ -109,11 +125,13 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
                 writer.writerow(row)
                 matched_count += 1
 
-    print("Loaded {} filter instances".format(len(instances)))
-    print("Filtered {} out of {} rows".format(matched_count, total_count))
-    print("Output written to: {}".format(output_file))
+    log_step("filtered_rows={} total_rows={}".format(matched_count, total_count))
+    log_step("output_written={}".format(output_file))
 
 def merge_csvs(output_file, input_files):
+    log_step("mode=merge")
+    log_step("merge_output={}".format(output_file))
+    log_step("merge_inputs={}".format(",".join(input_files)))
     header = None
     seen = set()
     written = 0
@@ -121,10 +139,12 @@ def merge_csvs(output_file, input_files):
     with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
         writer = csv.writer(outfile)
         for input_file in input_files:
+            log_step("reading merge input: {}".format(input_file))
             with open(input_file, 'r', encoding='utf-8') as infile:
                 reader = csv.reader(infile)
                 input_header = next(reader)
                 input_header = normalized_header(input_header)
+                log_step("merge_input_header={}".format(",".join(input_header)))
                 if header is None:
                     header = input_header
                     writer.writerow(header)
@@ -139,7 +159,7 @@ def merge_csvs(output_file, input_files):
                     writer.writerow(row)
                     written += 1
 
-    print("Merged {} rows into {}".format(written, output_file))
+    log_step("merged_rows={} output={}".format(written, output_file))
 
 def safe_filename(text):
     text = re.sub(r'[^A-Za-z0-9_.-]+', '_', text)
@@ -147,6 +167,7 @@ def safe_filename(text):
     return text or "unnamed"
 
 def split_csv_by_trace_instance(input_file):
+    log_step("mode=split-by-trace-instance input={}".format(input_file))
     with open(input_file, 'r', encoding='utf-8') as infile:
         reader = csv.reader(infile)
         header = next(reader)
@@ -160,7 +181,7 @@ def split_csv_by_trace_instance(input_file):
             rows_by_inst.setdefault(inst, []).append(row)
 
     if len(rows_by_inst) <= 1:
-        print("Split output: skipped, {} trace instance found".format(len(rows_by_inst)))
+        log_step("split_skipped trace_instance_count={}".format(len(rows_by_inst)))
         return []
 
     base, ext = os.path.splitext(input_file)
@@ -170,26 +191,31 @@ def split_csv_by_trace_instance(input_file):
     outputs = []
     for inst in sorted(rows_by_inst):
         out_file = "{}__{}{}".format(base, safe_filename(inst), ext)
+        log_step("writing split output: {} rows={} inst={}".format(
+            out_file, len(rows_by_inst[inst]), inst))
         with open(out_file, 'w', encoding='utf-8', newline='') as outfile:
             writer = csv.writer(outfile)
             writer.writerow(header)
             writer.writerows(rows_by_inst[inst])
         outputs.append(out_file)
 
-    print("Split output: wrote {} per-instance CSV files".format(len(outputs)))
-    for out_file in outputs:
-        print("  {}".format(out_file))
+    log_step("split_outputs={}".format(len(outputs)))
     return outputs
 
 def filter_csv_by_keywords(input_file, output_file, keywords):
+    log_step("mode=keywords")
+    log_step("keywords={}".format(",".join(keywords)))
     matched_count = 0
     total_count = 0
 
+    log_step("opening input CSV: {}".format(input_file))
+    log_step("opening output CSV: {}".format(output_file))
     with open(input_file, 'r', encoding='utf-8') as infile, \
          open(output_file, 'w', encoding='utf-8', newline='') as outfile:
         reader = csv.reader(infile)
         writer = csv.writer(outfile)
         header = next(reader)
+        log_step("input_header={}".format(",".join(header)))
         writer.writerow(header)
         for row in reader:
             total_count += 1
@@ -197,8 +223,8 @@ def filter_csv_by_keywords(input_file, output_file, keywords):
                 writer.writerow(row)
                 matched_count += 1
 
-    print("Filtered {} out of {} rows".format(matched_count, total_count))
-    print("Output written to: {}".format(output_file))
+    log_step("filtered_rows={} total_rows={}".format(matched_count, total_count))
+    log_step("output_written={}".format(output_file))
 
 def main():
     if len(sys.argv) < 4:
@@ -210,8 +236,9 @@ def main():
     input_file = sys.argv[1]
     output_file = sys.argv[2]
 
-    print("Input file: {}".format(input_file))
-    print("Output file: {}".format(output_file))
+    log_step("argv={}".format(" ".join(sys.argv)))
+    log_step("input_file={}".format(input_file))
+    log_step("output_file={}".format(output_file))
 
     try:
         split_by_trace_instance = False
@@ -219,25 +246,24 @@ def main():
         if "--split-by-trace-instance" in args:
             split_by_trace_instance = True
             args.remove("--split-by-trace-instance")
+            log_step("option split_by_trace_instance=true")
 
         normalize_header = False
         if "--normalize-signal-column" in args:
             normalize_header = True
             args.remove("--normalize-signal-column")
+            log_step("option normalize_signal_column=true")
 
         if args[0] == "--instances" and len(args) == 2:
             instance_file = args[1]
-            print("Instance file: {}".format(instance_file))
-            print()
+            log_step("instance_file={}".format(instance_file))
             filter_csv_by_instances(input_file, output_file, instance_file, normalize_header)
         elif args[0] == "--merge" and len(args) >= 2:
-            print("Merge inputs: {}".format(args[1:]))
-            print()
+            log_step("merge_inputs={}".format(args[1:]))
             merge_csvs(output_file, args[1:])
         elif args[0] == "--keywords" and len(args) >= 2:
             keywords = args[1:]
-            print("Keywords: {}".format(keywords))
-            print()
+            log_step("keywords={}".format(keywords))
             filter_csv_by_keywords(input_file, output_file, keywords)
         else:
             print("Error: expected --instances <instances.txt> or --keywords <keyword...>")
@@ -246,10 +272,10 @@ def main():
         if split_by_trace_instance:
             split_csv_by_trace_instance(output_file)
     except FileNotFoundError:
-        print("Error: Input file '{}' not found".format(input_file))
+        log_step("ERROR: input file '{}' not found".format(input_file))
         sys.exit(1)
     except Exception as e:
-        print("Error: {}".format(e))
+        log_step("ERROR: {}".format(e))
         sys.exit(1)
 
 if __name__ == "__main__":

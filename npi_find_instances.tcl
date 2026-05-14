@@ -3,9 +3,18 @@
 # Find all instances whose definition name matches NPI_FILTER_MODULE and
 # write their hierarchical paths to NPI_INSTANCE_OUTFILE, one path per line.
 
+proc log_step {msg} {
+    puts stderr "\[npi_find_instances\] $msg"
+    flush stderr
+}
+
+log_step "start"
+
 if { [info exists env(VERDI_HOME)] } {
+    log_step "source NPI from VERDI_HOME=$env(VERDI_HOME)"
     source $env(VERDI_HOME)/share/NPI/L1/TCL/npi_L1.tcl
 } elseif { [info exists env(NPIL1_PATH)] } {
+    log_step "source NPI from NPIL1_PATH=$env(NPIL1_PATH)"
     source $env(NPIL1_PATH)/npi_L1.tcl
 } else {
     puts stderr "ERROR: VERDI_HOME or NPIL1_PATH must be set"
@@ -24,6 +33,7 @@ if { ![info exists env(NPI_INSTANCE_OUTFILE)] || $env(NPI_INSTANCE_OUTFILE) eq "
 
 set use_lib [expr { [info exists env(NPI_LIB)] && $env(NPI_LIB) ne "" }]
 if { $use_lib } {
+    log_step "import design by KDB: $env(NPI_LIB)"
     if { [catch { debImport -elab $env(NPI_LIB) } e] } {
         puts stderr "ERROR: debImport -elab failed: $e"
         debExit
@@ -36,13 +46,16 @@ if { $use_lib } {
     }
     set incdir [expr { [info exists env(NPI_INCDIR)] ? $env(NPI_INCDIR) : "" }]
     if { $incdir ne "" } {
+        log_step "import design by filelist=$env(NPI_FILELIST) top=$env(NPI_TOP) incdir=$incdir"
         debImport -f $env(NPI_FILELIST) +incdir+$incdir -top $env(NPI_TOP) -sv
     } else {
+        log_step "import design by filelist=$env(NPI_FILELIST) top=$env(NPI_TOP)"
         debImport -f $env(NPI_FILELIST) -top $env(NPI_TOP) -sv
     }
 }
 
 set hdlList {}
+log_step "find instances for module definition: $env(NPI_FILTER_MODULE)"
 if { [catch {
     ::npi_L1::npi_find_inst_with_def_wildcard "" $env(NPI_FILTER_MODULE) hdlList
 } e] } {
@@ -50,7 +63,10 @@ if { [catch {
     debExit
 }
 
+log_step "found instance handles: [llength $hdlList]"
+log_step "write instance list: $env(NPI_INSTANCE_OUTFILE)"
 set outfh [open $env(NPI_INSTANCE_OUTFILE) w]
+set written 0
 foreach ih $hdlList {
     set inst_path ""
     if { [catch {
@@ -58,8 +74,11 @@ foreach ih $hdlList {
         set inst_path [string trim [lindex [split $info ","] 1]]
     }] } {}
     if { $inst_path ne "" } {
+        log_step "instance: $inst_path"
         puts $outfh $inst_path
+        incr written
     }
 }
 close $outfh
+log_step "done written_instances=$written"
 debExit

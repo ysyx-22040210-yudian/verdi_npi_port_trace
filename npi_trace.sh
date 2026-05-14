@@ -14,6 +14,10 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TCL="$SCRIPT_DIR/npi_port_trace.tcl"
 
+log_step() {
+    echo "[npi_trace] $*" >&2
+}
+
 if [ -z "$VERDI_HOME" ]; then
     echo "[ERROR] VERDI_HOME is not set." >&2
     exit 1
@@ -59,6 +63,22 @@ if [ -z "$MODULE_OUT" ]; then
     MODULE_OUT="${MODULE}_module_connections.csv"
 fi
 
+log_step "script_dir=$SCRIPT_DIR"
+log_step "tcl=$TCL"
+log_step "module=$MODULE"
+if [ -n "$LIB" ]; then
+    log_step "load_mode=lib lib=$LIB"
+else
+    log_step "load_mode=filelist filelist=$FILELIST top=$TOP incdir=$INCDIR"
+fi
+if [ -n "$PORTS" ]; then
+    log_step "port_filter=$PORTS"
+else
+    log_step "port_filter=<all ports>"
+fi
+log_step "temp_full_trace=$TMPOUT"
+log_step "module_boundary_trace=$MODULE_OUT"
+
 export NPI_FILELIST="$FILELIST"
 export NPI_TOP="$TOP"
 export NPI_MODULE="$MODULE"
@@ -69,7 +89,8 @@ export NPI_LIB="$LIB"
 export NPI_OUTFILE="$TMPOUT"
 export NPI_MODULE_OUTFILE="$MODULE_OUT"
 
-verdi -batch -nologo -play "$TCL" >/dev/null 2>&1
+log_step "running Verdi batch trace"
+verdi -batch -nologo -play "$TCL" 1>&2
 
 if [ ! -s "$TMPOUT" ]; then
     echo "[ERROR] no output generated" >&2
@@ -77,5 +98,14 @@ if [ ! -s "$TMPOUT" ]; then
     exit 1
 fi
 
+FULL_LINES=$(wc -l < "$TMPOUT")
+if [ -s "$MODULE_OUT" ]; then
+    MODULE_LINES=$(wc -l < "$MODULE_OUT")
+else
+    MODULE_LINES=0
+fi
+log_step "trace_done full_trace_lines=$FULL_LINES module_boundary_lines=$MODULE_LINES"
+log_step "writing full trace CSV to stdout"
 cat "$TMPOUT"
 rm -f "$TMPOUT"
+log_step "removed temp_full_trace=$TMPOUT"

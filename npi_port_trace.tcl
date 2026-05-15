@@ -20,6 +20,36 @@ proc log_step {msg} {
     flush stderr
 }
 
+proc hdl_info_to_path {info} {
+    set info [string trim $info]
+    if { $info eq "" } {
+        return ""
+    }
+
+    set fields [split $info ","]
+    if { [llength $fields] >= 2 } {
+        return [string trim [lindex $fields 1]]
+    }
+
+    return ""
+}
+
+proc get_instance_path {hdl} {
+    foreach api {
+        ::npi_L1::npi_ut_get_hdl_info
+        ::npi_L1::npi_nl_ut_get_hdl_info
+    } {
+        set info ""
+        if { ![catch { set info [$api $hdl] } err] } {
+            set path [hdl_info_to_path $info]
+            if { $path ne "" } {
+                return $path
+            }
+        }
+    }
+    return ""
+}
+
 log_step "start"
 
 if { [info exists env(VERDI_HOME)] } {
@@ -749,20 +779,26 @@ if { $module_outfh ne "" } {
     puts $module_outfh "inst_full_name,port_name,role,module_signal_full_name"
 }
 
+set processed_instances 0
+set skipped_instances 0
+set seen_paths {}
 foreach ih $hdlList {
     # Get instance full path from npi_ut_get_hdl_info
     # format: "npiNlHierInst, full.path, (null)" — but this returns empty for inst handles
     # Use npi_nl_ut_get_hdl_info instead
-    set inst_path ""
-    if { [catch {
-        set info [::npi_L1::npi_ut_get_hdl_info $ih]
-        set inst_path [string trim [lindex [split $info ","] 1]]
-    }] } {}
+    set inst_path [get_instance_path $ih]
 
     if { $inst_path eq "" } {
         puts stderr "WARNING: could not get path for instance handle $ih, skipping"
+        incr skipped_instances
         continue
     }
+
+    if { [dict exists $seen_paths $inst_path] } {
+        log_step "duplicate target instance skipped: $inst_path"
+        continue
+    }
+    dict set seen_paths $inst_path 1
 
     # Derive parent path and instance name
     set parts [split $inst_path "."]
@@ -770,7 +806,9 @@ foreach ih $hdlList {
     set parent_path [join [lrange $parts 0 end-1] "."]
 
     process_instance $inst_path $parent_path $instname $port_filter $outfh $module_outfh
+    incr processed_instances
 }
+log_step "processed_target_instances=$processed_instances skipped_handles=$skipped_instances"
 
 if { $outfh ne "stdout" } { close $outfh }
 if { $module_outfh ne "" } { close $module_outfh }

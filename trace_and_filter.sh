@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./trace_and_filter.sh -module <target_module> -lib <kdb.elab++> \
-#                         -keywords <filter_module> \
+#                         -keywords <filter_module[,filter_module...]> \
 #                         [-output <output.csv>] [-ports <port1,port2,...>]
 #
 # Example:
@@ -70,12 +70,7 @@ if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
 fi
 
 if [ -z "$KEYWORDS" ]; then
-    echo "[ERROR] -keywords parameter is required; pass the module name whose instances should own driver/load signals." >&2
-    exit 1
-fi
-
-if [[ "$KEYWORDS" == *","* ]]; then
-    echo "[ERROR] -keywords now expects one module name, not a comma-separated keyword list." >&2
+    echo "[ERROR] -keywords parameter is required; pass one or more module names whose instances should own driver/load signals." >&2
     exit 1
 fi
 
@@ -87,13 +82,17 @@ fi
 # Full trace output file (in current directory)
 FULL_TRACE="${MODULE}_full.csv"
 MODULE_TRACE="${MODULE}_module_connections.csv"
-INSTANCE_LIST="${MODULE}_${KEYWORDS}_instances.txt"
+KEYWORDS_SAFE="$(printf '%s' "$KEYWORDS" | sed 's/[^A-Za-z0-9_.-][^A-Za-z0-9_.-]*/_/g; s/^[._]*//; s/[._]*$//')"
+if [ -z "$KEYWORDS_SAFE" ]; then
+    KEYWORDS_SAFE="filter_modules"
+fi
+INSTANCE_LIST="${MODULE}_${KEYWORDS_SAFE}_instances.txt"
 BOUNDARY_FILTERED="${OUTPUT%.csv}_boundary.csv"
 FULL_FILTERED="${OUTPUT%.csv}_full_owner.csv"
 
 log_step "script_dir=$SCRIPT_DIR"
 log_step "target_module=$MODULE"
-log_step "filter_module=$KEYWORDS"
+log_step "filter_modules=$KEYWORDS"
 log_step "load_mode=lib lib=$LIB"
 if [ -n "$PORTS" ]; then
     log_step "port_filter=$PORTS"
@@ -137,13 +136,14 @@ log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$M
 log_step "step 2/5: find instances of filter module"
 export NPI_LIB="$LIB"
 export NPI_FILTER_MODULE="$KEYWORDS"
+export NPI_FILTER_MODULES="$KEYWORDS"
 export NPI_INSTANCE_OUTFILE="$INSTANCE_LIST"
 
 log_step "command: verdi -batch -nologo -play $FIND_INST_TCL"
 verdi -batch -nologo -play "$FIND_INST_TCL" 1>&2
 
 if [ ! -s "$INSTANCE_LIST" ]; then
-    echo "[ERROR] no instances found for filter module: $KEYWORDS" >&2
+    echo "[ERROR] no instances found for filter modules: $KEYWORDS" >&2
     rm -f "$INSTANCE_LIST"
     exit 1
 fi

@@ -429,6 +429,7 @@ def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
     env = os.environ.copy()
     env["NPI_LIB"] = args.lib
     env["NPI_FILTER_MODULE"] = args.keywords
+    env["NPI_FILTER_MODULES"] = args.keywords
     env["NPI_INSTANCE_OUTFILE"] = str(out_file)
 
     run_checked(
@@ -439,7 +440,7 @@ def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
 
     instances = load_instances(out_file)
     if not instances:
-        raise RuntimeError(f"no instances found for filter module: {args.keywords}")
+        raise RuntimeError(f"no instances found for filter modules: {args.keywords}")
     return instances, out_file
 
 
@@ -606,7 +607,11 @@ def parse_args():
     )
     parser.add_argument("-template", required=True, help="input XLSX template")
     parser.add_argument("-output", required=True, help="output annotated XLSX")
-    parser.add_argument("-keywords", required=True, help="filter module definition name")
+    parser.add_argument(
+        "-keywords",
+        required=True,
+        help="comma-separated filter module definition names",
+    )
     parser.add_argument(
         "-module",
         default="",
@@ -652,8 +657,8 @@ def parse_args():
         parser.error("Python 3.8 or newer is required.")
     if args.filelist or args.top or args.incdir:
         parser.error("KDB input is mandatory. Do not use -filelist, -top, or -incdir; use -lib <kdb.elab++>.")
-    if "," in args.keywords:
-        parser.error("-keywords expects one module definition name.")
+    if not split_csv_arg(args.keywords):
+        parser.error("-keywords expects one or more module definition names.")
     if args.subsystem_level < 0:
         parser.error("-subsystem-level must be 0 or a positive integer.")
     return args

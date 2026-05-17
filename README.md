@@ -79,14 +79,21 @@ ysyx_22050058_pht ysyx_22050058_pht_u0 (...);
 
 脚本内部通过 `npi_find_inst_with_def_wildcard` 查找所有匹配 module 定义名的实例。
 
-`-keywords` 是历史参数名，现在含义是 **一个过滤 module 定义名**。它不是普通
-文本关键字列表，也不是 CSV 里的字符串匹配项。工具会查找 `-keywords` 指定
-module 的所有实例，并判断目标端口的 driver/load 是否连接到这些实例。
+`-keywords` 是历史参数名，现在含义是 **过滤 module 定义名列表**。它不是普通
+文本关键字列表，也不是 CSV 里的字符串匹配项。可以传一个 module，也可以传逗号
+分隔的多个 module：
+
+```bash
+-keywords ysyx_22050058_gshare,ysyx_22050058_btb
+```
+
+工具会查找 `-keywords` 指定的所有 module 实例，并判断目标端口的 driver/load
+是否连接到这些实例中的任意一个。
 
 ## CSV 过滤流程
 
 示例：追踪 `ysyx_22050058_pht` 的端口，并保留 driver/load 属于
-`ysyx_22050058_gshare` 实例的记录：
+`ysyx_22050058_gshare` 或 `ysyx_22050058_btb` 实例的记录：
 
 ```bash
 cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
@@ -94,8 +101,8 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 ./trace_and_filter.sh \
   -module ysyx_22050058_pht \
   -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
-  -keywords ysyx_22050058_gshare \
-  -output pht_from_gshare.csv
+  -keywords ysyx_22050058_gshare,ysyx_22050058_btb \
+  -output pht_from_gshare_or_btb.csv
 ```
 
 输出文件：
@@ -103,10 +110,10 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 ```text
 ysyx_22050058_pht_full.csv
 ysyx_22050058_pht_module_connections.csv
-ysyx_22050058_pht_ysyx_22050058_gshare_instances.txt
-pht_from_gshare_boundary.csv
-pht_from_gshare_full_owner.csv
-pht_from_gshare.csv
+ysyx_22050058_pht_ysyx_22050058_gshare_ysyx_22050058_btb_instances.txt
+pht_from_gshare_or_btb_boundary.csv
+pht_from_gshare_or_btb_full_owner.csv
+pht_from_gshare_or_btb.csv
 ```
 
 如果只追踪部分端口，使用 `-ports`：
@@ -165,7 +172,7 @@ pht_from_gshare.csv
 交叉单元格的常见取值：
 
 - `yes`：该端口至少有一个 driver/load 端点连接到 `-keywords` module 的实例。
-- `no`：没有找到连接到 `-keywords` module 实例的 driver/load 端点。
+- `no`：没有找到连接到任意 `-keywords` module 实例的 driver/load 端点。
 - `driver=Const:<value>` 或 `load=Const:<value>`：发现常数 driver/load。
 - `driver=NO_DRIVER` 或 `load=NO_LOAD`：发现悬空端点。
 - `no; NO_TRACE`：目标 module 中不存在该端口，或 NPI 未返回该端口 trace。
@@ -309,7 +316,7 @@ rm -f SkidPeer_full.csv SkidPeer_module_connections.csv SkidPeer_instances.txt
   -template multi_module_trace_template.xlsx \
   -output multi_module_annotated.xlsx \
   -lib "$(pwd)/skidbuffer_param_build/simv.daidir/kdb.elab++" \
-  -keywords SkidPeer \
+  -keywords SkidPeer,skidbuffer \
   -module skidbuffer,SkidPeer \
   -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data,clk,rst,src_valid,src_ready,src_data,dst_valid,dst_ready,dst_data \
   -subsystem-level 2 \
@@ -340,6 +347,12 @@ top.subsys0.u_peer_a: DW=32'sd8, ID=32'sd9
 top.subsys0.u_peer_b: DW=32'sd13, ID=32'sd16
 ```
 
+这个测试同时验证了：
+
+- `-module skidbuffer,SkidPeer` 支持多个目标 module。
+- `-keywords SkidPeer,skidbuffer` 支持多个过滤 module。
+- 任意一个过滤 module 的实例连接到目标端口时，交叉单元格都会写 `yes`。
+
 ## 直接 Tcl 调试
 
 这些 Tcl 脚本都通过环境变量读取参数，便于单独调试。
@@ -362,7 +375,7 @@ verdi -batch -nologo -play ./npi_port_trace.tcl 2>&1 | tee pht_direct_tcl_debug.
 
 ```bash
 export NPI_LIB=/tmp/npc_build/simv.daidir/kdb.elab++
-export NPI_FILTER_MODULE=ysyx_22050058_gshare
+export NPI_FILTER_MODULES=ysyx_22050058_gshare,ysyx_22050058_btb
 export NPI_INSTANCE_OUTFILE=gshare_instances_direct.txt
 
 verdi -batch -nologo -play ./npi_find_instances.tcl 2>&1 | tee find_gshare_direct_debug.log

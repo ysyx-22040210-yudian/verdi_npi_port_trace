@@ -1,7 +1,8 @@
 # npi_find_instances.tcl
 #
-# Find all instances whose definition name matches NPI_FILTER_MODULE and
-# write their hierarchical paths to NPI_INSTANCE_OUTFILE, one path per line.
+# Find all instances whose definition name matches NPI_FILTER_MODULES
+# or NPI_FILTER_MODULE and write their hierarchical paths to
+# NPI_INSTANCE_OUTFILE, one path per line.
 
 proc log_step {msg} {
     puts stderr "\[npi_find_instances\] $msg"
@@ -51,11 +52,6 @@ if { [info exists env(VERDI_HOME)] } {
     exit 1
 }
 
-if { ![info exists env(NPI_FILTER_MODULE)] || $env(NPI_FILTER_MODULE) eq "" } {
-    puts stderr "ERROR: environment variable NPI_FILTER_MODULE is not set"
-    debExit
-}
-
 if { ![info exists env(NPI_INSTANCE_OUTFILE)] || $env(NPI_INSTANCE_OUTFILE) eq "" } {
     puts stderr "ERROR: environment variable NPI_INSTANCE_OUTFILE is not set"
     debExit
@@ -76,43 +72,69 @@ if { [file isdirectory $npi_lib] && [llength [glob -nocomplain -directory $npi_l
     debExit
 }
 
+set filter_modules_text ""
+if { [info exists env(NPI_FILTER_MODULES)] && $env(NPI_FILTER_MODULES) ne "" } {
+    set filter_modules_text $env(NPI_FILTER_MODULES)
+} elseif { [info exists env(NPI_FILTER_MODULE)] && $env(NPI_FILTER_MODULE) ne "" } {
+    set filter_modules_text $env(NPI_FILTER_MODULE)
+}
+
+set filter_modules {}
+foreach item [split $filter_modules_text ","] {
+    set item [string trim $item]
+    if { $item ne "" } {
+        lappend filter_modules $item
+    }
+}
+
+if { [llength $filter_modules] == 0 } {
+    puts stderr "ERROR: environment variable NPI_FILTER_MODULES or NPI_FILTER_MODULE is not set"
+    debExit
+}
+
 log_step "import design by KDB: $npi_lib"
 if { [catch { debImport -elab $npi_lib } e] } {
     puts stderr "ERROR: debImport -elab failed: $e"
     debExit
 }
 
-set hdlList {}
-log_step "find instances for module definition: $env(NPI_FILTER_MODULE)"
-if { [catch {
-    ::npi_L1::npi_find_inst_with_def_wildcard "" $env(NPI_FILTER_MODULE) hdlList
-} e] } {
-    puts stderr "ERROR: npi_find_inst_with_def_wildcard failed: $e"
-    debExit
-}
-
-log_step "found instance handles: [llength $hdlList]"
 log_step "write instance list: $env(NPI_INSTANCE_OUTFILE)"
 set outfh [open $env(NPI_INSTANCE_OUTFILE) w]
+set total_handles 0
 set written 0
 set skipped 0
 set seen_paths {}
-foreach ih $hdlList {
-    set inst_path [get_instance_path $ih]
-    if { $inst_path ne "" } {
-        if { [dict exists $seen_paths $inst_path] } {
-            log_step "duplicate instance skipped: $inst_path"
-            continue
+
+foreach filter_module $filter_modules {
+    set hdlList {}
+    log_step "find instances for module definition: $filter_module"
+    if { [catch {
+        ::npi_L1::npi_find_inst_with_def_wildcard "" $filter_module hdlList
+    } e] } {
+        puts stderr "ERROR: npi_find_inst_with_def_wildcard failed for $filter_module: $e"
+        close $outfh
+        debExit
+    }
+
+    log_step "module=$filter_module found_instance_handles=[llength $hdlList]"
+    incr total_handles [llength $hdlList]
+    foreach ih $hdlList {
+        set inst_path [get_instance_path $ih]
+        if { $inst_path ne "" } {
+            if { [dict exists $seen_paths $inst_path] } {
+                log_step "duplicate instance skipped: $inst_path"
+                continue
+            }
+            dict set seen_paths $inst_path 1
+            log_step "instance module=$filter_module path=$inst_path"
+            puts $outfh $inst_path
+            incr written
+        } else {
+            incr skipped
+            puts stderr "WARNING: could not resolve instance path for handle $ih module=$filter_module"
         }
-        dict set seen_paths $inst_path 1
-        log_step "instance: $inst_path"
-        puts $outfh $inst_path
-        incr written
-    } else {
-        incr skipped
-        puts stderr "WARNING: could not resolve instance path for handle $ih"
     }
 }
 close $outfh
-log_step "done handle_count=[llength $hdlList] written_instances=$written skipped_handles=$skipped"
+log_step "done module_count=[llength $filter_modules] handle_count=$total_handles written_instances=$written skipped_handles=$skipped"
 debExit

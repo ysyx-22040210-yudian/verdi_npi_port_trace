@@ -3,8 +3,6 @@
 #
 # Usage:
 #   ./npi_trace.sh -module <target_module> -lib <kdb.elab++> [-ports <port1,port2,...>]
-#   ./npi_trace.sh -module <target_module> -filelist <filelist.f> -top <top_module> \
-#                  [-incdir <include_dir>] [-ports <port1,port2,...>]
 #                  [-module-out <module_connections.csv>]
 #
 # Note: -srcfile parameter is now optional (deprecated). Port direction is obtained via NPI API.
@@ -47,18 +45,33 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> [-srcfile <src.v>] [-lib <work.lib++>] [-filelist <f> -top <top>] [-incdir <dir>] [-ports <p1,p2,...>] [-module-out <csv>]" >&2
-    echo "  -lib and (-filelist + -top) are mutually exclusive ways to load the design." >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-module-out <csv>]" >&2
     echo "  -srcfile is optional (deprecated, port direction is now obtained via NPI API)." >&2
     echo "  -module-out writes driver/load entries that stop at module boundaries." >&2
     exit 1
 fi
-if [ -z "$LIB" ] && { [ -z "$FILELIST" ] || [ -z "$TOP" ]; }; then
-    echo "[ERROR] Either -lib <work.lib++> or both -filelist and -top must be provided." >&2
+if [ -n "$FILELIST" ] || [ -n "$TOP" ] || [ -n "$INCDIR" ]; then
+    echo "[ERROR] KDB input is mandatory. Do not use -filelist, -top, or -incdir; use -lib <kdb.elab++>." >&2
+    exit 1
+fi
+if [ -z "$LIB" ]; then
+    echo "[ERROR] -lib <kdb.elab++> is required. Filelist import is not supported." >&2
+    exit 1
+fi
+case "$LIB" in
+    /*) ;;
+    *) LIB="$PWD/$LIB" ;;
+esac
+if [ ! -e "$LIB" ]; then
+    echo "[ERROR] KDB path does not exist: $LIB" >&2
+    exit 1
+fi
+if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
+    echo "[ERROR] KDB path is empty: $LIB" >&2
     exit 1
 fi
 
-TMPOUT="$(mktemp /tmp/npi_trace_out.XXXXXX.csv)"
+TMPOUT="$(mktemp "$PWD/npi_trace_out.XXXXXX.csv")"
 if [ -z "$MODULE_OUT" ]; then
     MODULE_OUT="${MODULE}_module_connections.csv"
 fi
@@ -66,11 +79,7 @@ fi
 log_step "script_dir=$SCRIPT_DIR"
 log_step "tcl=$TCL"
 log_step "module=$MODULE"
-if [ -n "$LIB" ]; then
-    log_step "load_mode=lib lib=$LIB"
-else
-    log_step "load_mode=filelist filelist=$FILELIST top=$TOP incdir=$INCDIR"
-fi
+log_step "load_mode=lib lib=$LIB"
 if [ -n "$PORTS" ]; then
     log_step "port_filter=$PORTS"
 else
@@ -79,11 +88,8 @@ fi
 log_step "temp_full_trace=$TMPOUT"
 log_step "module_boundary_trace=$MODULE_OUT"
 
-export NPI_FILELIST="$FILELIST"
-export NPI_TOP="$TOP"
 export NPI_MODULE="$MODULE"
 export NPI_SRCFILE="$SRCFILE"
-export NPI_INCDIR="$INCDIR"
 export NPI_PORTS="$PORTS"
 export NPI_LIB="$LIB"
 export NPI_OUTFILE="$TMPOUT"

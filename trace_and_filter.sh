@@ -47,8 +47,25 @@ if [ -z "$MODULE" ]; then
     exit 1
 fi
 
-if [ -z "$LIB" ] && { [ -z "$FILELIST" ] || [ -z "$TOP" ]; }; then
-    echo "[ERROR] Either -lib or both -filelist and -top must be provided." >&2
+if [ -n "$FILELIST" ] || [ -n "$TOP" ] || [ -n "$INCDIR" ]; then
+    echo "[ERROR] KDB input is mandatory. Do not use -filelist, -top, or -incdir; use -lib <kdb.elab++>." >&2
+    exit 1
+fi
+
+if [ -z "$LIB" ]; then
+    echo "[ERROR] -lib <kdb.elab++> is required. Filelist import is not supported." >&2
+    exit 1
+fi
+case "$LIB" in
+    /*) ;;
+    *) LIB="$PWD/$LIB" ;;
+esac
+if [ ! -e "$LIB" ]; then
+    echo "[ERROR] KDB path does not exist: $LIB" >&2
+    exit 1
+fi
+if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
+    echo "[ERROR] KDB path is empty: $LIB" >&2
     exit 1
 fi
 
@@ -77,11 +94,7 @@ FULL_FILTERED="${OUTPUT%.csv}_full_owner.csv"
 log_step "script_dir=$SCRIPT_DIR"
 log_step "target_module=$MODULE"
 log_step "filter_module=$KEYWORDS"
-if [ -n "$LIB" ]; then
-    log_step "load_mode=lib lib=$LIB"
-else
-    log_step "load_mode=filelist filelist=$FILELIST top=$TOP incdir=$INCDIR"
-fi
+log_step "load_mode=lib lib=$LIB"
 if [ -n "$PORTS" ]; then
     log_step "port_filter=$PORTS"
 else
@@ -96,18 +109,7 @@ log_step "final_output=$OUTPUT"
 
 # Build npi_trace.sh command
 TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
-if [ -n "$LIB" ]; then
-    TRACE_CMD="$TRACE_CMD -lib $LIB"
-fi
-if [ -n "$FILELIST" ]; then
-    TRACE_CMD="$TRACE_CMD -filelist $FILELIST"
-fi
-if [ -n "$TOP" ]; then
-    TRACE_CMD="$TRACE_CMD -top $TOP"
-fi
-if [ -n "$INCDIR" ]; then
-    TRACE_CMD="$TRACE_CMD -incdir $INCDIR"
-fi
+TRACE_CMD="$TRACE_CMD -lib $LIB"
 if [ -n "$PORTS" ]; then
     TRACE_CMD="$TRACE_CMD -ports $PORTS"
 fi
@@ -133,9 +135,6 @@ MODULE_LINES=$(wc -l < "$MODULE_TRACE")
 log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$MODULE_LINES"
 
 log_step "step 2/5: find instances of filter module"
-export NPI_FILELIST="$FILELIST"
-export NPI_TOP="$TOP"
-export NPI_INCDIR="$INCDIR"
 export NPI_LIB="$LIB"
 export NPI_FILTER_MODULE="$KEYWORDS"
 export NPI_INSTANCE_OUTFILE="$INSTANCE_LIST"

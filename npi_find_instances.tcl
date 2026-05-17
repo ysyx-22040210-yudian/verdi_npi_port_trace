@@ -61,27 +61,25 @@ if { ![info exists env(NPI_INSTANCE_OUTFILE)] || $env(NPI_INSTANCE_OUTFILE) eq "
     debExit
 }
 
-set use_lib [expr { [info exists env(NPI_LIB)] && $env(NPI_LIB) ne "" }]
-if { $use_lib } {
-    log_step "import design by KDB: $env(NPI_LIB)"
-    if { [catch { debImport -elab $env(NPI_LIB) } e] } {
-        puts stderr "ERROR: debImport -elab failed: $e"
-        debExit
-    }
-} else {
-    if { ![info exists env(NPI_FILELIST)] || $env(NPI_FILELIST) eq "" ||
-         ![info exists env(NPI_TOP)] || $env(NPI_TOP) eq "" } {
-        puts stderr "ERROR: NPI_FILELIST and NPI_TOP are required when NPI_LIB is not set"
-        debExit
-    }
-    set incdir [expr { [info exists env(NPI_INCDIR)] ? $env(NPI_INCDIR) : "" }]
-    if { $incdir ne "" } {
-        log_step "import design by filelist=$env(NPI_FILELIST) top=$env(NPI_TOP) incdir=$incdir"
-        debImport -f $env(NPI_FILELIST) +incdir+$incdir -top $env(NPI_TOP) -sv
-    } else {
-        log_step "import design by filelist=$env(NPI_FILELIST) top=$env(NPI_TOP)"
-        debImport -f $env(NPI_FILELIST) -top $env(NPI_TOP) -sv
-    }
+if { ![info exists env(NPI_LIB)] || $env(NPI_LIB) eq "" } {
+    puts stderr "ERROR: environment variable NPI_LIB is required. Filelist import is not supported."
+    debExit
+}
+
+set npi_lib [file normalize $env(NPI_LIB)]
+if { ![file exists $npi_lib] } {
+    puts stderr "ERROR: KDB path does not exist: $npi_lib"
+    debExit
+}
+if { [file isdirectory $npi_lib] && [llength [glob -nocomplain -directory $npi_lib *]] == 0 } {
+    puts stderr "ERROR: KDB path is empty: $npi_lib"
+    debExit
+}
+
+log_step "import design by KDB: $npi_lib"
+if { [catch { debImport -elab $npi_lib } e] } {
+    puts stderr "ERROR: debImport -elab failed: $e"
+    debExit
 }
 
 set hdlList {}

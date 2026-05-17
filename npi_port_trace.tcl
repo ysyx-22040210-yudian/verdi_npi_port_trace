@@ -7,9 +7,7 @@
 #
 # Usage (via npi_trace.sh):
 #   verdi -batch -nologo -play npi_port_trace.tcl \
-#         +tclarg_filelist <filelist.f> \
-#         +tclarg_incdir   <include_dir> \
-#         +tclarg_top      <top_module> \
+#         with NPI_LIB=<kdb.elab++> \
 #         +tclarg_module   <target_module> \
 #         +tclarg_srcfile  <module_source.v>
 #
@@ -65,13 +63,14 @@ if { [info exists env(VERDI_HOME)] } {
 
 # -----------------------------------------------------------------------
 # Required arguments — read from environment variables
-# -lib mode: only NPI_MODULE is required
-# -filelist mode: NPI_FILELIST, NPI_TOP, NPI_MODULE are required
+# KDB mode is mandatory: NPI_LIB and NPI_MODULE are required.
 # NPI_SRCFILE is now optional (deprecated, kept for backward compatibility)
 # -----------------------------------------------------------------------
-set use_lib [expr { [info exists env(NPI_LIB)] && $env(NPI_LIB) ne "" }]
+if { ![info exists env(NPI_LIB)] || $env(NPI_LIB) eq "" } {
+    puts stderr "ERROR: environment variable NPI_LIB is required. Filelist import is not supported."
+    debExit
+}
 
-# Only NPI_MODULE is required
 if { ![info exists env(NPI_MODULE)] || $env(NPI_MODULE) eq "" } {
     puts stderr "ERROR: environment variable NPI_MODULE is not set"
     debExit
@@ -86,24 +85,17 @@ if { [info exists env(NPI_SRCFILE)] && $env(NPI_SRCFILE) ne "" } {
     log_step "deprecated_srcfile=$srcfile"
 }
 
-if { !$use_lib } {
-    foreach { varname envname } {
-        filelist   NPI_FILELIST
-        top_module NPI_TOP
-    } {
-        if { ![info exists env($envname)] || $env($envname) eq "" } {
-            puts stderr "ERROR: environment variable $envname is not set (required when not using -lib)"
-            debExit
-        }
-        set $varname $env($envname)
-    }
+set npi_lib [file normalize $env(NPI_LIB)]
+if { ![file exists $npi_lib] } {
+    puts stderr "ERROR: KDB path does not exist: $npi_lib"
+    debExit
 }
-set incdir [expr { [info exists env(NPI_INCDIR)] ? $env(NPI_INCDIR) : "" }]
-if { $use_lib } {
-    log_step "load_mode=lib lib=$env(NPI_LIB)"
-} else {
-    log_step "load_mode=filelist filelist=$filelist top=$top_module incdir=$incdir"
+if { [file isdirectory $npi_lib] && [llength [glob -nocomplain -directory $npi_lib *]] == 0 } {
+    puts stderr "ERROR: KDB path is empty: $npi_lib"
+    debExit
 }
+
+log_step "load_mode=lib lib=$npi_lib"
 
 # Optional: comma-separated list of ports to filter (empty = all ports)
 set port_filter {}
@@ -142,18 +134,10 @@ if { [info exists env(NPI_MODULE_OUTFILE)] && $env(NPI_MODULE_OUTFILE) ne "" } {
 # -----------------------------------------------------------------------
 # Load design
 # -----------------------------------------------------------------------
-if { $use_lib } {
-    log_step "import design by KDB"
-    if { [catch { debImport -elab $env(NPI_LIB) } e] } {
-        puts stderr "ERROR: debImport -elab failed: $e"
-        debExit
-    }
-} elseif { $incdir ne "" } {
-    log_step "import design by filelist with incdir"
-    debImport -f $filelist +incdir+$incdir -top $top_module -sv
-} else {
-    log_step "import design by filelist"
-    debImport -f $filelist -top $top_module -sv
+log_step "import design by KDB"
+if { [catch { debImport -elab $npi_lib } e] } {
+    puts stderr "ERROR: debImport -elab failed: $e"
+    debExit
 }
 log_step "design import done"
 

@@ -266,13 +266,19 @@ foreach target_mod $target_modules {
 
         log_step "instance=$inst_path parameter_handles=[llength $param_hdl_list] return_count=$count"
         foreach param_hdl $param_hdl_list {
-            set info [get_hdl_info $param_hdl]
-            set name [get_param_name $param_hdl $inst_path $info]
-            set value [get_parameter_value $param_hdl]
-            set kind [get_param_kind $param_hdl]
-            csv_put $outfh [list $target_mod $inst_path $name $value $kind $info]
-            incr total_params
-            log_step "param instance=$inst_path $kind $name=$value"
+            if { [catch {
+                set info [get_hdl_info $param_hdl]
+                set name [get_param_name $param_hdl $inst_path $info]
+                set value [get_parameter_value $param_hdl]
+                set kind [get_param_kind $param_hdl]
+                csv_put $outfh [list $target_mod $inst_path $name $value $kind $info]
+                incr total_params
+                log_step "param instance=$inst_path $kind $name=$value"
+            } e] } {
+                puts stderr "WARNING: parameter handle failed for $inst_path: $e"
+                csv_put $outfh [list $target_mod $inst_path UNKNOWN_PARAM UNKNOWN_VALUE parameter "ERROR:$e"]
+                incr total_params
+            }
         }
     }
 }

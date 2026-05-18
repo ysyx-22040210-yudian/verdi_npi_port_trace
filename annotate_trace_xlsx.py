@@ -358,15 +358,20 @@ def write_annotation_workbook(
     ports: Sequence[str],
     module_traces: Dict[str, ModuleTrace],
     module_params: Dict[str, Sequence[ParamRow]],
+    module_param_errors: Optional[Dict[str, str]] = None,
     filter_instances: Sequence[str],
     missing_marker: str = "NO_MODULE",
 ) -> None:
     workbook, sheet = load_workbook(template, sheet_name)
     axes = prepare_template_axes(sheet, modules, ports)
+    module_param_errors = module_param_errors or {}
 
     for module in modules:
         trace = module_traces.get(module, ModuleTrace(rows=[], error=missing_marker))
-        param_text = format_module_params(module, module_params.get(module, []))
+        if module in module_param_errors:
+            param_text = module_param_errors[module]
+        else:
+            param_text = format_module_params(module, module_params.get(module, []))
         if param_text == "NO_PARAMETER" and trace.error is not None:
             param_text = trace.error
         log_step(f"parameter cell module={module} result={param_text}")
@@ -474,20 +479,36 @@ def read_param_rows(path: Path) -> List[ParamRow]:
     return rows
 
 
-def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple[List[ParamRow], Path]:
+def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple[List[ParamRow], Path, Optional[str]]:
     out_file = workdir / "module_parameters.csv"
+    if args.no_params:
+        log_step("skip module parameter collection because --no-params is set")
+        return [], out_file, "PARAM_SKIPPED"
+
     env = os.environ.copy()
     env["NPI_LIB"] = args.lib
     env["NPI_PARAM_MODULES"] = ",".join(modules)
     env["NPI_PARAM_OUTFILE"] = str(out_file)
 
-    run_checked(
-        ["verdi", "-batch", "-nologo", "-play", SCRIPT_DIR / "npi_find_module_params.tcl"],
-        cwd=RUN_CWD,
-        env=env,
-    )
+    try:
+        run_checked(
+            ["verdi", "-batch", "-nologo", "-play", SCRIPT_DIR / "npi_find_module_params.tcl"],
+            cwd=RUN_CWD,
+            env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        if args.strict_params:
+            raise
+        message = f"PARAM_TRACE_FAILED: {exc}"
+        log_step(message)
+        if out_file.exists() and out_file.stat().st_size > 0:
+            try:
+                return read_param_rows(out_file), out_file, message
+            except Exception as read_exc:
+                log_step(f"parameter csv read failed after Tcl error: {read_exc}")
+        return [], out_file, message
 
-    return read_param_rows(out_file), out_file
+    return read_param_rows(out_file), out_file, None
 
 
 def strip_instance_prefix(signal_name: str, inst: str) -> Optional[str]:
@@ -651,6 +672,16 @@ def parse_args():
         action="store_true",
         help="compatibility option; intermediate workdir is kept by default",
     )
+    parser.add_argument(
+        "--no-params",
+        action="store_true",
+        help="skip module parameter collection and keep port annotation running",
+    )
+    parser.add_argument(
+        "--strict-params",
+        action="store_true",
+        help="fail the whole annotation flow if module parameter collection fails",
+    )
     args = parser.parse_args()
 
     if sys.version_info < (3, 8):
@@ -715,10 +746,14 @@ def main() -> None:
         log_step(f"filter_instance_file={instance_file}")
 
         subsystems = set()
-        param_rows, param_file = find_module_parameters(args, modules, workdir)
+        param_rows, param_file, param_error = find_module_parameters(args, modules, workdir)
         log_step(f"module_parameter_file={param_file}")
         params_by_module: Dict[str, List[ParamRow]] = {}
         params_by_module_subsystem: Dict[str, Dict[str, List[ParamRow]]] = {}
+        param_errors_by_module: Dict[str, str] = {}
+        param_errors_by_module_subsystem: Dict[str, Dict[str, str]] = {}
+        if param_error is not None:
+            param_errors_by_module = {module: param_error for module in modules}
         for row in param_rows:
             params_by_module.setdefault(row.module, []).append(row)
         if args.subsystem_level:
@@ -731,6 +766,10 @@ def main() -> None:
                         module, len(by_subsystem), args.subsystem_level
                     )
                 )
+            if param_error is not None:
+                # The exact subsystem list may only be known after trace rows are
+                # loaded. It is filled below before writing workbooks.
+                param_errors_by_module_subsystem = {module: {} for module in modules}
 
         module_traces: Dict[str, ModuleTrace] = {}
         rows_by_module_subsystem: Dict[str, Dict[str, List[TraceRow]]] = {}
@@ -772,11 +811,18 @@ def main() -> None:
                 )
                 subsystem_traces: Dict[str, ModuleTrace] = {}
                 subsystem_params: Dict[str, Sequence[ParamRow]] = {}
+                subsystem_param_errors: Dict[str, str] = {}
                 for module in modules:
                     subsystem_params[module] = params_by_module_subsystem.get(module, {}).get(
                         subsystem,
                         [],
                     )
+                    if module in param_errors_by_module:
+                        subsystem_param_errors[module] = param_errors_by_module[module]
+                    elif module in param_errors_by_module_subsystem:
+                        error = param_errors_by_module_subsystem[module].get(subsystem)
+                        if error is not None:
+                            subsystem_param_errors[module] = error
                     trace = module_traces[module]
                     if trace.error is not None:
                         subsystem_traces[module] = trace
@@ -797,6 +843,7 @@ def main() -> None:
                     ports=ports,
                     module_traces=subsystem_traces,
                     module_params=subsystem_params,
+                    module_param_errors=subsystem_param_errors,
                     filter_instances=subsystem_filter_instances,
                     missing_marker="NO_SUBSYSTEM_INSTANCE",
                 )
@@ -809,6 +856,7 @@ def main() -> None:
                 ports=ports,
                 module_traces=module_traces,
                 module_params=params_by_module,
+                module_param_errors=param_errors_by_module,
                 filter_instances=filter_instances,
             )
     finally:

@@ -167,6 +167,27 @@ pht_from_gshare_or_btb.csv
   -ports clk,rst,we,waddr,wdata
 ```
 
+parameter 采集默认是非阻断的：如果 Verdi/NPI 在采集 parameter 时失败，端口
+yes/no 反标仍会继续生成，B 列会写 `PARAM_TRACE_FAILED: ...`。迁移到新项目时，
+如果只想先验证端口连接反标，可以临时跳过 parameter：
+
+```bash
+./annotate_trace_xlsx.sh \
+  -template trace_template.xlsx \
+  -output trace_annotated.xlsx \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords ysyx_22050058_gshare \
+  -module ysyx_22050058_pht \
+  -ports clk,rst,we,waddr,wdata \
+  --no-params
+```
+
+如果希望 parameter 采集失败时直接中断整个流程，使用严格模式：
+
+```bash
+--strict-params
+```
+
 ## 反标单元格含义
 
 交叉单元格的常见取值：
@@ -178,6 +199,8 @@ pht_from_gshare_or_btb.csv
 - `no; NO_TRACE`：目标 module 中不存在该端口，或 NPI 未返回该端口 trace。
 - `NO_MODULE`：当前 KDB 中找不到 `-module` 指定的 module 实例。
 - `NO_SUBSYSTEM_INSTANCE`：按 subsystem 拆分时，该 subsystem 下没有这个 module 的实例。
+- `PARAM_TRACE_FAILED: ...`：parameter 采集失败，但端口反标已继续完成。
+- `PARAM_SKIPPED`：命令使用了 `--no-params`，跳过 parameter 采集。
 
 ## 例化 parameter 显示
 
@@ -193,6 +216,18 @@ top.subsys0.u_skid_b: OPT_LOWPOWER=1'd1, OPT_OUTREG=1'd0, DW=32'sd13
 ```
 
 这样做是为了避免丢失同 module 不同实例的 parameter 信息。
+
+大项目迁移时，如果 parameter 采集阶段在 `npi_find_module_params.tcl` 中失败，先用
+`--no-params` 跑通主反标流程，再单独调试 parameter：
+
+```bash
+export NPI_LIB=/path/to/simv.daidir/kdb.elab++
+export NPI_PARAM_MODULES=targetA,targetB
+export NPI_PARAM_OUTFILE=module_parameters_debug.csv
+
+verdi -batch -nologo -play ./npi_find_module_params.tcl \
+  2>&1 | tee find_params_debug.log
+```
 
 ## 按 subsystem 拆分反标文件
 

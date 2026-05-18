@@ -286,6 +286,64 @@ chmod +x run_skidbuffer_param_test.sh
 
 这个脚本会重建 KDB、运行反标，并检查 XLSX 的 B 列是否包含 parameter。
 
+### SSH 全量回归
+
+在 VM 上做全量回归时，可以从宿主机直接通过 SSH 运行。非交互 SSH 不会自动加载
+EDA 环境，因此命令里显式 `source /home/ICer/.bashrc`：
+
+```bash
+ssh ICer@192.168.31.223 'bash -s' <<'EOF'
+set -eo pipefail
+source /home/ICer/.bashrc
+set -u
+cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+
+{
+  echo "[vm-full-test] cwd=$(pwd)"
+  echo "[vm-full-test] python=$(python3 --version 2>&1)"
+  echo "[vm-full-test] vcs=$(command -v vcs || true)"
+  echo "[vm-full-test] verdi=$(command -v verdi || true)"
+
+  chmod +x ./run_skidbuffer_param_test.sh ./annotate_trace_xlsx.sh
+
+  echo "[vm-full-test] STEP 1: parameter annotation smoke test"
+  ./run_skidbuffer_param_test.sh
+
+  echo "[vm-full-test] STEP 2: multi module + multi keywords"
+  ./annotate_trace_xlsx.sh \
+    -template multi_kw_trace_template.xlsx \
+    -output multi_kw_annotated.xlsx \
+    -lib "$(pwd)/skidbuffer_param_build/simv.daidir/kdb.elab++" \
+    -keywords SkidPeer,skidbuffer \
+    -module skidbuffer,SkidPeer \
+    -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data,clk,rst,src_valid,src_ready,src_data,dst_valid,dst_ready,dst_data \
+    -subsystem-level 2 \
+    2>&1 | tee multi_kw_annotate.log
+
+  echo "[vm-full-test] STEP 3: --no-params fallback"
+  ./annotate_trace_xlsx.sh \
+    -template no_params_trace_template.xlsx \
+    -output no_params_annotated.xlsx \
+    -lib "$(pwd)/skidbuffer_param_build/simv.daidir/kdb.elab++" \
+    -keywords SkidPeer \
+    -module skidbuffer \
+    -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data \
+    -subsystem-level 2 \
+    --no-params \
+    2>&1 | tee no_params.log
+
+  echo "[vm-full-test] SUCCESS"
+} 2>&1 | tee vm_full_regression.log
+exit ${PIPESTATUS[0]}
+EOF
+```
+
+这套回归覆盖三类路径：
+
+- `run_skidbuffer_param_test.sh`：重建 KDB，并检查 B 列能显示 elaborated parameter。
+- `-module skidbuffer,SkidPeer` 和 `-keywords SkidPeer,skidbuffer`：验证多目标 module 和多过滤 module。
+- `--no-params`：验证 parameter 采集跳过时仍能完成端口 yes/no 反标，并在 B 列写 `PARAM_SKIPPED`。
+
 ### 手动测试：单 module
 
 ```bash
@@ -542,7 +600,7 @@ rm -rf verdiLog skidbuffer_param_build __pycache__
 rm -f novas.conf novas.rc
 rm -f *_full.csv *_module_connections.csv *_instances.txt module_parameters.csv
 rm -f *_annotated*.xlsx *_trace_template.xlsx *_annotate*.log *_debug.log
-rm -f skidbuffer_param_rtl.f skidbuffer_param_vcs_build.log run_skidbuffer_param_test.log
+rm -f skidbuffer_param_rtl.f skidbuffer_param_vcs_build.log run_skidbuffer_param_test.log vm_full_regression.log
 ```
 
 不要删除这些工具文件：

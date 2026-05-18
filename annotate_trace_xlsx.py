@@ -24,9 +24,9 @@ import re
 import subprocess
 import sys
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
     import openpyxl
@@ -84,6 +84,79 @@ class TemplateAxes:
 class ModuleTrace:
     rows: Sequence[TraceRow]
     error: Optional[str] = None
+
+
+@dataclass
+class PortSummary:
+    seen: bool = False
+    matched: bool = False
+    details: List[str] = field(default_factory=list)
+    detail_seen: Set[str] = field(default_factory=set)
+
+    def observe(self, role: str, signal: str, matcher: "InstanceMatcher") -> None:
+        self.seen = True
+        if matcher.belongs(signal):
+            self.matched = True
+
+        role_text = role or "unknown"
+        signal_text = signal or ""
+        if signal_text.startswith("Const:"):
+            self.add_detail(f"{role_text}={signal_text}")
+        elif signal_text in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"} or signal_text.startswith("ERROR:"):
+            self.add_detail(f"{role_text}={signal_text}")
+
+    def add_detail(self, detail: str) -> None:
+        if detail in self.detail_seen:
+            return
+        self.detail_seen.add(detail)
+        self.details.append(detail)
+
+    def result(self) -> str:
+        if not self.seen:
+            return "no; NO_TRACE"
+        text = "yes" if self.matched else "no"
+        if self.details:
+            text += "; " + "; ".join(self.details)
+        return text
+
+
+class InstanceMatcher:
+    def __init__(self, instances: Sequence[str], cache_size: int = 200000) -> None:
+        self.prefixes: Set[str] = set()
+        self.cache: Dict[str, bool] = {}
+        self.cache_size = max(0, cache_size)
+        for inst in instances:
+            self.add_instance(inst)
+
+    def add_instance(self, inst: str) -> None:
+        inst = inst.strip()
+        if not inst:
+            return
+        parts = [part for part in inst.split(".") if part]
+        if not parts:
+            return
+        for idx in range(len(parts)):
+            self.prefixes.add(".".join(parts[idx:]))
+
+    def belongs(self, signal_name: str) -> bool:
+        if not signal_name or signal_name.startswith("Const:") or not self.prefixes:
+            return False
+        cached = self.cache.get(signal_name)
+        if cached is not None:
+            return cached
+
+        result = self._belongs_uncached(signal_name)
+        if self.cache_size and len(self.cache) < self.cache_size:
+            self.cache[signal_name] = result
+        return result
+
+    def _belongs_uncached(self, signal_name: str) -> bool:
+        for prefix in candidate_signal_prefixes(signal_name):
+            if prefix not in self.prefixes:
+                continue
+            if is_direct_instance_node(strip_instance_prefix(signal_name, prefix)):
+                return True
+        return False
 
 
 def log_step(message: str) -> None:
@@ -389,6 +462,49 @@ def write_annotation_workbook(
     log_step(f"done output={output}")
 
 
+def write_annotation_results_workbook(
+    *,
+    template: Path,
+    sheet_name: Optional[str],
+    output: Path,
+    modules: Sequence[str],
+    ports: Sequence[str],
+    module_port_results: Dict[str, Dict[str, str]],
+    module_params: Dict[str, Sequence[ParamRow]],
+    module_errors: Optional[Dict[str, str]] = None,
+    module_param_errors: Optional[Dict[str, str]] = None,
+    missing_marker: str = "NO_MODULE",
+) -> None:
+    workbook, sheet = load_workbook(template, sheet_name)
+    axes = prepare_template_axes(sheet, modules, ports)
+    module_errors = module_errors or {}
+    module_param_errors = module_param_errors or {}
+
+    for module in modules:
+        trace_error = module_errors.get(module)
+        if module in module_param_errors:
+            param_text = module_param_errors[module]
+        else:
+            param_text = format_module_params(module, module_params.get(module, []))
+        if param_text == "NO_PARAMETER" and trace_error is not None:
+            param_text = trace_error
+        log_step(f"parameter cell module={module} result={param_text}")
+        set_parameter_cell(sheet, axes, module, param_text)
+
+        results = module_port_results.get(module, {})
+        for port in ports:
+            if trace_error is not None:
+                result = trace_error
+            else:
+                result = results.get(port, f"no; {missing_marker}")
+            log_step(f"cell module={module} port={port} result={result}")
+            set_result_cell(sheet, axes, module, port, result)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(output)
+    log_step(f"done output={output}")
+
+
 def run_checked(
     cmd: Sequence[object],
     cwd: Path,
@@ -521,6 +637,22 @@ def strip_instance_prefix(signal_name: str, inst: str) -> Optional[str]:
     return None
 
 
+def candidate_signal_prefixes(signal_name: str) -> Iterable[str]:
+    start = 0
+    while True:
+        dot = signal_name.find(".", start)
+        slash = signal_name.find("/", start)
+        positions = [pos for pos in (dot, slash) if pos != -1]
+        if not positions:
+            break
+        pos = min(positions)
+        if pos > 0:
+            yield signal_name[:pos]
+        start = pos + 1
+    if signal_name:
+        yield signal_name
+
+
 def is_direct_instance_node(rest: Optional[str]) -> bool:
     if rest is None:
         return False
@@ -622,6 +754,63 @@ def summarize_port(rows: Sequence[TraceRow], port: str, filter_instances: Sequen
     return result
 
 
+def finalize_summaries(summaries: Dict[str, PortSummary], ports: Sequence[str]) -> Dict[str, str]:
+    return {
+        port: summaries.get(port, PortSummary()).result()
+        for port in ports
+    }
+
+
+def stream_trace_results(
+    csv_paths: Sequence[Path],
+    ports: Sequence[str],
+    matcher: Optional[InstanceMatcher] = None,
+    subsystem_level: int = 0,
+    matchers_by_subsystem: Optional[Dict[str, InstanceMatcher]] = None,
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]], Set[str], int]:
+    port_set = set(ports)
+    empty_matcher = InstanceMatcher([])
+    flat_summaries: Dict[str, PortSummary] = {}
+    subsystem_summaries: Dict[str, Dict[str, PortSummary]] = {}
+    subsystems: Set[str] = set()
+    total_rows = 0
+
+    for path in csv_paths:
+        log_step(f"stream reading trace csv: {path}")
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                port = row.get("port_name", "")
+                if port not in port_set:
+                    continue
+                total_rows += 1
+                inst = row.get("inst_full_name", "")
+                role = row.get("role", "")
+                signal = row.get("signal_full_name") or row.get("module_signal_full_name") or ""
+
+                if subsystem_level:
+                    subsystem = subsystem_key(inst, subsystem_level)
+                    subsystems.add(subsystem)
+                    summaries = subsystem_summaries.setdefault(subsystem, {})
+                    active_matcher = (
+                        matchers_by_subsystem.get(subsystem, empty_matcher)
+                        if matchers_by_subsystem is not None
+                        else empty_matcher
+                    )
+                else:
+                    summaries = flat_summaries
+                    active_matcher = matcher or empty_matcher
+
+                summaries.setdefault(port, PortSummary()).observe(role, signal, active_matcher)
+
+    flat_results = finalize_summaries(flat_summaries, ports) if not subsystem_level else {}
+    subsystem_results = {
+        subsystem: finalize_summaries(summaries, ports)
+        for subsystem, summaries in subsystem_summaries.items()
+    }
+    return flat_results, subsystem_results, subsystems, total_rows
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Annotate an XLSX template with NPI trace connectivity results."
@@ -682,6 +871,17 @@ def parse_args():
         action="store_true",
         help="fail the whole annotation flow if module parameter collection fails",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="use streaming CSV aggregation and cached instance matching for large designs",
+    )
+    parser.add_argument(
+        "--match-cache-size",
+        type=int,
+        default=200000,
+        help="maximum cached signal ownership decisions in --stream mode; 0 disables the cache",
+    )
     args = parser.parse_args()
 
     if sys.version_info < (3, 8):
@@ -692,6 +892,8 @@ def parse_args():
         parser.error("-keywords expects one or more module definition names.")
     if args.subsystem_level < 0:
         parser.error("-subsystem-level must be 0 or a positive integer.")
+    if args.match_cache_size < 0:
+        parser.error("--match-cache-size must be 0 or a positive integer.")
     return args
 
 
@@ -770,6 +972,133 @@ def main() -> None:
                 # The exact subsystem list may only be known after trace rows are
                 # loaded. It is filled below before writing workbooks.
                 param_errors_by_module_subsystem = {module: {} for module in modules}
+
+        if args.stream:
+            log_step(
+                "stream_mode=enabled match_cache_size={} filter_instance_count={}".format(
+                    args.match_cache_size,
+                    len(filter_instances),
+                )
+            )
+            module_port_results: Dict[str, Dict[str, str]] = {}
+            module_errors: Dict[str, str] = {}
+            module_port_results_by_subsystem: Dict[str, Dict[str, Dict[str, str]]] = {}
+
+            if args.subsystem_level:
+                filter_instances_by_subsystem = split_instances_by_subsystem(
+                    filter_instances,
+                    args.subsystem_level,
+                )
+                matchers_by_subsystem = {
+                    subsystem: InstanceMatcher(instances, args.match_cache_size)
+                    for subsystem, instances in filter_instances_by_subsystem.items()
+                }
+                for subsystem, matcher in sorted(matchers_by_subsystem.items()):
+                    log_step(
+                        "stream matcher subsystem={} filter_instances={} prefixes={}".format(
+                            subsystem,
+                            len(filter_instances_by_subsystem.get(subsystem, [])),
+                            len(matcher.prefixes),
+                        )
+                    )
+            else:
+                matcher = InstanceMatcher(filter_instances, args.match_cache_size)
+                matchers_by_subsystem = None
+                log_step(
+                    "stream matcher filter_instances={} prefixes={}".format(
+                        len(filter_instances),
+                        len(matcher.prefixes),
+                    )
+                )
+
+            for module in modules:
+                log_step(f"trace module: {module}")
+                try:
+                    full_csv, module_csv = trace_module(args, module, ports, workdir)
+                    log_step(f"module_boundary_debug_csv={module_csv}")
+                    if args.subsystem_level:
+                        _, subsystem_results, module_subsystems, total_rows = stream_trace_results(
+                            [full_csv, module_csv],
+                            ports,
+                            subsystem_level=args.subsystem_level,
+                            matchers_by_subsystem=matchers_by_subsystem,
+                        )
+                        module_port_results_by_subsystem[module] = subsystem_results
+                        subsystems.update(module_subsystems)
+                        log_step(
+                            "stream loaded trace rows for {}: {} subsystem_count={}".format(
+                                module,
+                                total_rows,
+                                len(subsystem_results),
+                            )
+                        )
+                    else:
+                        results, _, _, total_rows = stream_trace_results(
+                            [full_csv, module_csv],
+                            ports,
+                            matcher=matcher,
+                        )
+                        module_port_results[module] = results
+                        log_step(f"stream loaded trace rows for {module}: {total_rows}")
+                except subprocess.CalledProcessError as exc:
+                    module_errors[module] = "NO_MODULE"
+                    log_step(f"module {module} trace failed: {exc}")
+
+            if args.subsystem_level:
+                if not subsystems:
+                    raise RuntimeError("no subsystem instances found in streamed trace rows")
+                for subsystem in sorted(subsystems):
+                    log_step(f"write subsystem workbook: {subsystem}")
+                    subsystem_results: Dict[str, Dict[str, str]] = {}
+                    subsystem_errors: Dict[str, str] = {}
+                    subsystem_params: Dict[str, Sequence[ParamRow]] = {}
+                    subsystem_param_errors: Dict[str, str] = {}
+                    for module in modules:
+                        subsystem_params[module] = params_by_module_subsystem.get(module, {}).get(
+                            subsystem,
+                            [],
+                        )
+                        if module in param_errors_by_module:
+                            subsystem_param_errors[module] = param_errors_by_module[module]
+                        elif module in param_errors_by_module_subsystem:
+                            error = param_errors_by_module_subsystem[module].get(subsystem)
+                            if error is not None:
+                                subsystem_param_errors[module] = error
+
+                        if module in module_errors:
+                            subsystem_errors[module] = module_errors[module]
+                            continue
+                        results = module_port_results_by_subsystem.get(module, {}).get(subsystem)
+                        if results is None:
+                            subsystem_errors[module] = "NO_SUBSYSTEM_INSTANCE"
+                        else:
+                            subsystem_results[module] = results
+
+                    write_annotation_results_workbook(
+                        template=template,
+                        sheet_name=args.sheet,
+                        output=split_output_path(output, subsystem),
+                        modules=modules,
+                        ports=ports,
+                        module_port_results=subsystem_results,
+                        module_params=subsystem_params,
+                        module_errors=subsystem_errors,
+                        module_param_errors=subsystem_param_errors,
+                        missing_marker="NO_SUBSYSTEM_INSTANCE",
+                    )
+            else:
+                write_annotation_results_workbook(
+                    template=template,
+                    sheet_name=args.sheet,
+                    output=output,
+                    modules=modules,
+                    ports=ports,
+                    module_port_results=module_port_results,
+                    module_params=params_by_module,
+                    module_errors=module_errors,
+                    module_param_errors=param_errors_by_module,
+                )
+            return
 
         module_traces: Dict[str, ModuleTrace] = {}
         rows_by_module_subsystem: Dict[str, Dict[str, List[TraceRow]]] = {}

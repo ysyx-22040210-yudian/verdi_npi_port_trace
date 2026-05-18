@@ -167,6 +167,45 @@ pht_from_gshare_or_btb.csv
   -ports clk,rst,we,waddr,wdata
 ```
 
+### 大项目流式优化入口
+
+大项目、`-keywords` 很多、过滤实例很多时，建议显式打开流式优化入口：
+
+```bash
+./annotate_trace_xlsx.sh \
+  -template trace_template.xlsx \
+  -output trace_annotated.xlsx \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords filter_mod0,filter_mod1,filter_mod2 \
+  -module target_mod0,target_mod1 \
+  -ports clk,rst,we,waddr,wdata \
+  -subsystem-level 3 \
+  --stream
+```
+
+`--stream` 会启用两项优化：
+
+- **实例匹配缓存**：把 `-keywords` 找到的实例路径预处理成 prefix 集合，并缓存
+  signal 是否属于过滤实例的判断结果，避免每行 trace 都遍历所有过滤实例。
+- **流式聚合反标**：Python 端不再把 `full.csv` 和 `module_connections.csv` 全部
+  读成 `TraceRow` 列表，而是边读 CSV 边聚合每个 `(module, subsystem, port)` 的
+  最终 yes/no/常数/悬空结果。
+
+默认 cache 上限是 200000 个不同 signal。可以按机器运存调整：
+
+```bash
+--match-cache-size 500000
+```
+
+设置为 0 可以关闭 signal 判断结果缓存，但仍保留 prefix 匹配和流式聚合：
+
+```bash
+--stream --match-cache-size 0
+```
+
+注意：`--stream` 优化的是 Python 反标阶段的运存和过滤耗时；Verdi/NPI 导入
+`kdb.elab++` 本身仍会占用项目规模对应的运存。
+
 parameter 采集默认是非阻断的：如果 Verdi/NPI 在采集 parameter 时失败，端口
 yes/no 反标仍会继续生成，B 列会写 `PARAM_TRACE_FAILED: ...`。迁移到新项目时，
 如果只想先验证端口连接反标，可以临时跳过 parameter：
@@ -318,9 +357,10 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
     -module skidbuffer,SkidPeer \
     -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data,clk,rst,src_valid,src_ready,src_data,dst_valid,dst_ready,dst_data \
     -subsystem-level 2 \
+    --stream \
     2>&1 | tee multi_kw_annotate.log
 
-  echo "[vm-full-test] STEP 3: --no-params fallback"
+  echo "[vm-full-test] STEP 3: --stream --no-params fallback"
   ./annotate_trace_xlsx.sh \
     -template no_params_trace_template.xlsx \
     -output no_params_annotated.xlsx \
@@ -330,6 +370,7 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
     -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data \
     -subsystem-level 2 \
     --no-params \
+    --stream \
     2>&1 | tee no_params.log
 
   echo "[vm-full-test] SUCCESS"
@@ -342,6 +383,7 @@ EOF
 
 - `run_skidbuffer_param_test.sh`：重建 KDB，并检查 B 列能显示 elaborated parameter。
 - `-module skidbuffer,SkidPeer` 和 `-keywords SkidPeer,skidbuffer`：验证多目标 module 和多过滤 module。
+- `--stream`：验证流式聚合反标和实例匹配缓存入口。
 - `--no-params`：验证 parameter 采集跳过时仍能完成端口 yes/no 反标，并在 B 列写 `PARAM_SKIPPED`。
 
 ### 手动测试：单 module

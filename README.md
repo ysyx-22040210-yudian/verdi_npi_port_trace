@@ -15,6 +15,7 @@ elaborate 完成的 Verdi/VCS KDB 中，查找某个 `module` 的所有例化实
 | `npi_port_trace.tcl` | 核心 NPI trace 脚本，导入 KDB、查找目标 module 实例、追踪端口 driver/load。 |
 | `npi_find_instances.tcl` | 查找某个 module 定义对应的所有例化实例。 |
 | `filter_trace.py` | 对 trace CSV 做实例归属过滤、合并和按实例拆分。 |
+| `find_instances_batched.py` | 对 `-keywords` module 做分批实例搜索，降低大项目中 Verdi/NPI 单进程资源峰值。 |
 | `annotate_trace_xlsx.sh` | XLSX 反标入口脚本。 |
 | `annotate_trace_xlsx.py` | XLSX 反标实现，要求 Python 3.8+ 和 `openpyxl`。 |
 | `npi_find_module_params.tcl` | 读取目标 module 的例化 parameter，并输出到 `module_parameters.csv`。 |
@@ -102,6 +103,7 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
   -module ysyx_22050058_pht \
   -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
   -keywords ysyx_22050058_gshare,ysyx_22050058_btb \
+  --keyword-batch-size 4 \
   -output pht_from_gshare_or_btb.csv
 ```
 
@@ -169,7 +171,8 @@ pht_from_gshare_or_btb.csv
 
 ### 大项目流式优化入口
 
-大项目、`-keywords` 很多、过滤实例很多时，建议显式打开流式优化入口：
+大项目、`-keywords` 很多、过滤实例很多时，建议显式打开流式优化入口，并把
+`-keywords` 实例搜索拆成小批次：
 
 ```bash
 ./annotate_trace_xlsx.sh \
@@ -180,16 +183,43 @@ pht_from_gshare_or_btb.csv
   -module target_mod0,target_mod1 \
   -ports clk,rst,we,waddr,wdata \
   -subsystem-level 3 \
+  --keyword-batch-size 4 \
   --stream
 ```
 
-`--stream` 会启用两项优化：
+这里有两类优化：
 
+- **`-keywords` 分批实例搜索**：默认每批 8 个 `-keywords` module。每批使用一个
+  独立 Verdi 进程，进程退出后释放 KDB/NPI 运行状态，避免一个 Verdi 进程长时间
+  查很多 module 后崩溃。如果某批失败，工具会自动继续拆成更小批次，直到单个
+  module。
+- **默认关闭逐实例日志**：大项目实例很多时，打印每个实例路径会拖慢运行并放大
+  日志。现在默认只打印统计信息；需要逐实例调试时再打开。
+- **`--stream` 流式聚合反标**：Python 端不再把 `full.csv` 和
+  `module_connections.csv` 全部读成 `TraceRow` 列表，而是边读 CSV 边聚合每个
+  `(module, subsystem, port)` 的最终 yes/no/常数/悬空结果。
 - **实例匹配缓存**：把 `-keywords` 找到的实例路径预处理成 prefix 集合，并缓存
   signal 是否属于过滤实例的判断结果，避免每行 trace 都遍历所有过滤实例。
-- **流式聚合反标**：Python 端不再把 `full.csv` 和 `module_connections.csv` 全部
-  读成 `TraceRow` 列表，而是边读 CSV 边聚合每个 `(module, subsystem, port)` 的
-  最终 yes/no/常数/悬空结果。
+
+如果实例搜索仍然崩溃，把批次继续调小。最稳但最慢的是一次只查一个 keyword：
+
+```bash
+--keyword-batch-size 1
+```
+
+如果某个 keyword 在单 module 批次下仍然导致 Verdi/NPI 崩溃，默认会报错停止，
+避免静默漏标。只想先跑完整体流程时，可以临时跳过失败 keyword，并查看生成的
+`*_instances_errors.log`：
+
+```bash
+--keyword-continue-on-error
+```
+
+逐实例日志默认关闭；只有定位“为什么少了某个实例”时才建议打开：
+
+```bash
+--keyword-log-instances
+```
 
 默认 cache 上限是 200000 个不同 signal。可以按机器运存调整：
 
@@ -357,6 +387,7 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
     -module skidbuffer,SkidPeer \
     -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data,clk,rst,src_valid,src_ready,src_data,dst_valid,dst_ready,dst_data \
     -subsystem-level 2 \
+    --keyword-batch-size 1 \
     --stream \
     2>&1 | tee multi_kw_annotate.log
 
@@ -370,6 +401,7 @@ cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
     -ports i_clk,i_reset,i_valid,o_ready,i_data,o_valid,i_ready,o_data \
     -subsystem-level 2 \
     --no-params \
+    --keyword-batch-size 1 \
     --stream \
     2>&1 | tee no_params.log
 
@@ -383,6 +415,7 @@ EOF
 
 - `run_skidbuffer_param_test.sh`：重建 KDB，并检查 B 列能显示 elaborated parameter。
 - `-module skidbuffer,SkidPeer` 和 `-keywords SkidPeer,skidbuffer`：验证多目标 module 和多过滤 module。
+- `--keyword-batch-size 1`：验证 `-keywords` 分批实例搜索入口。
 - `--stream`：验证流式聚合反标和实例匹配缓存入口。
 - `--no-params`：验证 parameter 采集跳过时仍能完成端口 yes/no 反标，并在 B 列写 `PARAM_SKIPPED`。
 
@@ -512,8 +545,20 @@ verdi -batch -nologo -play ./npi_port_trace.tcl 2>&1 | tee pht_direct_tcl_debug.
 export NPI_LIB=/tmp/npc_build/simv.daidir/kdb.elab++
 export NPI_FILTER_MODULES=ysyx_22050058_gshare,ysyx_22050058_btb
 export NPI_INSTANCE_OUTFILE=gshare_instances_direct.txt
+export NPI_FIND_LOG_INSTANCES=0
 
 verdi -batch -nologo -play ./npi_find_instances.tcl 2>&1 | tee find_gshare_direct_debug.log
+```
+
+大项目建议优先用分批 Python 入口调试，它会在 Verdi 崩溃时自动拆小批次：
+
+```bash
+python3 ./find_instances_batched.py \
+  -lib /tmp/npc_build/simv.daidir/kdb.elab++ \
+  -keywords ysyx_22050058_gshare,ysyx_22050058_btb \
+  -output gshare_instances_direct.txt \
+  --batch-size 1 \
+  2>&1 | tee find_gshare_batched_debug.log
 ```
 
 直接导出 module 实例 parameter：
@@ -640,9 +685,10 @@ skidbuffer_annotated__subsys_top.subsys1.xlsx
 ```bash
 rm -rf verdiLog skidbuffer_param_build __pycache__
 rm -f novas.conf novas.rc
-rm -f *_full.csv *_module_connections.csv *_instances.txt module_parameters.csv
-rm -f *_annotated*.xlsx *_trace_template.xlsx *_annotate*.log *_debug.log
-rm -f skidbuffer_param_rtl.f skidbuffer_param_vcs_build.log run_skidbuffer_param_test.log vm_full_regression.log
+rm -f *_full.csv *_module_connections.csv *_instances.txt *_instances_errors.log module_parameters.csv
+rm -f *_annotated*.xlsx *_trace_template.xlsx *_annotate*.log *_debug.log *_instances.log *_trace_and_filter.log
+rm -f skidbuffer_param_rtl.f skidbuffer_param_vcs_build.log run_skidbuffer_param_test.log
+rm -f vm_full_regression.log vm_stream_regression.log vm_keyword_batch_regression.log
 ```
 
 不要删除这些工具文件：
@@ -651,6 +697,7 @@ rm -f skidbuffer_param_rtl.f skidbuffer_param_vcs_build.log run_skidbuffer_param
 annotate_trace_xlsx.py
 annotate_trace_xlsx.sh
 filter_trace.py
+find_instances_batched.py
 npi_find_instances.tcl
 npi_find_module_params.tcl
 npi_port_trace.tcl

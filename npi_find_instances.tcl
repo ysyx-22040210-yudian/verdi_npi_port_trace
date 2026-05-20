@@ -92,6 +92,14 @@ if { [llength $filter_modules] == 0 } {
     debExit
 }
 
+set log_instances 0
+if { [info exists env(NPI_FIND_LOG_INSTANCES)] } {
+    set value [string tolower [string trim $env(NPI_FIND_LOG_INSTANCES)]]
+    if { $value in {"1" "true" "yes" "on"} } {
+        set log_instances 1
+    }
+}
+
 log_step "import design by KDB: $npi_lib"
 if { [catch { debImport -elab $npi_lib } e] } {
     puts stderr "ERROR: debImport -elab failed: $e"
@@ -126,7 +134,9 @@ foreach filter_module $filter_modules {
                 continue
             }
             dict set seen_paths $inst_path 1
-            log_step "instance module=$filter_module path=$inst_path"
+            if { $log_instances } {
+                log_step "instance module=$filter_module path=$inst_path"
+            }
             puts $outfh $inst_path
             incr written
         } else {

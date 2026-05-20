@@ -4,7 +4,8 @@
 # Usage:
 #   ./trace_and_filter.sh -module <target_module> -lib <kdb.elab++> \
 #                         -keywords <filter_module[,filter_module...]> \
-#                         [-output <output.csv>] [-ports <port1,port2,...>]
+#                         [-output <output.csv>] [-ports <port1,port2,...>] \
+#                         [--keyword-batch-size <n>]
 #
 # Example:
 #   ./trace_and_filter.sh -module ysyx_22050058_id \
@@ -27,6 +28,9 @@ PORTS=""
 FILELIST=""
 INCDIR=""
 TOP=""
+KEYWORD_BATCH_SIZE="${KEYWORD_BATCH_SIZE:-8}"
+KEYWORD_CONTINUE_ON_ERROR=0
+KEYWORD_LOG_INSTANCES=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -38,12 +42,15 @@ while [ $# -gt 0 ]; do
         -filelist) FILELIST="$2"; shift 2 ;;
         -incdir)   INCDIR="$2";   shift 2 ;;
         -top)      TOP="$2";      shift 2 ;;
+        --keyword-batch-size|-keyword-batch-size) KEYWORD_BATCH_SIZE="$2"; shift 2 ;;
+        --keyword-continue-on-error|-keyword-continue-on-error) KEYWORD_CONTINUE_ON_ERROR=1; shift ;;
+        --keyword-log-instances|-keyword-log-instances) KEYWORD_LOG_INSTANCES=1; shift ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
     esac
 done
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>]" >&2
     exit 1
 fi
 
@@ -102,6 +109,9 @@ fi
 log_step "full_trace=$FULL_TRACE"
 log_step "module_boundary_trace=$MODULE_TRACE"
 log_step "filter_instance_list=$INSTANCE_LIST"
+log_step "keyword_batch_size=$KEYWORD_BATCH_SIZE"
+log_step "keyword_continue_on_error=$KEYWORD_CONTINUE_ON_ERROR"
+log_step "keyword_log_instances=$KEYWORD_LOG_INSTANCES"
 log_step "boundary_filtered=$BOUNDARY_FILTERED"
 log_step "full_owner_filtered=$FULL_FILTERED"
 log_step "final_output=$OUTPUT"
@@ -134,13 +144,20 @@ MODULE_LINES=$(wc -l < "$MODULE_TRACE")
 log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$MODULE_LINES"
 
 log_step "step 2/5: find instances of filter module"
-export NPI_LIB="$LIB"
-export NPI_FILTER_MODULE="$KEYWORDS"
-export NPI_FILTER_MODULES="$KEYWORDS"
-export NPI_INSTANCE_OUTFILE="$INSTANCE_LIST"
+FIND_CMD=(python3 "$SCRIPT_DIR/find_instances_batched.py"
+    -lib "$LIB"
+    -keywords "$KEYWORDS"
+    -output "$INSTANCE_LIST"
+    --batch-size "$KEYWORD_BATCH_SIZE")
+if [ "$KEYWORD_CONTINUE_ON_ERROR" -eq 1 ]; then
+    FIND_CMD+=(--continue-on-error)
+fi
+if [ "$KEYWORD_LOG_INSTANCES" -eq 1 ]; then
+    FIND_CMD+=(--log-instances)
+fi
 
-log_step "command: verdi -batch -nologo -play $FIND_INST_TCL"
-verdi -batch -nologo -play "$FIND_INST_TCL" 1>&2
+log_step "command: ${FIND_CMD[*]}"
+"${FIND_CMD[@]}"
 
 if [ ! -s "$INSTANCE_LIST" ]; then
     echo "[ERROR] no instances found for filter modules: $KEYWORDS" >&2

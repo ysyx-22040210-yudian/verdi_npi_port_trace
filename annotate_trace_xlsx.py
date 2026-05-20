@@ -515,23 +515,25 @@ def run_checked(
     log_step(f"command: {text_cmd}")
     if stdout_path is not None:
         with stdout_path.open("w", encoding="utf-8", newline="") as out:
-            subprocess.run(
+            proc = subprocess.Popen(
                 [str(x) for x in cmd],
                 cwd=str(cwd),
                 env=env,
                 stdout=out,
                 stderr=sys.stderr,
-                check=True,
             )
+            rc = proc.wait()
     else:
-        subprocess.run(
+        proc = subprocess.Popen(
             [str(x) for x in cmd],
             cwd=str(cwd),
             env=env,
             stdout=sys.stderr,
             stderr=sys.stderr,
-            check=True,
         )
+        rc = proc.wait()
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, [str(x) for x in cmd])
 
 
 def load_instances(path: Path) -> List[str]:
@@ -547,17 +549,24 @@ def load_instances(path: Path) -> List[str]:
 
 def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
     out_file = workdir / f"{safe_name(args.keywords)}_instances.txt"
-    env = os.environ.copy()
-    env["NPI_LIB"] = args.lib
-    env["NPI_FILTER_MODULE"] = args.keywords
-    env["NPI_FILTER_MODULES"] = args.keywords
-    env["NPI_INSTANCE_OUTFILE"] = str(out_file)
+    cmd: List[object] = [
+        sys.executable,
+        SCRIPT_DIR / "find_instances_batched.py",
+        "-lib",
+        args.lib,
+        "-keywords",
+        args.keywords,
+        "-output",
+        out_file,
+        "--batch-size",
+        str(args.keyword_batch_size),
+    ]
+    if args.keyword_continue_on_error:
+        cmd.append("--continue-on-error")
+    if args.keyword_log_instances:
+        cmd.append("--log-instances")
 
-    run_checked(
-        ["verdi", "-batch", "-nologo", "-play", SCRIPT_DIR / "npi_find_instances.tcl"],
-        cwd=RUN_CWD,
-        env=env,
-    )
+    run_checked(cmd, cwd=RUN_CWD)
 
     instances = load_instances(out_file)
     if not instances:
@@ -882,6 +891,25 @@ def parse_args():
         default=200000,
         help="maximum cached signal ownership decisions in --stream mode; 0 disables the cache",
     )
+    parser.add_argument(
+        "--keyword-batch-size",
+        type=int,
+        default=8,
+        help=(
+            "number of -keywords module names searched per Verdi process; "
+            "smaller values reduce peak memory during instance search, 0 searches all at once"
+        ),
+    )
+    parser.add_argument(
+        "--keyword-continue-on-error",
+        action="store_true",
+        help="skip a keyword module if its instance search still fails after single-module retry",
+    )
+    parser.add_argument(
+        "--keyword-log-instances",
+        action="store_true",
+        help="print every found keyword instance path while searching; off by default for large designs",
+    )
     args = parser.parse_args()
 
     if sys.version_info < (3, 8):
@@ -894,6 +922,8 @@ def parse_args():
         parser.error("-subsystem-level must be 0 or a positive integer.")
     if args.match_cache_size < 0:
         parser.error("--match-cache-size must be 0 or a positive integer.")
+    if args.keyword_batch_size < 0:
+        parser.error("--keyword-batch-size must be 0 or a positive integer.")
     return args
 
 

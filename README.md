@@ -91,6 +91,77 @@ ysyx_22050058_pht ysyx_22050058_pht_u0 (...);
 工具会查找 `-keywords` 指定的所有 module 实例，并判断目标端口的 driver/load
 是否连接到这些实例中的任意一个。
 
+## 命令参数说明
+
+### `trace_and_filter.sh`
+
+CSV 过滤主入口，适合生成和排查原始 trace CSV。
+
+| 参数 | 必填 | 含义 |
+| --- | --- | --- |
+| `-module <module>` | 是 | 目标 module 定义名。工具会查找该 module 的所有例化实例，并追踪这些实例的端口。 |
+| `-lib <kdb.elab++>` | 是 | VCS/Verdi 生成的 KDB 路径。可以传绝对路径，也可以传相对当前目录的路径。 |
+| `-keywords <module[,module...]>` | 是 | 过滤 module 定义名列表。工具会保留 driver/load 属于这些 module 实例的记录。 |
+| `-output <csv>` | 否 | 最终过滤 CSV 文件名。默认是 `<module>_filtered.csv`。 |
+| `-ports <port[,port...]>` | 否 | 只追踪指定端口。端口名必须是 `-module` 指定 module 的端口名；不传则追踪所有端口。 |
+| `--keyword-batch-size <N>` | 否 | 每个 Verdi 进程查找多少个 `-keywords` module。默认 `8`；`1` 最稳但最慢；`0` 表示一次查全部。 |
+| `--keyword-continue-on-error` | 否 | 某个 keyword 在单 module 批次下仍失败时跳过它并继续。默认关闭，避免静默漏标。 |
+| `--keyword-log-instances` | 否 | 打印每个找到的 keyword 实例路径。默认关闭，大项目建议保持关闭以减少日志 IO。 |
+| `-filelist/-top/-incdir` | 禁用 | 兼容旧参数名，但当前工具强制使用 `-lib <kdb.elab++>`，传入这些参数会报错。 |
+
+### `annotate_trace_xlsx.sh`
+
+XLSX 反标主入口，适合直接生成反标表。
+
+| 参数 | 必填 | 含义 |
+| --- | --- | --- |
+| `-template <xlsx>` | 是 | 输入模板。若文件不存在，并且同时传了 `-module` 和 `-ports`，工具会自动生成最小模板。 |
+| `-output <xlsx>` | 是 | 输出反标文件。使用 `-subsystem-level` 时会自动拆成多个 `<output>__subsys_<subsystem>.xlsx`。 |
+| `-lib <kdb.elab++>` | 是 | VCS/Verdi 生成的 KDB 路径。必须是已经 elaborate 完成且非空的 KDB。 |
+| `-keywords <module[,module...]>` | 是 | 过滤 module 定义名列表。端口 driver/load 连接到这些实例中的任意一个时写 `yes`。 |
+| `-module <module[,module...]>` | 否 | 目标 module 定义名列表。不传时从模板 A 列第 2 行开始读取。 |
+| `-ports <port[,port...]>` | 否 | 目标端口名列表。不传时从模板第 1 行 C 列开始读取。 |
+| `-sheet <name>` | 否 | 指定工作表名。不传时使用第一个 worksheet。 |
+| `-workdir <dir>` | 否 | 中间 CSV、实例列表、parameter CSV 的生成目录。默认是当前命令目录。 |
+| `-subsystem-level <N>` | 否 | 按实例路径前 N 层拆分输出。例如 `top.dut.subsys.u_mod` 且 N=3 时，subsystem 是 `top.dut.subsys`。默认 `0`，不拆分。 |
+| `--keep-workdir` | 否 | 兼容参数。当前中间文件默认保留，所以这个参数不改变行为。 |
+| `--no-params` | 否 | 跳过 module parameter 采集，B 列写 `PARAM_SKIPPED`。大项目迁移时可先用它验证端口反标主流程。 |
+| `--strict-params` | 否 | parameter 采集失败时直接中断。默认是非阻断，失败时 B 列写 `PARAM_TRACE_FAILED: ...`。 |
+| `--stream` | 否 | 启用流式聚合反标和实例匹配缓存。大项目建议开启，降低 Python 运行期运存。 |
+| `--match-cache-size <N>` | 否 | `--stream` 模式下缓存多少个 signal 归属判断结果。默认 `200000`；`0` 关闭缓存。 |
+| `--keyword-batch-size <N>` | 否 | 每个 Verdi 进程查找多少个 `-keywords` module。默认 `8`；大项目崩溃时可降为 `4/2/1`。 |
+| `--keyword-continue-on-error` | 否 | 某个 keyword 单独搜索仍失败时跳过并继续，同时生成 `*_instances_errors.log`。默认关闭。 |
+| `--keyword-log-instances` | 否 | 打印每个找到的 keyword 实例路径。默认关闭。 |
+| `-filelist/-top/-incdir` | 禁用 | 兼容旧参数名，但当前工具强制使用 `-lib <kdb.elab++>`，传入这些参数会报错。 |
+
+### `find_instances_batched.py`
+
+专门用于大项目调试 `-keywords` 实例搜索。`annotate_trace_xlsx.sh` 和
+`trace_and_filter.sh` 内部也会调用它。
+
+| 参数 | 必填 | 含义 |
+| --- | --- | --- |
+| `-lib <kdb.elab++>` | 是 | VCS/Verdi KDB 路径。 |
+| `-keywords <module[,module...]>` | 是 | 要查找实例的 module 定义名列表。 |
+| `-output <txt>` | 是 | 合并后的实例列表输出文件，每行一个实例路径。 |
+| `--batch-size <N>` | 否 | 每个 Verdi 进程查找多少个 module。默认 `8`；`1` 最稳；`0` 一次查全部。 |
+| `--continue-on-error` | 否 | 单个 module 搜索仍失败时跳过并继续，同时写 `<output>_errors.log`。默认关闭。 |
+| `--log-instances` | 否 | 让 Tcl 打印每个实例路径。默认关闭。 |
+| `--keep-batch-files` | 否 | 保留每批的临时实例文件，便于调试。默认执行完后删除。 |
+
+### `npi_trace.sh`
+
+底层端口 trace 包装脚本，通常由上层入口调用。
+
+| 参数 | 必填 | 含义 |
+| --- | --- | --- |
+| `-module <module>` | 是 | 目标 module 定义名。 |
+| `-lib <kdb.elab++>` | 是 | VCS/Verdi KDB 路径。 |
+| `-ports <port[,port...]>` | 否 | 限制只追踪指定端口。不传则追踪所有端口。 |
+| `-module-out <csv>` | 否 | module 边界 trace CSV 输出路径。默认 `<module>_module_connections.csv`。 |
+| `-srcfile <src.v>` | 否 | 旧参数，已废弃。端口方向现在从 NPI API 获取。 |
+| `-filelist/-top/-incdir` | 禁用 | 兼容旧参数名，但当前工具强制使用 `-lib <kdb.elab++>`。 |
+
 ## CSV 过滤流程
 
 示例：追踪 `ysyx_22050058_pht` 的端口，并保留 driver/load 属于

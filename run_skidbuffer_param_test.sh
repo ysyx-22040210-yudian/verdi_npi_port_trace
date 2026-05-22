@@ -126,9 +126,15 @@ checks = [
 for path in checks:
     wb = openpyxl.load_workbook(path)
     ws = wb.active
-    value = ws["B2"].value or ""
-    print(f"[run_skidbuffer_param_test] {path.name} B2={value}")
-    if "DW=" not in value or "OPT_OUTREG=" not in value:
+    module_value = ws["A2"].value or ""
+    instance_value = ws["B2"].value or ""
+    param_value = ws["C2"].value or ""
+    print(f"[run_skidbuffer_param_test] {path.name} A2={module_value} B2={instance_value} C2={param_value}")
+    if module_value != "skidbuffer":
+        raise SystemExit(f"module column missing expected value in {path}")
+    if not str(instance_value).startswith("top.subsys"):
+        raise SystemExit(f"instance column missing expected value in {path}")
+    if "DW=" not in param_value or "OPT_OUTREG=" not in param_value:
         raise SystemExit(f"parameter summary missing expected values in {path}")
 
 param_csv = Path("module_parameters.csv").read_text(encoding="utf-8", errors="replace")

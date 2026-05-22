@@ -120,13 +120,13 @@ XLSX 反标主入口，适合直接生成反标表。
 | `-lib <kdb.elab++>` | 是 | VCS/Verdi 生成的 KDB 路径。必须是已经 elaborate 完成且非空的 KDB。 |
 | `-keywords <module[,module...]>` | 是 | 过滤 module 定义名列表。端口 driver/load 连接到这些实例中的任意一个时写 `yes`。 |
 | `-module <module[,module...]>` | 否 | 目标 module 定义名列表。不传时从模板 A 列第 2 行开始读取。注意这里输入的是 module 定义名，输出时会展开成具体实例路径。 |
-| `-ports <port[,port...]>` | 否 | 目标端口名列表。不传时从模板第 1 行 C 列开始读取。 |
+| `-ports <port[,port...]>` | 否 | 目标端口名列表。不传时从模板第 1 行 D 列开始读取；旧模板从 C 列开始也兼容。 |
 | `-sheet <name>` | 否 | 指定工作表名。不传时使用第一个 worksheet。 |
 | `-workdir <dir>` | 否 | 中间 CSV、实例列表、parameter CSV 的生成目录。默认是当前命令目录。 |
 | `-subsystem-level <N>` | 否 | 按实例路径前 N 层拆分输出。例如 `top.dut.subsys.u_mod` 且 N=3 时，subsystem 是 `top.dut.subsys`。默认 `0`，不拆分。 |
 | `--keep-workdir` | 否 | 兼容参数。当前中间文件默认保留，所以这个参数不改变行为。 |
-| `--no-params` | 否 | 跳过 module parameter 采集，B 列写 `PARAM_SKIPPED`。大项目迁移时可先用它验证端口反标主流程。 |
-| `--strict-params` | 否 | parameter 采集失败时直接中断。默认是非阻断，失败时 B 列写 `PARAM_TRACE_FAILED: ...`。 |
+| `--no-params` | 否 | 跳过 module parameter 采集，C 列写 `PARAM_SKIPPED`。大项目迁移时可先用它验证端口反标主流程。 |
+| `--strict-params` | 否 | parameter 采集失败时直接中断。默认是非阻断，失败时 C 列写 `PARAM_TRACE_FAILED: ...`。 |
 | `--stream` | 否 | 启用流式聚合反标和实例匹配缓存。大项目建议开启，降低 Python 运行期运存。 |
 | `--match-cache-size <N>` | 否 | `--stream` 模式下缓存多少个 signal 归属判断结果。默认 `200000`；`0` 关闭缓存。 |
 | `--keyword-batch-size <N>` | 否 | 每个 Verdi 进程查找多少个 `-keywords` module。默认 `8`；大项目崩溃时可降为 `4/2/1`。 |
@@ -168,7 +168,7 @@ XLSX 反标主入口，适合直接生成反标表。
 `ysyx_22050058_gshare` 或 `ysyx_22050058_btb` 实例的记录：
 
 ```bash
-cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+cd /mnt/hgfs/VMshare/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 
 ./trace_and_filter.sh \
   -module ysyx_22050058_pht \
@@ -209,10 +209,10 @@ pht_from_gshare_or_btb.csv
 模板布局：
 
 - 输入模板中，A 列第 2 行开始可以填写目标 module 定义名，对应 `-module`。
-- 第 1 行 C 列开始：端口名，对应 `-ports`。
-- 输出反标文件中，A 列会改成 `instance`，每个目标 module 的每个具体例化实例单独占一行。
-- 输出反标文件中，B 列显示同一行实例的 elaborated parameter。
-- A 列实例和第 1 行 port 的交叉单元格写入该实例该端口的 `yes/no/常数/悬空` trace 结果。
+- 第 1 行 D 列开始：端口名，对应 `-ports`；旧模板从 C 列开始写端口也兼容。
+- 输出反标文件中，A 列显示 `module`，B 列显示 `instance`，每个目标 module 的每个具体例化实例单独占一行。
+- 输出反标文件中，C 列显示同一行实例的 elaborated parameter。
+- B 列实例和第 1 行 port 的交叉单元格写入该实例该端口的 `yes/no/常数/悬空` trace 结果。
 
 如果 `-template` 指定的文件不存在，并且命令中已经传入 `-module` 和 `-ports`，
 脚本会在当前目录自动生成一个最小模板。
@@ -309,7 +309,7 @@ pht_from_gshare_or_btb.csv
 `kdb.elab++` 本身仍会占用项目规模对应的运存。
 
 parameter 采集默认是非阻断的：如果 Verdi/NPI 在采集 parameter 时失败，端口
-yes/no 反标仍会继续生成，B 列会写 `PARAM_TRACE_FAILED: ...`。迁移到新项目时，
+yes/no 反标仍会继续生成，C 列会写 `PARAM_TRACE_FAILED: ...`。迁移到新项目时，
 如果只想先验证端口连接反标，可以临时跳过 parameter：
 
 ```bash
@@ -345,17 +345,19 @@ yes/no 反标仍会继续生成，B 列会写 `PARAM_TRACE_FAILED: ...`。迁移
 
 ## 例化 parameter 显示
 
-反标文件 B 列显示的是 **module 实例的 elaborated parameter**，不是 module 定义
+反标文件 C 列显示的是 **module 实例的 elaborated parameter**，不是 module 定义
 里的默认 parameter。
 
 同一个 module 在同一个 subsystem 下可能例化多次，并且每个实例 parameter 可能
 不同。工具会把这些实例展开成多行，每一行只显示当前实例自己的 parameter，例如：
 
 ```text
-A2 = top.subsys0.u_skid_a
-B2 = OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
-A3 = top.subsys0.u_skid_b
-B3 = OPT_LOWPOWER=1'd1, OPT_OUTREG=1'd0, DW=32'sd13
+A2 = skidbuffer
+B2 = top.subsys0.u_skid_a
+C2 = OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
+A3 = skidbuffer
+B3 = top.subsys0.u_skid_b
+C3 = OPT_LOWPOWER=1'd1, OPT_OUTREG=1'd0, DW=32'sd13
 ```
 
 这样做是为了让同一个 module 的不同例化参数和端口 trace 结果一一对应。
@@ -411,7 +413,7 @@ trace_annotated__subsys_top.dut.subsys1.xlsx
 测试必须在工具目录中运行，所有生成文件都留在当前目录：
 
 ```bash
-cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+cd /mnt/hgfs/VMshare/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 ```
 
 一键测试：
@@ -427,7 +429,7 @@ chmod +x run_skidbuffer_param_test.sh
 [run_skidbuffer_param_test] SUCCESS
 ```
 
-这个脚本会重建 KDB、运行反标，并检查 XLSX 的 B 列是否包含 parameter。
+这个脚本会重建 KDB、运行反标，并检查 XLSX 的 A/B/C 列是否分别包含 module、instance 和 parameter。
 
 ### SSH 全量回归
 
@@ -439,7 +441,7 @@ ssh ICer@192.168.31.223 'bash -s' <<'EOF'
 set -eo pipefail
 source /home/ICer/.bashrc
 set -u
-cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+cd /mnt/hgfs/VMshare/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 
 {
   echo "[vm-full-test] cwd=$(pwd)"
@@ -487,16 +489,16 @@ EOF
 
 这套回归覆盖三类路径：
 
-- `run_skidbuffer_param_test.sh`：重建 KDB，并检查 B 列能显示 elaborated parameter。
+- `run_skidbuffer_param_test.sh`：重建 KDB，并检查 A/B/C 列能显示 module、instance 和 elaborated parameter。
 - `-module skidbuffer,SkidPeer` 和 `-keywords SkidPeer,skidbuffer`：验证多目标 module 和多过滤 module。
 - `--keyword-batch-size 1`：验证 `-keywords` 分批实例搜索入口。
 - `--stream`：验证流式聚合反标和实例匹配缓存入口。
-- `--no-params`：验证 parameter 采集跳过时仍能完成端口 yes/no 反标，并在 B 列写 `PARAM_SKIPPED`。
+- `--no-params`：验证 parameter 采集跳过时仍能完成端口 yes/no 反标，并在 C 列写 `PARAM_SKIPPED`。
 
 ### 手动测试：单 module
 
 ```bash
-cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+cd /mnt/hgfs/VMshare/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 
 rm -rf skidbuffer_param_build
 rm -f skidbuffer_param_rtl.f skidbuffer_param_vcs_build.log
@@ -504,8 +506,8 @@ rm -f skidbuffer_trace_template.xlsx skidbuffer_annotated*.xlsx
 rm -f module_parameters.csv skidbuffer_full.csv skidbuffer_module_connections.csv SkidPeer_instances.txt
 
 cat > skidbuffer_param_rtl.f <<'EOF'
-/mnt/hgfs/VMshare-2/CPU_CORE/ysyx/skidbuffer_param_kdb_test/skidbuffer.v
-/mnt/hgfs/VMshare-2/CPU_CORE/ysyx/skidbuffer_param_kdb_test/top_skidbuffer_subsystems.v
+/mnt/hgfs/VMshare/CPU_CORE/ysyx/skidbuffer_param_kdb_test/skidbuffer.v
+/mnt/hgfs/VMshare/CPU_CORE/ysyx/skidbuffer_param_kdb_test/top_skidbuffer_subsystems.v
 EOF
 
 mkdir -p skidbuffer_param_build
@@ -547,10 +549,13 @@ skidbuffer_param_build/simv.daidir/kdb.elab++
 
 然后运行：
 
-```bash
-cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+仓库中已包含 `multi_module_trace_template.xlsx`，测试时直接复用它，不要删除。
 
-rm -f multi_module_trace_template.xlsx multi_module_annotated*.xlsx multi_module_annotate_params.log
+```bash
+cd /mnt/hgfs/VMshare/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+
+test -f multi_module_trace_template.xlsx
+rm -f multi_module_annotated*.xlsx multi_module_annotate_params.log
 rm -f module_parameters.csv skidbuffer_full.csv skidbuffer_module_connections.csv
 rm -f SkidPeer_full.csv SkidPeer_module_connections.csv SkidPeer_instances.txt
 
@@ -578,18 +583,24 @@ SkidPeer_full.csv
 已在 VM 上验证，反标文件中：
 
 ```text
-A1 = instance
-A2 = top.subsys0.u_skid_a
-A3 = top.subsys0.u_skid_b
-A4 = top.subsys0.u_peer_a
-A5 = top.subsys0.u_peer_b
+A1 = module
+B1 = instance
+C1 = parameters
+A2 = skidbuffer
+B2 = top.subsys0.u_skid_a
+A3 = skidbuffer
+B3 = top.subsys0.u_skid_b
+A4 = SkidPeer
+B4 = top.subsys0.u_peer_a
+A5 = SkidPeer
+B5 = top.subsys0.u_peer_b
 ```
 
-每行 B 列是该实例自己的 parameter，例如：
+每行 C 列是该实例自己的 parameter，例如：
 
 ```text
-B2 = OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
-B4 = DW=32'sd8, ID=32'sd9
+C2 = OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
+C4 = DW=32'sd8, ID=32'sd9
 ```
 
 这个测试同时验证了：
@@ -606,7 +617,7 @@ B4 = DW=32'sd8, ID=32'sd9
 直接运行端口 trace：
 
 ```bash
-cd /mnt/hgfs/VMshare-2/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
+cd /mnt/hgfs/VMshare/CPU_CORE/ysyx/npc/csrc/verdi_npi_port_trace
 
 export NPI_LIB=/tmp/npc_build/simv.daidir/kdb.elab++
 export NPI_MODULE=ysyx_22050058_pht

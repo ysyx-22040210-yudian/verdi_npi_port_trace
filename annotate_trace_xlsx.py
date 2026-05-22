@@ -4,13 +4,16 @@ Annotate an XLSX trace template with NPI yes/no connectivity results.
 
 Template layout:
   - column A, row 2..N: target module definition names
-  - column B: generated instance parameter summary
-  - row 1, column C..N: target port names
+  - column B: reserved for output instance paths
+  - column C: reserved for output parameter summaries
+  - row 1, column D..N: target port names
+  - old templates with ports starting from column C are still accepted
 
 Output layout:
-  - column A, row 2..N: concrete target instance paths
-  - column B: elaborated parameters for the instance on the same row
-  - row 1, column C..N: target port names
+  - column A: target module definition name
+  - column B, row 2..N: concrete target instance paths
+  - column C: elaborated parameters for the instance on the same row
+  - row 1, column D..N: target port names
 
 Each instance/port intersection is filled with:
   - yes: at least one driver/load endpoint belongs to an instance of -keywords
@@ -48,6 +51,11 @@ except ImportError as exc:
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_CWD = Path.cwd()
 
+MODULE_COL = 1
+INSTANCE_COL = 2
+PARAMETER_COL = 3
+PORT_START_COL = 4
+
 
 def path_has_contents(path: Path) -> bool:
     if path.is_file():
@@ -82,6 +90,7 @@ class TemplateAxes:
     body_style_cell: Optional[object]
     header_style_cell: Optional[object]
     module_style_cell: Optional[object]
+    instance_style_cell: Optional[object]
     parameter_style_cell: Optional[object]
 
 
@@ -193,6 +202,11 @@ def cell_text(value: object) -> str:
     return str(value).strip()
 
 
+def template_has_instance_column(sheet) -> bool:
+    header_b = cell_text(sheet.cell(row=1, column=INSTANCE_COL).value).lower()
+    return header_b == "instance"
+
+
 def copy_cell_style(dst, src) -> None:
     if src is None:
         return
@@ -217,16 +231,18 @@ def create_minimal_template(
     if sheet_name:
         sheet.title = sheet_name
 
-    sheet.cell(row=1, column=1, value="module")
-    sheet.cell(row=1, column=2, value="parameters")
-    for col, port in enumerate(ports, start=3):
+    sheet.cell(row=1, column=MODULE_COL, value="module")
+    sheet.cell(row=1, column=INSTANCE_COL, value="instance")
+    sheet.cell(row=1, column=PARAMETER_COL, value="parameters")
+    for col, port in enumerate(ports, start=PORT_START_COL):
         sheet.cell(row=1, column=col, value=port)
     for row, module in enumerate(modules, start=2):
-        sheet.cell(row=row, column=1, value=module)
+        sheet.cell(row=row, column=MODULE_COL, value=module)
 
-    sheet.column_dimensions["A"].width = 24
-    sheet.column_dimensions["B"].width = 48
-    for col in range(3, 3 + len(ports)):
+    sheet.column_dimensions["A"].width = 18
+    sheet.column_dimensions["B"].width = 44
+    sheet.column_dimensions["C"].width = 48
+    for col in range(PORT_START_COL, PORT_START_COL + len(ports)):
         sheet.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 16
 
     header_font = openpyxl.styles.Font(bold=True)
@@ -237,7 +253,7 @@ def create_minimal_template(
         min_row=1,
         max_row=max(2, 1 + len(modules)),
         min_col=1,
-        max_col=max(3, 2 + len(ports)),
+        max_col=max(3, 3 + len(ports)),
     ):
         for cell in row:
             cell.border = border
@@ -277,7 +293,8 @@ def extract_modules_and_ports(sheet, cli_modules: str, cli_ports: str) -> Tuple[
 
     if not ports:
         ports = []
-        for col in range(3, sheet.max_column + 1):
+        port_start_col = PORT_START_COL if template_has_instance_column(sheet) else 3
+        for col in range(port_start_col, sheet.max_column + 1):
             value = cell_text(sheet.cell(row=1, column=col).value)
             if value:
                 ports.append(value)
@@ -285,7 +302,7 @@ def extract_modules_and_ports(sheet, cli_modules: str, cli_ports: str) -> Tuple[
     if not modules:
         raise ValueError("no modules found; fill column A or pass -module")
     if not ports:
-        raise ValueError("no ports found; fill row 1 from column C or pass -ports")
+        raise ValueError("no ports found; fill row 1 from the port columns or pass -ports")
     return modules, ports
 
 
@@ -294,34 +311,29 @@ def prepare_template_axes(sheet, modules: Sequence[str], ports: Sequence[str]) -
     col_by_port: Dict[str, int] = {}
 
     for row in range(2, sheet.max_row + 1):
-        value = cell_text(sheet.cell(row=row, column=1).value)
+        value = cell_text(sheet.cell(row=row, column=MODULE_COL).value)
         if value:
             row_by_module.setdefault(value, row)
 
-    for col in range(3, sheet.max_column + 1):
+    for col in range(PORT_START_COL, sheet.max_column + 1):
         value = cell_text(sheet.cell(row=1, column=col).value)
         if value:
             col_by_port.setdefault(value, col)
 
     next_row = max(sheet.max_row + 1, 2)
-    next_col = max(sheet.max_column + 1, 3)
+    next_col = max(sheet.max_column + 1, PORT_START_COL)
 
-    body_style_cell = sheet.cell(row=2, column=3)
-    module_style_cell = sheet.cell(row=2, column=1)
-    header_style_cell = sheet.cell(row=1, column=3)
-    parameter_style_cell = sheet.cell(row=2, column=2)
-
-    parameter_header = sheet.cell(row=1, column=2)
-    if not cell_text(parameter_header.value):
-        parameter_header.value = "parameters"
-        copy_cell_style(parameter_header, header_style_cell)
-        log_step("set parameter header: column=B value=parameters")
+    body_style_cell = sheet.cell(row=2, column=PORT_START_COL)
+    module_style_cell = sheet.cell(row=2, column=MODULE_COL)
+    instance_style_cell = sheet.cell(row=2, column=INSTANCE_COL)
+    header_style_cell = sheet.cell(row=1, column=PORT_START_COL)
+    parameter_style_cell = sheet.cell(row=2, column=PARAMETER_COL)
 
     for module in modules:
         if module in row_by_module:
             continue
         row_by_module[module] = next_row
-        cell = sheet.cell(row=next_row, column=1, value=module)
+        cell = sheet.cell(row=next_row, column=MODULE_COL, value=module)
         copy_cell_style(cell, module_style_cell)
         log_step(f"append module row: row={next_row} module={module}")
         next_row += 1
@@ -341,6 +353,7 @@ def prepare_template_axes(sheet, modules: Sequence[str], ports: Sequence[str]) -
         body_style_cell=body_style_cell,
         header_style_cell=header_style_cell,
         module_style_cell=module_style_cell,
+        instance_style_cell=instance_style_cell,
         parameter_style_cell=parameter_style_cell,
     )
 
@@ -350,53 +363,83 @@ def prepare_instance_axes(
     entries: Sequence[InstanceEntry],
     ports: Sequence[str],
 ) -> TemplateAxes:
+    if not template_has_instance_column(sheet):
+        sheet.insert_cols(INSTANCE_COL, 1)
     axes = prepare_template_axes(sheet, [entry.module for entry in entries], ports)
-    header_cell = sheet.cell(row=1, column=1)
-    header_cell.value = "instance"
-    body_style = axes.body_style_cell
-    module_style = axes.module_style_cell or body_style
-    parameter_style = axes.parameter_style_cell or body_style
+    header_style = axes.header_style_cell or axes.body_style_cell
+
+    for col, text in (
+        (MODULE_COL, "module"),
+        (INSTANCE_COL, "instance"),
+        (PARAMETER_COL, "parameters"),
+    ):
+        cell = sheet.cell(row=1, column=col, value=text)
+        copy_cell_style(cell, header_style)
 
     row_by_module: Dict[str, int] = {}
     start_row = 2
     for idx, entry in enumerate(entries):
         row = start_row + idx
         row_by_module[entry.label] = row
-        cell = sheet.cell(row=row, column=1, value=entry.label)
-        copy_cell_style(cell, module_style)
-        alignment = copy(cell.alignment)
-        alignment.wrap_text = True
-        if alignment.vertical is None:
-            alignment.vertical = "top"
-        cell.alignment = alignment
+        module_cell = sheet.cell(row=row, column=MODULE_COL, value=entry.module)
+        copy_cell_style(module_cell, axes.module_style_cell or axes.body_style_cell)
+        module_alignment = copy(module_cell.alignment)
+        module_alignment.wrap_text = True
+        if module_alignment.vertical is None:
+            module_alignment.vertical = "top"
+        module_cell.alignment = module_alignment
+
+        instance_cell = sheet.cell(row=row, column=INSTANCE_COL, value=entry.inst_full_name or "")
+        copy_cell_style(instance_cell, axes.instance_style_cell or axes.body_style_cell)
+        instance_alignment = copy(instance_cell.alignment)
+        instance_alignment.wrap_text = True
+        if instance_alignment.vertical is None:
+            instance_alignment.vertical = "top"
+        instance_cell.alignment = instance_alignment
+
+        parameter_cell = sheet.cell(row=row, column=PARAMETER_COL)
+        copy_cell_style(parameter_cell, axes.parameter_style_cell or axes.body_style_cell)
+        parameter_alignment = copy(parameter_cell.alignment)
+        parameter_alignment.wrap_text = True
+        if parameter_alignment.vertical is None:
+            parameter_alignment.vertical = "top"
+        parameter_cell.alignment = parameter_alignment
 
     old_max_row = sheet.max_row
     last_entry_row = start_row + len(entries) - 1
     if last_entry_row < old_max_row:
         sheet.delete_rows(last_entry_row + 1, old_max_row - last_entry_row)
 
+    sheet.column_dimensions["A"].width = max(sheet.column_dimensions["A"].width or 0, 18)
+    sheet.column_dimensions["B"].width = max(sheet.column_dimensions["B"].width or 0, 44)
+    sheet.column_dimensions["C"].width = max(sheet.column_dimensions["C"].width or 0, 48)
+    for col in range(PORT_START_COL, sheet.max_column + 1):
+        letter = openpyxl.utils.get_column_letter(col)
+        sheet.column_dimensions[letter].width = max(sheet.column_dimensions[letter].width or 0, 16)
+
     return TemplateAxes(
         row_by_module=row_by_module,
         col_by_port=axes.col_by_port,
-        body_style_cell=body_style,
+        body_style_cell=axes.body_style_cell,
         header_style_cell=axes.header_style_cell,
-        module_style_cell=module_style,
-        parameter_style_cell=parameter_style,
+        module_style_cell=axes.module_style_cell,
+        instance_style_cell=axes.instance_style_cell,
+        parameter_style_cell=axes.parameter_style_cell,
     )
 
 
 def set_parameter_cell(sheet, axes: TemplateAxes, row_key: str, result: str) -> None:
     row = axes.row_by_module[row_key]
-    cell = sheet.cell(row=row, column=2, value=result)
+    cell = sheet.cell(row=row, column=PARAMETER_COL, value=result)
     copy_cell_style(cell, axes.parameter_style_cell or axes.body_style_cell)
     alignment = copy(cell.alignment)
     alignment.wrap_text = True
     if alignment.vertical is None:
         alignment.vertical = "top"
     cell.alignment = alignment
-    current_width = sheet.column_dimensions["B"].width or 0
-    if current_width < 36:
-        sheet.column_dimensions["B"].width = 36
+    current_width = sheet.column_dimensions["C"].width or 0
+    if current_width < 48:
+        sheet.column_dimensions["C"].width = 48
 
 
 def set_result_cell(sheet, axes: TemplateAxes, row_key: str, port: str, result: str) -> None:
@@ -1025,7 +1068,7 @@ def parse_args():
     parser.add_argument(
         "-ports",
         default="",
-        help="comma-separated target ports; defaults to row 1 from column C",
+        help="comma-separated target ports; defaults to the template port columns",
     )
     parser.add_argument("-lib", required=True, help="KDB path, for example kdb.elab++")
     parser.add_argument(

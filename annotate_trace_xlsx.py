@@ -7,7 +7,12 @@ Template layout:
   - column B: generated instance parameter summary
   - row 1, column C..N: target port names
 
-Each module/port intersection is filled with:
+Output layout:
+  - column A, row 2..N: concrete target instance paths
+  - column B: elaborated parameters for the instance on the same row
+  - row 1, column C..N: target port names
+
+Each instance/port intersection is filled with:
   - yes: at least one driver/load endpoint belongs to an instance of -keywords
   - no: no such endpoint is found
   - markers such as driver=Const:'b1, driver=NO_DRIVER, load=NO_LOAD, NO_TRACE
@@ -84,6 +89,16 @@ class TemplateAxes:
 class ModuleTrace:
     rows: Sequence[TraceRow]
     error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class InstanceEntry:
+    module: str
+    inst_full_name: str
+
+    @property
+    def label(self) -> str:
+        return self.inst_full_name or self.module
 
 
 @dataclass
@@ -330,8 +345,48 @@ def prepare_template_axes(sheet, modules: Sequence[str], ports: Sequence[str]) -
     )
 
 
-def set_parameter_cell(sheet, axes: TemplateAxes, module: str, result: str) -> None:
-    row = axes.row_by_module[module]
+def prepare_instance_axes(
+    sheet,
+    entries: Sequence[InstanceEntry],
+    ports: Sequence[str],
+) -> TemplateAxes:
+    axes = prepare_template_axes(sheet, [entry.module for entry in entries], ports)
+    header_cell = sheet.cell(row=1, column=1)
+    header_cell.value = "instance"
+    body_style = axes.body_style_cell
+    module_style = axes.module_style_cell or body_style
+    parameter_style = axes.parameter_style_cell or body_style
+
+    row_by_module: Dict[str, int] = {}
+    start_row = 2
+    for idx, entry in enumerate(entries):
+        row = start_row + idx
+        row_by_module[entry.label] = row
+        cell = sheet.cell(row=row, column=1, value=entry.label)
+        copy_cell_style(cell, module_style)
+        alignment = copy(cell.alignment)
+        alignment.wrap_text = True
+        if alignment.vertical is None:
+            alignment.vertical = "top"
+        cell.alignment = alignment
+
+    old_max_row = sheet.max_row
+    last_entry_row = start_row + len(entries) - 1
+    if last_entry_row < old_max_row:
+        sheet.delete_rows(last_entry_row + 1, old_max_row - last_entry_row)
+
+    return TemplateAxes(
+        row_by_module=row_by_module,
+        col_by_port=axes.col_by_port,
+        body_style_cell=body_style,
+        header_style_cell=axes.header_style_cell,
+        module_style_cell=module_style,
+        parameter_style_cell=parameter_style,
+    )
+
+
+def set_parameter_cell(sheet, axes: TemplateAxes, row_key: str, result: str) -> None:
+    row = axes.row_by_module[row_key]
     cell = sheet.cell(row=row, column=2, value=result)
     copy_cell_style(cell, axes.parameter_style_cell or axes.body_style_cell)
     alignment = copy(cell.alignment)
@@ -344,8 +399,8 @@ def set_parameter_cell(sheet, axes: TemplateAxes, module: str, result: str) -> N
         sheet.column_dimensions["B"].width = 36
 
 
-def set_result_cell(sheet, axes: TemplateAxes, module: str, port: str, result: str) -> None:
-    row = axes.row_by_module[module]
+def set_result_cell(sheet, axes: TemplateAxes, row_key: str, port: str, result: str) -> None:
+    row = axes.row_by_module[row_key]
     col = axes.col_by_port[port]
     cell = sheet.cell(row=row, column=col, value=result)
     copy_cell_style(cell, axes.body_style_cell)
@@ -388,6 +443,36 @@ def split_params_by_subsystem(rows: Sequence[ParamRow], level: int) -> Dict[str,
     return by_subsystem
 
 
+def split_trace_rows_by_instance(rows: Sequence[TraceRow]) -> Dict[str, List[TraceRow]]:
+    by_instance: Dict[str, List[TraceRow]] = {}
+    for row in rows:
+        by_instance.setdefault(row.inst_full_name, []).append(row)
+    return by_instance
+
+
+def split_param_rows_by_instance(rows: Sequence[ParamRow]) -> Dict[str, List[ParamRow]]:
+    by_instance: Dict[str, List[ParamRow]] = {}
+    for row in rows:
+        by_instance.setdefault(row.inst_full_name, []).append(row)
+    return by_instance
+
+
+def instances_from_trace_rows(module: str, rows: Sequence[TraceRow]) -> List[InstanceEntry]:
+    seen: Dict[str, None] = {}
+    for row in rows:
+        if row.inst_full_name:
+            seen.setdefault(row.inst_full_name, None)
+    return [InstanceEntry(module=module, inst_full_name=inst) for inst in sorted(seen)]
+
+
+def instances_from_param_rows(module: str, rows: Sequence[ParamRow]) -> List[InstanceEntry]:
+    seen: Dict[str, None] = {}
+    for row in rows:
+        if row.module == module and row.inst_full_name:
+            seen.setdefault(row.inst_full_name, None)
+    return [InstanceEntry(module=module, inst_full_name=inst) for inst in sorted(seen)]
+
+
 def split_output_path(output: Path, subsystem: str) -> Path:
     return output.with_name(f"{output.stem}__subsys_{safe_name(subsystem)}{output.suffix}")
 
@@ -422,6 +507,79 @@ def format_module_params(module: str, param_rows: Sequence[ParamRow]) -> str:
     return "\n".join(lines) if lines else "NO_PARAMETER"
 
 
+def format_instance_params(module: str, inst_full_name: str, param_rows: Sequence[ParamRow]) -> str:
+    rows = [
+        row
+        for row in param_rows
+        if row.module == module
+        and row.inst_full_name == inst_full_name
+        and row.param_kind != "localparam"
+    ]
+    if not rows:
+        return "NO_PARAMETER"
+
+    parts = []
+    seen = set()
+    for row in rows:
+        key = (row.param_name, row.param_value)
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(f"{row.param_name}={row.param_value}")
+    return ", ".join(parts) if parts else "NO_PARAMETER"
+
+
+def build_instance_entries(
+    modules: Sequence[str],
+    module_traces: Dict[str, ModuleTrace],
+    module_params: Dict[str, Sequence[ParamRow]],
+) -> List[InstanceEntry]:
+    entries: List[InstanceEntry] = []
+    seen: Set[Tuple[str, str]] = set()
+    for module in modules:
+        trace = module_traces.get(module)
+        candidates: List[InstanceEntry] = []
+        if trace is not None and trace.error is None:
+            candidates.extend(instances_from_trace_rows(module, trace.rows))
+        candidates.extend(instances_from_param_rows(module, module_params.get(module, [])))
+        if not candidates:
+            candidates = [InstanceEntry(module=module, inst_full_name="")]
+
+        for entry in candidates:
+            key = (entry.module, entry.inst_full_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+    return entries
+
+
+def build_instance_entries_from_results(
+    modules: Sequence[str],
+    module_port_results: Dict[str, Dict[str, Dict[str, str]]],
+    module_params: Dict[str, Sequence[ParamRow]],
+) -> List[InstanceEntry]:
+    entries: List[InstanceEntry] = []
+    seen: Set[Tuple[str, str]] = set()
+    for module in modules:
+        candidates = [
+            InstanceEntry(module=module, inst_full_name=inst)
+            for inst in sorted(module_port_results.get(module, {}))
+            if inst
+        ]
+        candidates.extend(instances_from_param_rows(module, module_params.get(module, [])))
+        if not candidates:
+            candidates = [InstanceEntry(module=module, inst_full_name="")]
+
+        for entry in candidates:
+            key = (entry.module, entry.inst_full_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+    return entries
+
+
 def write_annotation_workbook(
     *,
     template: Path,
@@ -436,26 +594,36 @@ def write_annotation_workbook(
     missing_marker: str = "NO_MODULE",
 ) -> None:
     workbook, sheet = load_workbook(template, sheet_name)
-    axes = prepare_template_axes(sheet, modules, ports)
     module_param_errors = module_param_errors or {}
+    entries = build_instance_entries(modules, module_traces, module_params)
+    axes = prepare_instance_axes(sheet, entries, ports)
 
-    for module in modules:
+    for entry in entries:
+        row_key = entry.label
+        module = entry.module
         trace = module_traces.get(module, ModuleTrace(rows=[], error=missing_marker))
         if module in module_param_errors:
             param_text = module_param_errors[module]
         else:
-            param_text = format_module_params(module, module_params.get(module, []))
+            param_text = format_instance_params(module, entry.inst_full_name, module_params.get(module, []))
         if param_text == "NO_PARAMETER" and trace.error is not None:
             param_text = trace.error
-        log_step(f"parameter cell module={module} result={param_text}")
-        set_parameter_cell(sheet, axes, module, param_text)
+        log_step(f"parameter cell instance={row_key} module={module} result={param_text}")
+        set_parameter_cell(sheet, axes, row_key, param_text)
+
+        if trace.error is None and entry.inst_full_name:
+            instance_rows = [
+                row for row in trace.rows if row.inst_full_name == entry.inst_full_name
+            ]
+        else:
+            instance_rows = trace.rows
         for port in ports:
             if trace.error is not None:
                 result = trace.error
             else:
-                result = summarize_port(trace.rows, port, filter_instances)
-            log_step(f"cell module={module} port={port} result={result}")
-            set_result_cell(sheet, axes, module, port, result)
+                result = summarize_port(instance_rows, port, filter_instances)
+            log_step(f"cell instance={row_key} module={module} port={port} result={result}")
+            set_result_cell(sheet, axes, row_key, port, result)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(output)
@@ -469,36 +637,39 @@ def write_annotation_results_workbook(
     output: Path,
     modules: Sequence[str],
     ports: Sequence[str],
-    module_port_results: Dict[str, Dict[str, str]],
+    module_port_results: Dict[str, Dict[str, Dict[str, str]]],
     module_params: Dict[str, Sequence[ParamRow]],
     module_errors: Optional[Dict[str, str]] = None,
     module_param_errors: Optional[Dict[str, str]] = None,
     missing_marker: str = "NO_MODULE",
 ) -> None:
     workbook, sheet = load_workbook(template, sheet_name)
-    axes = prepare_template_axes(sheet, modules, ports)
     module_errors = module_errors or {}
     module_param_errors = module_param_errors or {}
+    entries = build_instance_entries_from_results(modules, module_port_results, module_params)
+    axes = prepare_instance_axes(sheet, entries, ports)
 
-    for module in modules:
+    for entry in entries:
+        row_key = entry.label
+        module = entry.module
         trace_error = module_errors.get(module)
         if module in module_param_errors:
             param_text = module_param_errors[module]
         else:
-            param_text = format_module_params(module, module_params.get(module, []))
+            param_text = format_instance_params(module, entry.inst_full_name, module_params.get(module, []))
         if param_text == "NO_PARAMETER" and trace_error is not None:
             param_text = trace_error
-        log_step(f"parameter cell module={module} result={param_text}")
-        set_parameter_cell(sheet, axes, module, param_text)
+        log_step(f"parameter cell instance={row_key} module={module} result={param_text}")
+        set_parameter_cell(sheet, axes, row_key, param_text)
 
-        results = module_port_results.get(module, {})
+        results = module_port_results.get(module, {}).get(entry.inst_full_name, {})
         for port in ports:
             if trace_error is not None:
                 result = trace_error
             else:
                 result = results.get(port, f"no; {missing_marker}")
-            log_step(f"cell module={module} port={port} result={result}")
-            set_result_cell(sheet, axes, module, port, result)
+            log_step(f"cell instance={row_key} module={module} port={port} result={result}")
+            set_result_cell(sheet, axes, row_key, port, result)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(output)
@@ -770,17 +941,32 @@ def finalize_summaries(summaries: Dict[str, PortSummary], ports: Sequence[str]) 
     }
 
 
+def finalize_instance_summaries(
+    summaries_by_instance: Dict[str, Dict[str, PortSummary]],
+    ports: Sequence[str],
+) -> Dict[str, Dict[str, str]]:
+    return {
+        inst: finalize_summaries(summaries, ports)
+        for inst, summaries in summaries_by_instance.items()
+    }
+
+
 def stream_trace_results(
     csv_paths: Sequence[Path],
     ports: Sequence[str],
     matcher: Optional[InstanceMatcher] = None,
     subsystem_level: int = 0,
     matchers_by_subsystem: Optional[Dict[str, InstanceMatcher]] = None,
-) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]], Set[str], int]:
+) -> Tuple[
+    Dict[str, Dict[str, str]],
+    Dict[str, Dict[str, Dict[str, str]]],
+    Set[str],
+    int,
+]:
     port_set = set(ports)
     empty_matcher = InstanceMatcher([])
-    flat_summaries: Dict[str, PortSummary] = {}
-    subsystem_summaries: Dict[str, Dict[str, PortSummary]] = {}
+    flat_summaries: Dict[str, Dict[str, PortSummary]] = {}
+    subsystem_summaries: Dict[str, Dict[str, Dict[str, PortSummary]]] = {}
     subsystems: Set[str] = set()
     total_rows = 0
 
@@ -800,22 +986,22 @@ def stream_trace_results(
                 if subsystem_level:
                     subsystem = subsystem_key(inst, subsystem_level)
                     subsystems.add(subsystem)
-                    summaries = subsystem_summaries.setdefault(subsystem, {})
+                    summaries = subsystem_summaries.setdefault(subsystem, {}).setdefault(inst, {})
                     active_matcher = (
                         matchers_by_subsystem.get(subsystem, empty_matcher)
                         if matchers_by_subsystem is not None
                         else empty_matcher
                     )
                 else:
-                    summaries = flat_summaries
+                    summaries = flat_summaries.setdefault(inst, {})
                     active_matcher = matcher or empty_matcher
 
                 summaries.setdefault(port, PortSummary()).observe(role, signal, active_matcher)
 
-    flat_results = finalize_summaries(flat_summaries, ports) if not subsystem_level else {}
+    flat_results = finalize_instance_summaries(flat_summaries, ports) if not subsystem_level else {}
     subsystem_results = {
-        subsystem: finalize_summaries(summaries, ports)
-        for subsystem, summaries in subsystem_summaries.items()
+        subsystem: finalize_instance_summaries(instance_summaries, ports)
+        for subsystem, instance_summaries in subsystem_summaries.items()
     }
     return flat_results, subsystem_results, subsystems, total_rows
 
@@ -1010,9 +1196,9 @@ def main() -> None:
                     len(filter_instances),
                 )
             )
-            module_port_results: Dict[str, Dict[str, str]] = {}
+            module_port_results: Dict[str, Dict[str, Dict[str, str]]] = {}
             module_errors: Dict[str, str] = {}
-            module_port_results_by_subsystem: Dict[str, Dict[str, Dict[str, str]]] = {}
+            module_port_results_by_subsystem: Dict[str, Dict[str, Dict[str, Dict[str, str]]]] = {}
 
             if args.subsystem_level:
                 filter_instances_by_subsystem = split_instances_by_subsystem(
@@ -1079,7 +1265,7 @@ def main() -> None:
                     raise RuntimeError("no subsystem instances found in streamed trace rows")
                 for subsystem in sorted(subsystems):
                     log_step(f"write subsystem workbook: {subsystem}")
-                    subsystem_results: Dict[str, Dict[str, str]] = {}
+                    subsystem_results: Dict[str, Dict[str, Dict[str, str]]] = {}
                     subsystem_errors: Dict[str, str] = {}
                     subsystem_params: Dict[str, Sequence[ParamRow]] = {}
                     subsystem_param_errors: Dict[str, str] = {}

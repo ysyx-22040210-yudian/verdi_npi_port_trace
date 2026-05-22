@@ -116,10 +116,10 @@ XLSX 反标主入口，适合直接生成反标表。
 | 参数 | 必填 | 含义 |
 | --- | --- | --- |
 | `-template <xlsx>` | 是 | 输入模板。若文件不存在，并且同时传了 `-module` 和 `-ports`，工具会自动生成最小模板。 |
-| `-output <xlsx>` | 是 | 输出反标文件。使用 `-subsystem-level` 时会自动拆成多个 `<output>__subsys_<subsystem>.xlsx`。 |
+| `-output <xlsx>` | 是 | 输出反标文件。使用 `-subsystem-level` 时会自动拆成多个 `<output>__subsys_<subsystem>.xlsx`。输出表中同一个目标 module 的多个例化实例会各占一行。 |
 | `-lib <kdb.elab++>` | 是 | VCS/Verdi 生成的 KDB 路径。必须是已经 elaborate 完成且非空的 KDB。 |
 | `-keywords <module[,module...]>` | 是 | 过滤 module 定义名列表。端口 driver/load 连接到这些实例中的任意一个时写 `yes`。 |
-| `-module <module[,module...]>` | 否 | 目标 module 定义名列表。不传时从模板 A 列第 2 行开始读取。 |
+| `-module <module[,module...]>` | 否 | 目标 module 定义名列表。不传时从模板 A 列第 2 行开始读取。注意这里输入的是 module 定义名，输出时会展开成具体实例路径。 |
 | `-ports <port[,port...]>` | 否 | 目标端口名列表。不传时从模板第 1 行 C 列开始读取。 |
 | `-sheet <name>` | 否 | 指定工作表名。不传时使用第一个 worksheet。 |
 | `-workdir <dir>` | 否 | 中间 CSV、实例列表、parameter CSV 的生成目录。默认是当前命令目录。 |
@@ -208,10 +208,11 @@ pht_from_gshare_or_btb.csv
 
 模板布局：
 
-- A 列第 2 行开始：目标 module 定义名，对应 `-module`。
-- B 列：工具生成，显示该 module 每个例化实例的 parameter。
+- 输入模板中，A 列第 2 行开始可以填写目标 module 定义名，对应 `-module`。
 - 第 1 行 C 列开始：端口名，对应 `-ports`。
-- A 列 module 和第 1 行 port 的交叉单元格写入 `yes/no/常数/悬空` 结果。
+- 输出反标文件中，A 列会改成 `instance`，每个目标 module 的每个具体例化实例单独占一行。
+- 输出反标文件中，B 列显示同一行实例的 elaborated parameter。
+- A 列实例和第 1 行 port 的交叉单元格写入该实例该端口的 `yes/no/常数/悬空` trace 结果。
 
 如果 `-template` 指定的文件不存在，并且命令中已经传入 `-module` 和 `-ports`，
 脚本会在当前目录自动生成一个最小模板。
@@ -268,7 +269,7 @@ pht_from_gshare_or_btb.csv
   日志。现在默认只打印统计信息；需要逐实例调试时再打开。
 - **`--stream` 流式聚合反标**：Python 端不再把 `full.csv` 和
   `module_connections.csv` 全部读成 `TraceRow` 列表，而是边读 CSV 边聚合每个
-  `(module, subsystem, port)` 的最终 yes/no/常数/悬空结果。
+  `(module, subsystem, instance, port)` 的最终 yes/no/常数/悬空结果。
 - **实例匹配缓存**：把 `-keywords` 找到的实例路径预处理成 prefix 集合，并缓存
   signal 是否属于过滤实例的判断结果，避免每行 trace 都遍历所有过滤实例。
 
@@ -348,14 +349,16 @@ yes/no 反标仍会继续生成，B 列会写 `PARAM_TRACE_FAILED: ...`。迁移
 里的默认 parameter。
 
 同一个 module 在同一个 subsystem 下可能例化多次，并且每个实例 parameter 可能
-不同。此时 B 列会显示多组，例如：
+不同。工具会把这些实例展开成多行，每一行只显示当前实例自己的 parameter，例如：
 
 ```text
-top.subsys0.u_skid_a: OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
-top.subsys0.u_skid_b: OPT_LOWPOWER=1'd1, OPT_OUTREG=1'd0, DW=32'sd13
+A2 = top.subsys0.u_skid_a
+B2 = OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
+A3 = top.subsys0.u_skid_b
+B3 = OPT_LOWPOWER=1'd1, OPT_OUTREG=1'd0, DW=32'sd13
 ```
 
-这样做是为了避免丢失同 module 不同实例的 parameter 信息。
+这样做是为了让同一个 module 的不同例化参数和端口 trace 结果一一对应。
 
 大项目迁移时，如果 parameter 采集阶段在 `npi_find_module_params.tcl` 中失败，先用
 `--no-params` 跑通主反标流程，再单独调试 parameter：
@@ -575,21 +578,25 @@ SkidPeer_full.csv
 已在 VM 上验证，反标文件中：
 
 ```text
-A2 = skidbuffer
-A3 = SkidPeer
+A1 = instance
+A2 = top.subsys0.u_skid_a
+A3 = top.subsys0.u_skid_b
+A4 = top.subsys0.u_peer_a
+A5 = top.subsys0.u_peer_b
 ```
 
-`SkidPeer` 的 parameter 在 B3，例如：
+每行 B 列是该实例自己的 parameter，例如：
 
 ```text
-top.subsys0.u_peer_a: DW=32'sd8, ID=32'sd9
-top.subsys0.u_peer_b: DW=32'sd13, ID=32'sd16
+B2 = OPT_LOWPOWER=1'd0, OPT_OUTREG=1'd1, DW=32'sd8
+B4 = DW=32'sd8, ID=32'sd9
 ```
 
 这个测试同时验证了：
 
 - `-module skidbuffer,SkidPeer` 支持多个目标 module。
 - `-keywords SkidPeer,skidbuffer` 支持多个过滤 module。
+- 同一个目标 module 的多个例化实例会在 XLSX 中分成多行。
 - 任意一个过滤 module 的实例连接到目标端口时，交叉单元格都会写 `yes`。
 
 ## 直接 Tcl 调试
@@ -726,10 +733,11 @@ Verdi KDB elaboration done and the database successfully generated
 并且 `kdb.elab++` 非空，则 NPI 反标可以继续使用这个 KDB。测试脚本已经处理了
 这种情况。
 
-### 为什么同一个 module 行显示多组 parameter？
+### 为什么同一个 module 会显示多行？
 
-因为显示的是例化实例 parameter。同一个 module 在同一个 subsystem 下可以有多个
-实例，并且 parameter 可以不同。为了不丢信息，B 列会按实例分别列出。
+因为输出表按具体例化实例反标。同一个 module 在同一个 subsystem 下可以有多个
+实例，并且每个实例的 parameter 和端口 trace 都可能不同，所以工具会为每个实例
+单独开一行，B 列和端口列都只对应这一行的实例。
 
 ### 为什么多 module 测试里没有 `SkidPeer`？
 

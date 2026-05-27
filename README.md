@@ -118,7 +118,7 @@ XLSX 反标主入口，适合直接生成反标表。
 | `-template <xlsx>` | 是 | 输入模板。若文件不存在，并且同时传了 `-module` 和 `-ports`，工具会自动生成最小模板。 |
 | `-output <xlsx>` | 是 | 输出反标文件。使用 `-subsystem-level` 时会自动拆成多个 `<output>__subsys_<subsystem>.xlsx`。输出表中同一个目标 module 的多个例化实例会各占一行。 |
 | `-lib <kdb.elab++>` | 是 | VCS/Verdi 生成的 KDB 路径。必须是已经 elaborate 完成且非空的 KDB。 |
-| `-keywords <module[,module...]>` | 是 | 过滤 module 定义名列表。端口 driver/load 连接到这些实例中的任意一个时写 `yes`。 |
+| `-keywords <module[,module...]>` | 是 | 过滤 module 定义名列表。端口方向相关的 trace 端点连接到这些实例中的任意一个时写 `yes`。`input` 看 driver，`output` 看 loader。 |
 | `-module <module[,module...]>` | 否 | 目标 module 定义名列表。不传时从模板 A 列第 2 行开始读取。注意这里输入的是 module 定义名，输出时会展开成具体实例路径。 |
 | `-ports <port[,port...]>` | 否 | 目标端口名列表。不传时从模板第 1 行 D 列开始读取；旧模板从 C 列开始也兼容。 |
 | `-sheet <name>` | 否 | 指定工作表名。不传时使用第一个 worksheet。 |
@@ -128,6 +128,7 @@ XLSX 反标主入口，适合直接生成反标表。
 | `--no-params` | 否 | 跳过 module parameter 采集，C 列写 `PARAM_SKIPPED`。大项目迁移时可先用它验证端口反标主流程。 |
 | `--strict-params` | 否 | parameter 采集失败时直接中断。默认是非阻断，失败时 C 列写 `PARAM_TRACE_FAILED: ...`。 |
 | `--stream` | 否 | 启用流式聚合反标和实例匹配缓存。大项目建议开启，降低 Python 运行期运存。 |
+| `-regcombo-as-keyword 0\|1` | 否 | 默认 `0`。设为 `1` 时，如果方向相关的 driver/loader trace 端点是 `RegCombo` 节点，也按命中 `-keywords` 处理并反标 `yes`。`input` 只看 driver，`output` 只看 loader。 |
 | `--match-cache-size <N>` | 否 | `--stream` 模式下缓存多少个 signal 归属判断结果。默认 `200000`；`0` 关闭缓存。 |
 | `--keyword-batch-size <N>` | 否 | 每个 Verdi 进程查找多少个 `-keywords` module。默认 `8`；大项目崩溃时可降为 `4/2/1`。 |
 | `--keyword-continue-on-error` | 否 | 某个 keyword 单独搜索仍失败时跳过并继续，同时生成 `*_instances_errors.log`。默认关闭。 |
@@ -333,10 +334,13 @@ yes/no 反标仍会继续生成，C 列会写 `PARAM_TRACE_FAILED: ...`。迁移
 
 交叉单元格的常见取值：
 
-- `yes`：该端口至少有一个 driver/load 端点连接到 `-keywords` module 的实例。
-- `no`：没有找到连接到任意 `-keywords` module 实例的 driver/load 端点。
-- `driver=Const:<value>` 或 `load=Const:<value>`：发现常数 driver/load。
-- `driver=NO_DRIVER` 或 `load=NO_LOAD`：发现悬空端点。
+- `yes`：该端口方向相关的 trace 端点连接到 `-keywords` module 的实例。`input` 端口只看 driver，`output` 端口只看 loader，`inout` 或方向未知时两边都看。
+- `yes`：如果命令带 `-regcombo-as-keyword 1`，方向相关端点是 `RegCombo` 节点时也会写 `yes`。
+- `no`：该端口方向相关的 trace 端点没有连接到任意 `-keywords` module 实例。
+- `no; driver_actual=<signal>`：`input` 端口的 driver 不是 `-keywords` 实例，也不是常数/悬空，同时把实际 driver 写出。
+- `no; loader_actual=<signal>`：`output` 端口的 loader 不是 `-keywords` 实例，也不是常数/悬空，同时把实际 loader 写出。
+- `driver=Const:<value>` 或 `load=Const:<value>`：方向相关端点发现常数 tie。
+- `driver=NO_DRIVER` 或 `load=NO_LOAD`：方向相关端点发现悬空。
 - `no; NO_TRACE`：目标 module 中不存在该端口，或 NPI 未返回该端口 trace。
 - `NO_MODULE`：当前 KDB 中找不到 `-module` 指定的 module 实例。
 - `NO_SUBSYSTEM_INSTANCE`：按 subsystem 拆分时，该 subsystem 下没有这个 module 的实例。
@@ -672,6 +676,13 @@ module 边界 trace CSV：
 
 ```csv
 inst_full_name,port_name,role,module_signal_full_name
+```
+
+当前 CSV 会额外包含 `port_dir` 列，实际格式为：
+
+```csv
+inst_full_name,port_name,port_dir,role,signal_full_name
+inst_full_name,port_name,port_dir,role,module_signal_full_name
 ```
 
 完整 trace 会穿过 module 边界，可能出现 Verdi 内部节点，例如：

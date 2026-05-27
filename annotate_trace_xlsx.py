@@ -16,7 +16,9 @@ Output layout:
   - row 1, column D..N: target port names
 
 Each instance/port intersection is filled with:
-  - yes: at least one driver/load endpoint belongs to an instance of -keywords
+  - yes: the direction-relevant endpoint belongs to an instance of -keywords
+         (input uses driver, output uses load, inout/unknown uses both)
+         or -regcombo-as-keyword is 1 and that endpoint is a RegCombo node
   - no: no such endpoint is found
   - markers such as driver=Const:'b1, driver=NO_DRIVER, load=NO_LOAD, NO_TRACE
 
@@ -69,6 +71,7 @@ def path_has_contents(path: Path) -> bool:
 class TraceRow:
     inst_full_name: str
     port_name: str
+    port_dir: str
     role: str
     signal_full_name: str
 
@@ -114,20 +117,57 @@ class InstanceEntry:
 class PortSummary:
     seen: bool = False
     matched: bool = False
+    regcombo_as_keyword: bool = False
+    port_dir: str = ""
     details: List[str] = field(default_factory=list)
     detail_seen: Set[str] = field(default_factory=set)
+    actual_details: List[str] = field(default_factory=list)
+    actual_seen: Set[str] = field(default_factory=set)
 
     def observe(self, role: str, signal: str, matcher: "InstanceMatcher") -> None:
         self.seen = True
-        if matcher.belongs(signal):
+        signal_text = signal or ""
+        role_text = role or "unknown"
+        relevant_endpoint = should_report_actual_endpoint(self.port_dir, role_text)
+        matched = matcher.belongs(signal_text)
+        if self.regcombo_as_keyword and relevant_endpoint and is_regcombo_signal(signal_text):
+            matched = True
+        if matched and relevant_endpoint:
             self.matched = True
 
-        role_text = role or "unknown"
-        signal_text = signal or ""
-        if signal_text.startswith("Const:"):
+        if not self.port_dir:
+            self.port_dir = "unknown"
+
+        if signal_text.startswith("Const:") and relevant_endpoint:
             self.add_detail(f"{role_text}={signal_text}")
-        elif signal_text in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"} or signal_text.startswith("ERROR:"):
+        elif (
+            signal_text in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"}
+            or signal_text.startswith("ERROR:")
+        ) and relevant_endpoint:
             self.add_detail(f"{role_text}={signal_text}")
+        elif not matched:
+            self.add_actual(role_text, signal_text)
+
+    def observe_row(self, row: "TraceRow", matcher: "InstanceMatcher") -> None:
+        if row.port_dir and self.port_dir in {"", "unknown"}:
+            self.port_dir = normalize_port_dir(row.port_dir)
+        self.observe(row.role, row.signal_full_name, matcher)
+
+    def add_actual(self, role: str, signal: str) -> None:
+        if not signal:
+            return
+        if signal.startswith("Const:"):
+            return
+        if signal in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"} or signal.startswith("ERROR:"):
+            return
+        if not should_report_actual_endpoint(self.port_dir, role):
+            return
+        label = "driver_actual" if role == "driver" else "loader_actual" if role == "load" else f"{role}_actual"
+        detail = f"{label}={signal}"
+        if detail in self.actual_seen:
+            return
+        self.actual_seen.add(detail)
+        self.actual_details.append(detail)
 
     def add_detail(self, detail: str) -> None:
         if detail in self.detail_seen:
@@ -141,6 +181,8 @@ class PortSummary:
         text = "yes" if self.matched else "no"
         if self.details:
             text += "; " + "; ".join(self.details)
+        if not self.matched and self.actual_details:
+            text += "; " + "; ".join(self.actual_details)
         return text
 
 
@@ -200,6 +242,33 @@ def cell_text(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def normalize_port_dir(port_dir: str) -> str:
+    text = (port_dir or "").strip().lower()
+    if text in {"input", "npiinput", "1"}:
+        return "input"
+    if text in {"output", "npioutput", "2"}:
+        return "output"
+    if text in {"inout", "npiinout", "3"}:
+        return "inout"
+    return "unknown"
+
+
+def should_report_actual_endpoint(port_dir: str, role: str) -> bool:
+    direction = normalize_port_dir(port_dir)
+    role = (role or "").strip().lower()
+    if direction == "input":
+        return role == "driver"
+    if direction == "output":
+        return role == "load"
+    if direction == "inout":
+        return role in {"driver", "load"}
+    return role in {"driver", "load"}
+
+
+def is_regcombo_signal(signal: str) -> bool:
+    return re.search(r"(^|[/:])RegCombo\.", signal or "") is not None
 
 
 def template_has_instance_column(sheet) -> bool:
@@ -635,6 +704,7 @@ def write_annotation_workbook(
     module_param_errors: Optional[Dict[str, str]] = None,
     filter_instances: Sequence[str],
     missing_marker: str = "NO_MODULE",
+    regcombo_as_keyword: bool = False,
 ) -> None:
     workbook, sheet = load_workbook(template, sheet_name)
     module_param_errors = module_param_errors or {}
@@ -664,7 +734,12 @@ def write_annotation_workbook(
             if trace.error is not None:
                 result = trace.error
             else:
-                result = summarize_port(instance_rows, port, filter_instances)
+                result = summarize_port(
+                    instance_rows,
+                    port,
+                    filter_instances,
+                    regcombo_as_keyword=regcombo_as_keyword,
+                )
             log_step(f"cell instance={row_key} module={module} port={port} result={result}")
             set_result_cell(sheet, axes, row_key, port, result)
 
@@ -918,12 +993,14 @@ def read_trace_rows(csv_paths: Sequence[Path]) -> List[TraceRow]:
                 normalized = TraceRow(
                     inst_full_name=row.get("inst_full_name", ""),
                     port_name=row.get("port_name", ""),
+                    port_dir=normalize_port_dir(row.get("port_dir", "")),
                     role=row.get("role", ""),
                     signal_full_name=signal,
                 )
                 key = (
                     normalized.inst_full_name,
                     normalized.port_name,
+                    normalized.port_dir,
                     normalized.role,
                     normalized.signal_full_name,
                 )
@@ -952,29 +1029,21 @@ def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tupl
     return full_csv, module_csv
 
 
-def summarize_port(rows: Sequence[TraceRow], port: str, filter_instances: Sequence[str]) -> str:
+def summarize_port(
+    rows: Sequence[TraceRow],
+    port: str,
+    filter_instances: Sequence[str],
+    regcombo_as_keyword: bool = False,
+) -> str:
     port_rows = [row for row in rows if row.port_name == port]
     if not port_rows:
         return "no; NO_TRACE"
 
-    matched = any(
-        signal_belongs_to_instance(row.signal_full_name, filter_instances)
-        for row in port_rows
-    )
-    details: List[str] = []
+    matcher = InstanceMatcher(filter_instances)
+    summary = PortSummary(regcombo_as_keyword=regcombo_as_keyword)
     for row in port_rows:
-        role = row.role or "unknown"
-        signal = row.signal_full_name or ""
-        if signal.startswith("Const:"):
-            details.append(f"{role}={signal}")
-        elif signal in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"} or signal.startswith("ERROR:"):
-            details.append(f"{role}={signal}")
-
-    unique_details = list(dict.fromkeys(details))
-    result = "yes" if matched else "no"
-    if unique_details:
-        result += "; " + "; ".join(unique_details)
-    return result
+        summary.observe_row(row, matcher)
+    return summary.result()
 
 
 def finalize_summaries(summaries: Dict[str, PortSummary], ports: Sequence[str]) -> Dict[str, str]:
@@ -1000,6 +1069,7 @@ def stream_trace_results(
     matcher: Optional[InstanceMatcher] = None,
     subsystem_level: int = 0,
     matchers_by_subsystem: Optional[Dict[str, InstanceMatcher]] = None,
+    regcombo_as_keyword: bool = False,
 ) -> Tuple[
     Dict[str, Dict[str, str]],
     Dict[str, Dict[str, Dict[str, str]]],
@@ -1023,8 +1093,16 @@ def stream_trace_results(
                     continue
                 total_rows += 1
                 inst = row.get("inst_full_name", "")
+                port_dir = normalize_port_dir(row.get("port_dir", ""))
                 role = row.get("role", "")
                 signal = row.get("signal_full_name") or row.get("module_signal_full_name") or ""
+                trace_row = TraceRow(
+                    inst_full_name=inst,
+                    port_name=port,
+                    port_dir=port_dir,
+                    role=role,
+                    signal_full_name=signal,
+                )
 
                 if subsystem_level:
                     subsystem = subsystem_key(inst, subsystem_level)
@@ -1039,7 +1117,10 @@ def stream_trace_results(
                     summaries = flat_summaries.setdefault(inst, {})
                     active_matcher = matcher or empty_matcher
 
-                summaries.setdefault(port, PortSummary()).observe(role, signal, active_matcher)
+                summaries.setdefault(
+                    port,
+                    PortSummary(regcombo_as_keyword=regcombo_as_keyword),
+                ).observe_row(trace_row, active_matcher)
 
     flat_results = finalize_instance_summaries(flat_summaries, ports) if not subsystem_level else {}
     subsystem_results = {
@@ -1113,6 +1194,17 @@ def parse_args():
         "--stream",
         action="store_true",
         help="use streaming CSV aggregation and cached instance matching for large designs",
+    )
+    parser.add_argument(
+        "-regcombo-as-keyword",
+        "--regcombo-as-keyword",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help=(
+            "when set to 1, treat a direction-relevant RegCombo trace endpoint "
+            "as a keyword match and annotate the port as yes"
+        ),
     )
     parser.add_argument(
         "--match-cache-size",
@@ -1281,6 +1373,7 @@ def main() -> None:
                             ports,
                             subsystem_level=args.subsystem_level,
                             matchers_by_subsystem=matchers_by_subsystem,
+                            regcombo_as_keyword=bool(args.regcombo_as_keyword),
                         )
                         module_port_results_by_subsystem[module] = subsystem_results
                         subsystems.update(module_subsystems)
@@ -1296,6 +1389,7 @@ def main() -> None:
                             [full_csv, module_csv],
                             ports,
                             matcher=matcher,
+                            regcombo_as_keyword=bool(args.regcombo_as_keyword),
                         )
                         module_port_results[module] = results
                         log_step(f"stream loaded trace rows for {module}: {total_rows}")
@@ -1423,18 +1517,19 @@ def main() -> None:
                         )
                     else:
                         subsystem_traces[module] = ModuleTrace(rows=subsystem_rows)
-                write_annotation_workbook(
-                    template=template,
-                    sheet_name=args.sheet,
-                    output=split_output_path(output, subsystem),
+                    write_annotation_workbook(
+                        template=template,
+                        sheet_name=args.sheet,
+                        output=split_output_path(output, subsystem),
                     modules=modules,
                     ports=ports,
                     module_traces=subsystem_traces,
                     module_params=subsystem_params,
-                    module_param_errors=subsystem_param_errors,
-                    filter_instances=subsystem_filter_instances,
-                    missing_marker="NO_SUBSYSTEM_INSTANCE",
-                )
+                        module_param_errors=subsystem_param_errors,
+                        filter_instances=subsystem_filter_instances,
+                        missing_marker="NO_SUBSYSTEM_INSTANCE",
+                        regcombo_as_keyword=bool(args.regcombo_as_keyword),
+                    )
         else:
             write_annotation_workbook(
                 template=template,
@@ -1446,6 +1541,7 @@ def main() -> None:
                 module_params=params_by_module,
                 module_param_errors=param_errors_by_module,
                 filter_instances=filter_instances,
+                regcombo_as_keyword=bool(args.regcombo_as_keyword),
             )
     finally:
         log_step(f"intermediate files kept in workdir={workdir}")

@@ -145,6 +145,9 @@ log_step "design import done"
 # Build port -> direction map by parsing the module source file
 # -----------------------------------------------------------------------
 proc build_port_dir_map { srcfile target_mod } {
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
     set fh [open $srcfile r]
     set lines [split [read $fh] "\n"]
     close $fh
@@ -152,23 +155,49 @@ proc build_port_dir_map { srcfile target_mod } {
     set map {}
     set in_module 0
     foreach line $lines {
-        set t [string trim $line]
-        if { [regexp {^module\s+} $t] && [string match "module ${target_mod} *" $t] ||
-             [regexp {^module\s+} $t] && [string match "module ${target_mod}(*" $t] ||
-             [regexp {^module\s+} $t] && [string match "module ${target_mod}#*" $t] ||
-             $t eq "module ${target_mod}" } {
+        set t [regsub {//.*$} [string trim $line] ""]
+        if { [regexp {^module\s+([A-Za-z_][A-Za-z0-9_$]*)} $t -> modname] &&
+             $modname eq $target_mod } {
             set in_module 1
         }
         if { $in_module } {
-            if { [regexp {^\s*(input|output|inout)\s+(?:reg\s+)?(?:wire\s+)?(?:\[[^\]]*\]\s+)?(\w+)} $t -> dir portname] } {
-                dict set map $portname $dir
+            if { [regexp {^\s*(input|output|inout)\s+(.*)} $t -> dir rest] } {
+                regsub -all {\[[^\]]*\]} $rest " " rest
+                regsub -all {[;()]} $rest " " rest
+                foreach item [split $rest ","] {
+                    regsub {=.*$} $item "" item
+                    set item [string trim $item]
+                    if { [regexp {([A-Za-z_][A-Za-z0-9_$]*)$} $item -> portname] } {
+                        dict set map $portname $dir
+                    }
+                }
             }
-            if { [regexp {\);\s*$} $t] || [regexp {^endmodule} $t] } {
+            if { [regexp {^endmodule([^A-Za-z0-9_$]|$)} $t] } {
                 set in_module 0
             }
         }
     }
     return $map
+}
+
+proc get_handle_source_file { hdl } {
+    foreach getter {::npi_L1::npi_ut_get_hdl_info ::npi_L1::npi_nl_ut_get_hdl_info} {
+        set info ""
+        catch { set info [$getter $hdl] }
+        if { $info eq "" } {
+            continue
+        }
+        foreach token [split $info ","] {
+            set token [string trim $token " \t{}"]
+            if { [regexp {([^ \t{}]+\.s?vh?)\s*:} $token -> path] && [file exists $path] } {
+                return $path
+            }
+            if { [regexp {([^ \t{}]+\.s?vh?)$} $token -> path] && [file exists $path] } {
+                return $path
+            }
+        }
+    }
+    return ""
 }
 
 # -----------------------------------------------------------------------
@@ -218,6 +247,17 @@ proc get_port_direction { port_hdl } {
         return "unknown"
     }
 
+    if { [string equal -nocase $dir_val "input"] ||
+         [string equal -nocase $dir_val "npiInput"] } {
+        return "input"
+    } elseif { [string equal -nocase $dir_val "output"] ||
+               [string equal -nocase $dir_val "npiOutput"] } {
+        return "output"
+    } elseif { [string equal -nocase $dir_val "inout"] ||
+               [string equal -nocase $dir_val "npiInout"] } {
+        return "inout"
+    }
+
     # npiInput = 1, npiOutput = 2, npiInout = 3 (standard NPI constants)
     if { $dir_val == 1 } {
         return "input"
@@ -230,6 +270,10 @@ proc get_port_direction { port_hdl } {
     }
 }
 
+proc write_trace_row { fh inst_path portname dir role signal } {
+    puts $fh "$inst_path,$portname,$dir,$role,$signal"
+}
+
 # -----------------------------------------------------------------------
 # Resolve a driver/load handle to its full signal name
 # -----------------------------------------------------------------------
@@ -240,13 +284,20 @@ proc is_const_literal_name { name } {
     if { [string match "Const:*" $name] } {
         return 1
     }
+    if { [regexp {^'[01xXzZ?]$} $name] } {
+        return 1
+    }
     if { [regexp {^'[bBoOdDhH][0-9a-fA-F_xXzZ]+$} $name] } {
         return 1
     }
-    if { [regexp {^[0-9]+('[bBoOdDhH][0-9a-fA-F_xXzZ]+)$} $name] } {
+    if { [regexp {^[0-9]+'[sS]?[bBoOdDhH][0-9a-fA-F_xXzZ?]+$} $name] } {
         return 1
     }
-    if { [regexp {^[0-9]+$} $name] } {
+    if { [regexp {^-?[0-9]+$} $name] } {
+        return 1
+    }
+    if { [regexp {^[\{\},\s0-9_'sSbBoOdDhHxXzZ?]+$} $name] &&
+         [regexp {'[sS]?[bBoOdDhH]?[0-9a-fA-F_xXzZ?]+} $name] } {
         return 1
     }
     return 0
@@ -299,6 +350,31 @@ proc hdl_to_name { hdl } {
     set info ""
     catch { set info [::npi_L1::npi_nl_ut_get_hdl_info $hdl] }
     set signame [string trim [lindex [split $info ","] 1]]
+    if { $signame eq "" } {
+        catch { set info [::npi_L1::npi_ut_get_hdl_info $hdl] }
+        set signame [string trim [lindex [split $info ","] 1]]
+    }
+    if { $signame eq "" } {
+        set net_hdl ""
+        catch { set net_hdl [::npi_L1::npi_nl_port_instport_2_net $hdl] }
+        if { $net_hdl ne "" && $net_hdl != 0 } {
+            set net_literal 0
+            catch { set net_literal [::npi_L1::npi_nl_ut_get_actual_is_literal $net_hdl] }
+            if { $net_literal == 1 } {
+                set value ""
+                catch { set value [::npi_L1::npi_nl_ut_get_actual_value $net_hdl] }
+                if { $value ne "" } {
+                    return "Const:$value"
+                }
+            }
+            catch { set info [::npi_L1::npi_nl_ut_get_hdl_info $net_hdl] }
+            set signame [string trim [lindex [split $info ","] 1]]
+            if { $signame eq "" } {
+                catch { set info [::npi_L1::npi_ut_get_hdl_info $net_hdl] }
+                set signame [string trim [lindex [split $info ","] 1]]
+            }
+        }
+    }
     return [normalize_signal_name $signame]
 }
 
@@ -364,6 +440,8 @@ proc format_signal_name { signame inst_path } {
 # Process one instance: emit CSV rows for all its ports
 # -----------------------------------------------------------------------
 proc process_instance { inst_path parent_path instname port_filter outfh module_outfh } {
+    global target_mod
+
     log_step "process_instance=$inst_path parent=$parent_path instname=$instname"
     # Get IO handles for port direction lookup (needed for internal logic)
     set io_hdl_list [get_io_handles $inst_path]
@@ -371,6 +449,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
     # Build port name -> direction map from IO handles
     set port_dir_map {}
+    set src_port_dir_map {}
     foreach io_hdl $io_hdl_list {
         set portname [get_port_name $io_hdl]
         if { $portname ne "" } {
@@ -386,6 +465,14 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         return
     }
     log_step "port_handle_count=[llength $port_hdl_list] instance=$inst_path"
+
+    if { [llength $port_hdl_list] > 0 } {
+        set module_srcfile [get_handle_source_file [lindex $port_hdl_list 0]]
+        if { $module_srcfile ne "" } {
+            set src_port_dir_map [build_port_dir_map $module_srcfile $target_mod]
+            log_step "source_port_direction_file=$module_srcfile parsed_ports=[dict size $src_port_dir_map] instance=$inst_path"
+        }
+    }
 
     # Get high-side connections (parent scope nets) and low-side connections (child scope)
     set port2highList {}
@@ -433,6 +520,9 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { [dict exists $port_dir_map $portname] } {
             set dir [dict get $port_dir_map $portname]
         }
+        if { $dir eq "unknown" && [dict exists $src_port_dir_map $portname] } {
+            set dir [dict get $src_port_dir_map $portname]
+        }
 
         # Get high-side and low-side connected signals
         set high_sigs {}
@@ -447,8 +537,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
         if { [llength $high_sigs] == 0 && [llength $low_sigs] == 0 } {
             log_step "port_no_connections instance=$inst_path port=$portname"
-            puts $outfh "$inst_path,$portname,driver,ERROR:no_connections"
-            puts $outfh "$inst_path,$portname,load,ERROR:no_connections"
+            write_trace_row $outfh $inst_path $portname $dir driver "ERROR:no_connections"
+            write_trace_row $outfh $inst_path $portname $dir load "ERROR:no_connections"
             continue
         }
 
@@ -474,43 +564,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_drivers {}
         set module_drivers {}
         foreach sig_hdl $driver_sigs {
-            # Try different methods to get signal info
-            set signame ""
-
-            # Method 1: Try npi_nl_ut_get_hdl_info (for netlist objects)
-            if { [catch {
-                set sig_info [::npi_L1::npi_nl_ut_get_hdl_info $sig_hdl]
-                set signame [string trim [lindex [split $sig_info ","] 1]]
-            }] } {}
-
-            # Method 2: If empty, try npi_ut_get_hdl_info (for general objects)
-            if { $signame eq "" } {
-                if { [catch {
-                    set sig_info [::npi_L1::npi_ut_get_hdl_info $sig_hdl]
-                    set signame [string trim [lindex [split $sig_info ","] 1]]
-                }] } {}
-            }
-
-            # Method 3: If still empty, try to convert handle to net and get name
-            if { $signame eq "" } {
-                # Try to get net handle if this is a port/instport
-                set net_hdl ""
-                if { [catch {
-                    set net_hdl [::npi_L1::npi_nl_port_instport_2_net $sig_hdl]
-                }] } {}
-
-                if { $net_hdl ne "" && $net_hdl != 0 } {
-                    if { [catch {
-                        set sig_info [::npi_L1::npi_nl_ut_get_hdl_info $net_hdl]
-                        set signame [string trim [lindex [split $sig_info ","] 1]]
-                    }] } {}
-                }
-            }
-
+            set signame [hdl_to_name $sig_hdl]
             if { $signame eq "" } {
                 continue
             }
-            set signame [normalize_signal_name $signame]
 
             if { $module_outfh ne "" && [is_const_literal_name $signame] } {
                 lappend module_drivers $signame
@@ -557,43 +614,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_loads {}
         set module_loads {}
         foreach sig_hdl $load_sigs {
-            # Try different methods to get signal info
-            set signame ""
-
-            # Method 1: Try npi_nl_ut_get_hdl_info (for netlist objects)
-            if { [catch {
-                set sig_info [::npi_L1::npi_nl_ut_get_hdl_info $sig_hdl]
-                set signame [string trim [lindex [split $sig_info ","] 1]]
-            }] } {}
-
-            # Method 2: If empty, try npi_ut_get_hdl_info (for general objects)
-            if { $signame eq "" } {
-                if { [catch {
-                    set sig_info [::npi_L1::npi_ut_get_hdl_info $sig_hdl]
-                    set signame [string trim [lindex [split $sig_info ","] 1]]
-                }] } {}
-            }
-
-            # Method 3: If still empty, try to convert handle to net and get name
-            if { $signame eq "" } {
-                # Try to get net handle if this is a port/instport
-                set net_hdl ""
-                if { [catch {
-                    set net_hdl [::npi_L1::npi_nl_port_instport_2_net $sig_hdl]
-                }] } {}
-
-                if { $net_hdl ne "" && $net_hdl != 0 } {
-                    if { [catch {
-                        set sig_info [::npi_L1::npi_nl_ut_get_hdl_info $net_hdl]
-                        set signame [string trim [lindex [split $sig_info ","] 1]]
-                    }] } {}
-                }
-            }
-
+            set signame [hdl_to_name $sig_hdl]
             if { $signame eq "" } {
                 continue
             }
-            set signame [normalize_signal_name $signame]
 
             # Trace loads
             set loadList {}
@@ -658,11 +682,11 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { $module_outfh ne "" } {
             foreach sig $module_drivers {
                 set formatted_sig [format_signal_name $sig $inst_path]
-                puts $module_outfh "$inst_path,$portname,driver,$formatted_sig"
+                write_trace_row $module_outfh $inst_path $portname $dir driver $formatted_sig
             }
             foreach sig $module_loads {
                 set formatted_sig [format_signal_name $sig $inst_path]
-                puts $module_outfh "$inst_path,$portname,load,$formatted_sig"
+                write_trace_row $module_outfh $inst_path $portname $dir load $formatted_sig
             }
         }
 
@@ -670,36 +694,25 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { [llength $all_drivers] > 0 } {
             foreach sig $all_drivers {
                 set formatted_sig [format_signal_name $sig $inst_path]
-                puts $outfh "$inst_path,$portname,driver,$formatted_sig"
+                write_trace_row $outfh $inst_path $portname $dir driver $formatted_sig
             }
         } else {
             # If no drivers found via tracing, output the direct connection signal
             # This handles cases where trace APIs cannot follow the signal further
             if { [llength $driver_sigs] > 0 } {
                 foreach sig_hdl $driver_sigs {
-                    set signame ""
-                    catch {
-                        set sig_info [::npi_L1::npi_nl_ut_get_hdl_info $sig_hdl]
-                        set signame [string trim [lindex [split $sig_info ","] 1]]
-                    }
-                    if { $signame eq "" } {
-                        catch {
-                            set sig_info [::npi_L1::npi_ut_get_hdl_info $sig_hdl]
-                            set signame [string trim [lindex [split $sig_info ","] 1]]
-                        }
-                    }
+                    set signame [hdl_to_name $sig_hdl]
                     if { $signame ne "" } {
-                        set signame [normalize_signal_name $signame]
                         if { [is_self_port_signal $signame $inst_path $portname] } {
                             continue
                         }
                         set formatted_sig [format_signal_name $signame $inst_path]
-                        puts $outfh "$inst_path,$portname,driver,$formatted_sig"
+                        write_trace_row $outfh $inst_path $portname $dir driver $formatted_sig
                     }
                 }
             }
             if { [llength $driver_sigs] == 0 } {
-                puts $outfh "$inst_path,$portname,driver,NO_DRIVER"
+                write_trace_row $outfh $inst_path $portname $dir driver "NO_DRIVER"
             }
         }
 
@@ -707,32 +720,22 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { [llength $all_loads] > 0 } {
             foreach sig $all_loads {
                 set formatted_sig [format_signal_name $sig $inst_path]
-                puts $outfh "$inst_path,$portname,load,$formatted_sig"
+                write_trace_row $outfh $inst_path $portname $dir load $formatted_sig
             }
         } else {
             # If no loads found via tracing, output the direct connection signal
             # This is valid when a signal is connected but not actually used
             if { [llength $load_sigs] > 0 } {
                 foreach sig_hdl $load_sigs {
-                    set signame ""
-                    catch {
-                        set sig_info [::npi_L1::npi_nl_ut_get_hdl_info $sig_hdl]
-                        set signame [string trim [lindex [split $sig_info ","] 1]]
-                    }
-                    if { $signame eq "" } {
-                        catch {
-                            set sig_info [::npi_L1::npi_ut_get_hdl_info $sig_hdl]
-                            set signame [string trim [lindex [split $sig_info ","] 1]]
-                        }
-                    }
+                    set signame [hdl_to_name $sig_hdl]
                     if { $signame ne "" } {
                         set formatted_sig [format_signal_name $signame $inst_path]
-                        puts $outfh "$inst_path,$portname,load,$formatted_sig"
+                        write_trace_row $outfh $inst_path $portname $dir load $formatted_sig
                     }
                 }
             }
             if { [llength $load_sigs] == 0 } {
-                puts $outfh "$inst_path,$portname,load,NO_LOAD"
+                write_trace_row $outfh $inst_path $portname $dir load "NO_LOAD"
             }
         }
     }
@@ -758,9 +761,9 @@ log_step "found_target_instance_handles=[llength $hdlList]"
 
 # Print CSV header
 log_step "write CSV headers"
-puts $outfh "inst_full_name,port_name,role,signal_full_name"
+puts $outfh "inst_full_name,port_name,port_dir,role,signal_full_name"
 if { $module_outfh ne "" } {
-    puts $module_outfh "inst_full_name,port_name,role,module_signal_full_name"
+    puts $module_outfh "inst_full_name,port_name,port_dir,role,module_signal_full_name"
 }
 
 set processed_instances 0

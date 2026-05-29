@@ -111,6 +111,31 @@ if { [llength $port_filter] > 0 } {
     log_step "port_filter=<all ports>"
 }
 
+set const_trace_max_depth 16
+if { [info exists env(NPI_CONST_TRACE_MAX_DEPTH)] && $env(NPI_CONST_TRACE_MAX_DEPTH) ne "" } {
+    if { [string is integer -strict $env(NPI_CONST_TRACE_MAX_DEPTH)] && $env(NPI_CONST_TRACE_MAX_DEPTH) >= 0 } {
+        set const_trace_max_depth $env(NPI_CONST_TRACE_MAX_DEPTH)
+    }
+}
+log_step "const_trace_max_depth=$const_trace_max_depth"
+
+set const_source_fallback 1
+if { [info exists env(NPI_CONST_SOURCE_FALLBACK)] && $env(NPI_CONST_SOURCE_FALLBACK) ne "" } {
+    set const_source_fallback_raw [string tolower $env(NPI_CONST_SOURCE_FALLBACK)]
+    if { $const_source_fallback_raw eq "0" ||
+         $const_source_fallback_raw eq "false" ||
+         $const_source_fallback_raw eq "no" ||
+         $const_source_fallback_raw eq "off" } {
+        set const_source_fallback 0
+    } elseif { $const_source_fallback_raw eq "1" ||
+               $const_source_fallback_raw eq "true" ||
+               $const_source_fallback_raw eq "yes" ||
+               $const_source_fallback_raw eq "on" } {
+        set const_source_fallback 1
+    }
+}
+log_step "const_source_fallback=$const_source_fallback"
+
 # Output file (written by shell via NPI_OUTFILE env var)
 if { [info exists env(NPI_OUTFILE)] && $env(NPI_OUTFILE) ne "" } {
     set outfh [open $env(NPI_OUTFILE) w]
@@ -310,6 +335,276 @@ proc normalize_signal_name { name } {
     return $name
 }
 
+proc strip_wrapping_parens { text } {
+    set text [string trim $text]
+    set changed 1
+    while { $changed } {
+        set changed 0
+        if { [string length $text] >= 2 &&
+             [string index $text 0] eq "(" &&
+             [string index $text end] eq ")" } {
+            set text [string trim [string range $text 1 end-1]]
+            set changed 1
+        }
+    }
+    return $text
+}
+
+proc const_value_from_rhs { rhs const_map } {
+    set rhs [strip_wrapping_parens $rhs]
+    regsub -all {\s+} $rhs "" rhs_no_space
+    if { [is_const_literal_name $rhs_no_space] } {
+        return [normalize_signal_name $rhs_no_space]
+    }
+    if { [regexp {^[A-Za-z_][A-Za-z0-9_$]*$} $rhs_no_space] &&
+         [dict exists $const_map $rhs_no_space] } {
+        return [dict get $const_map $rhs_no_space]
+    }
+    return ""
+}
+
+proc last_identifier_before_equal { text } {
+    set idx [string first "=" $text]
+    if { $idx < 0 } {
+        return ""
+    }
+    set lhs [string trim [string range $text 0 [expr {$idx - 1}]]]
+    regsub {\[[^\]]+\]\s*$} $lhs "" lhs
+    if { [regexp {([A-Za-z_][A-Za-z0-9_$]*)\s*$} $lhs -> name] } {
+        return $name
+    }
+    return ""
+}
+
+proc build_const_assign_map { srcfile } {
+    global const_assign_map_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
+    if { [info exists const_assign_map_cache($srcfile)] } {
+        return $const_assign_map_cache($srcfile)
+    }
+
+    set fh [open $srcfile r]
+    set text ""
+    foreach line [split [read $fh] "\n"] {
+        regsub {//.*$} $line "" line
+        append text " " [string trim $line]
+    }
+    close $fh
+
+    set const_map {}
+    foreach stmt [split $text ";"] {
+        set stmt [string trim $stmt]
+        if { $stmt eq "" } {
+            continue
+        }
+
+        if { [regexp {^(localparam|parameter)\s+(.+)$} $stmt -> _ rest] } {
+            set name [last_identifier_before_equal $rest]
+            if { $name ne "" } {
+                set rhs [string range $rest [expr {[string first "=" $rest] + 1}] end]
+                set value [const_value_from_rhs $rhs $const_map]
+                if { $value ne "" } {
+                    dict set const_map $name $value
+                }
+            }
+            continue
+        }
+
+        if { [regexp {^assign\s+([A-Za-z_][A-Za-z0-9_$]*)(\[[^\]]+\])?\s*=\s*(.+)$} $stmt -> name bit rhs] } {
+            if { $bit eq "" } {
+                set value [const_value_from_rhs $rhs $const_map]
+                if { $value ne "" } {
+                    dict set const_map $name $value
+                }
+            }
+            continue
+        }
+
+        if { [regexp {^(wire|logic|reg)\s+(.+)$} $stmt -> _ rest] } {
+            foreach item [split $rest ","] {
+                if { [string first "=" $item] < 0 } {
+                    continue
+                }
+                set name [last_identifier_before_equal $item]
+                if { $name eq "" } {
+                    continue
+                }
+                set rhs [string range $item [expr {[string first "=" $item] + 1}] end]
+                set value [const_value_from_rhs $rhs $const_map]
+                if { $value ne "" } {
+                    dict set const_map $name $value
+                }
+            }
+        }
+    }
+
+    set const_assign_map_cache($srcfile) $const_map
+    return $const_map
+}
+
+proc signal_leaf_name { signame } {
+    set signame [normalize_signal_name $signame]
+    if { [is_const_literal_name $signame] } {
+        return ""
+    }
+    regsub {#\[[^\]]+\]$} $signame "" signame
+    regsub {\[[^\]]+\]$} $signame "" signame
+    if { [regexp {([A-Za-z_][A-Za-z0-9_$]*)$} $signame -> name] } {
+        return $name
+    }
+    return ""
+}
+
+proc parent_instance_path { inst_path } {
+    set parts [split $inst_path "."]
+    if { [llength $parts] <= 1 } {
+        return ""
+    }
+    return [join [lrange $parts 0 end-1] "."]
+}
+
+proc strip_signal_selects { signame } {
+    regsub {#\[[^\]]+\]$} $signame "" signame
+    regsub {\[[^\]]+\]$} $signame "" signame
+    return $signame
+}
+
+proc signal_matches_inst_port { signame inst_path portname } {
+    set signame [strip_signal_selects [normalize_signal_name $signame]]
+    if { [is_const_literal_name $signame] || $inst_path eq "" || $portname eq "" } {
+        return 0
+    }
+
+    set full_port "${inst_path}.${portname}"
+    if { $signame eq $full_port } {
+        return 1
+    }
+
+    set inst_leaf [lindex [split $inst_path "."] end]
+    set leaf_port "${inst_leaf}.${portname}"
+    if { $signame eq $leaf_port } {
+        return 1
+    }
+
+    return 0
+}
+
+proc get_inst_port_handle_by_signal { inst_path signame } {
+    foreach port_hdl [get_port_handles $inst_path] {
+        set portname [get_port_name $port_hdl]
+        if { [signal_matches_inst_port $signame $inst_path $portname] } {
+            return $port_hdl
+        }
+    }
+    return ""
+}
+
+proc get_high_conn_sigs_for_port_hdl { inst_path target_port_hdl } {
+    set port2highList {}
+    if { [catch { ::npi_L1::npi_inst_port_2_high_conn_sig $inst_path port2highList } e] } {
+        return {}
+    }
+    foreach pair $port2highList {
+        set port_hdl [lindex $pair 0]
+        if { $port_hdl == $target_port_hdl } {
+            return [lindex $pair 1]
+        }
+    }
+    return {}
+}
+
+proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
+    if { $max_depth <= 0 } {
+        return ""
+    }
+
+    set current_hdl $sig_hdl
+    set current_name [normalize_signal_name $signame]
+    set current_inst $start_inst
+    set depth 0
+    set visited {}
+
+    while { $depth < $max_depth } {
+        if { [is_const_literal_name $current_name] } {
+            return $current_name
+        }
+        if { $current_inst eq "" || $current_name eq "" } {
+            return ""
+        }
+
+        set visit_key "${current_inst}|${current_name}"
+        if { [lsearch -exact $visited $visit_key] >= 0 } {
+            log_step "const_parent_port_trace_stop reason=loop signal=$current_name inst=$current_inst"
+            return ""
+        }
+        lappend visited $visit_key
+
+        set port_hdl [get_inst_port_handle_by_signal $current_inst $current_name]
+        if { $port_hdl eq "" } {
+            return ""
+        }
+
+        set high_sigs [get_high_conn_sigs_for_port_hdl $current_inst $port_hdl]
+        log_step "const_parent_port_trace depth=$depth inst=$current_inst signal=$current_name high_conn_count=[llength $high_sigs]"
+        if { [llength $high_sigs] == 0 } {
+            return ""
+        }
+
+        foreach high_hdl $high_sigs {
+            set high_name [hdl_to_name $high_hdl]
+            if { [is_const_literal_name $high_name] } {
+                log_step "const_driver_from_parent_port_chain signal=$current_name inst=$current_inst value=$high_name depth=$depth"
+                return $high_name
+            }
+        }
+
+        if { [llength $high_sigs] != 1 } {
+            return ""
+        }
+
+        set current_hdl [lindex $high_sigs 0]
+        set current_name [hdl_to_name $current_hdl]
+        set current_inst [parent_instance_path $current_inst]
+        incr depth
+    }
+
+    log_step "const_parent_port_trace_stop reason=max_depth signal=$current_name inst=$current_inst depth=$max_depth"
+    return ""
+}
+
+proc const_driver_from_connected_signal { sig_hdl signame } {
+    global const_source_fallback
+
+    set signame [normalize_signal_name $signame]
+    if { [is_const_literal_name $signame] } {
+        return $signame
+    }
+    if { !$const_source_fallback } {
+        return ""
+    }
+
+    set srcfile [get_handle_source_file $sig_hdl]
+    if { $srcfile eq "" } {
+        return ""
+    }
+
+    set leaf [signal_leaf_name $signame]
+    if { $leaf eq "" } {
+        return ""
+    }
+
+    set const_map [build_const_assign_map $srcfile]
+    if { [dict exists $const_map $leaf] } {
+        set value [dict get $const_map $leaf]
+        log_step "const_driver_from_parent_signal signal=$signame source=$srcfile value=$value"
+        return $value
+    }
+    return ""
+}
+
 proc is_self_port_signal { signame inst_path portname } {
     set signame [normalize_signal_name $signame]
     if { [is_const_literal_name $signame] } {
@@ -440,7 +735,7 @@ proc format_signal_name { signame inst_path } {
 # Process one instance: emit CSV rows for all its ports
 # -----------------------------------------------------------------------
 proc process_instance { inst_path parent_path instname port_filter outfh module_outfh } {
-    global target_mod
+    global target_mod const_trace_max_depth
 
     log_step "process_instance=$inst_path parent=$parent_path instname=$instname"
     # Get IO handles for port direction lookup (needed for internal logic)
@@ -569,8 +864,29 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 continue
             }
 
+            set const_driver_for_connection 0
+
             if { $module_outfh ne "" && [is_const_literal_name $signame] } {
                 lappend module_drivers $signame
+                set const_driver_for_connection 1
+            }
+
+            set parent_const_driver [const_driver_from_connected_signal $sig_hdl $signame]
+            if { $parent_const_driver ne "" } {
+                lappend all_drivers $parent_const_driver
+                set const_driver_for_connection 1
+                if { $module_outfh ne "" } {
+                    lappend module_drivers $parent_const_driver
+                }
+            }
+
+            set parent_port_const_driver [const_driver_from_parent_ports $sig_hdl $signame $parent_path $const_trace_max_depth]
+            if { $parent_port_const_driver ne "" } {
+                lappend all_drivers $parent_port_const_driver
+                set const_driver_for_connection 1
+                if { $module_outfh ne "" } {
+                    lappend module_drivers $parent_port_const_driver
+                }
             }
 
             # Trace drivers
@@ -594,7 +910,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             # Trace module-boundary drivers. passMod=0 keeps module port
             # connections as trace endpoints; these are emitted to the side CSV.
-            if { $module_outfh ne "" } {
+            if { $module_outfh ne "" && !$const_driver_for_connection } {
                 set moduleDriverList {}
                 catch { ::npi_L1::npi_nl_trace_driver $signame moduleDriverList 0 0 }
                 if { [llength $moduleDriverList] == 0 } {

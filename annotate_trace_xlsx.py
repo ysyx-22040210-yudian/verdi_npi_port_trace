@@ -123,6 +123,7 @@ class PortSummary:
     detail_seen: Set[str] = field(default_factory=set)
     actual_details: List[str] = field(default_factory=list)
     actual_seen: Set[str] = field(default_factory=set)
+    actual_blocked_roles: Set[str] = field(default_factory=set)
 
     def observe(self, role: str, signal: str, matcher: "InstanceMatcher") -> None:
         self.seen = True
@@ -139,11 +140,13 @@ class PortSummary:
             self.port_dir = "unknown"
 
         if signal_text.startswith("Const:") and relevant_endpoint:
+            self.block_actual(role_text)
             self.add_detail(f"{role_text}={signal_text}")
         elif (
             signal_text in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"}
             or signal_text.startswith("ERROR:")
         ) and relevant_endpoint:
+            self.block_actual(role_text)
             self.add_detail(f"{role_text}={signal_text}")
         elif not matched:
             self.add_actual(role_text, signal_text)
@@ -155,6 +158,8 @@ class PortSummary:
 
     def add_actual(self, role: str, signal: str) -> None:
         if not signal:
+            return
+        if role in self.actual_blocked_roles:
             return
         if signal.startswith("Const:"):
             return
@@ -168,6 +173,18 @@ class PortSummary:
             return
         self.actual_seen.add(detail)
         self.actual_details.append(detail)
+
+    def block_actual(self, role: str) -> None:
+        self.actual_blocked_roles.add(role)
+        label = "driver_actual" if role == "driver" else "loader_actual" if role == "load" else f"{role}_actual"
+        prefix = f"{label}="
+        if not any(detail.startswith(prefix) for detail in self.actual_details):
+            return
+        self.actual_details = [
+            detail for detail in self.actual_details
+            if not detail.startswith(prefix)
+        ]
+        self.actual_seen = set(self.actual_details)
 
     def add_detail(self, detail: str) -> None:
         if detail in self.detail_seen:
@@ -1024,6 +1041,14 @@ def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tupl
     cmd.extend(["-lib", args.lib])
     if ports:
         cmd.extend(["-ports", ",".join(ports)])
+    cmd.extend(
+        [
+            "-const-source-fallback",
+            str(args.const_source_fallback),
+            "-const-trace-depth",
+            str(args.const_trace_depth),
+        ]
+    )
 
     run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv)
     return full_csv, module_csv
@@ -1207,6 +1232,27 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "-const-source-fallback",
+        "--const-source-fallback",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help=(
+            "enable source-based constant fallback for parent nets tied by assign/declaration. "
+            "Set to 0 in very large designs to reduce source parsing work."
+        ),
+    )
+    parser.add_argument(
+        "-const-trace-depth",
+        "--const-trace-depth",
+        type=int,
+        default=16,
+        help=(
+            "maximum parent port recursion depth for constant tie backtrace. "
+            "Use 0 to disable recursive parent-port constant tracing."
+        ),
+    )
+    parser.add_argument(
         "--match-cache-size",
         type=int,
         default=200000,
@@ -1245,6 +1291,8 @@ def parse_args():
         parser.error("--match-cache-size must be 0 or a positive integer.")
     if args.keyword_batch_size < 0:
         parser.error("--keyword-batch-size must be 0 or a positive integer.")
+    if args.const_trace_depth < 0:
+        parser.error("-const-trace-depth must be 0 or a positive integer.")
     return args
 
 
@@ -1288,6 +1336,8 @@ def main() -> None:
     log_step(f"output={output}")
     log_step(f"lib={args.lib}")
     log_step(f"workdir={workdir}")
+    log_step(f"const_source_fallback={args.const_source_fallback}")
+    log_step(f"const_trace_depth={args.const_trace_depth}")
 
     try:
         workbook, sheet = load_workbook(template, args.sheet)

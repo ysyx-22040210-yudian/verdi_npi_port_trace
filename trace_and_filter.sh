@@ -5,7 +5,8 @@
 #   ./trace_and_filter.sh -module <target_module> -lib <kdb.elab++> \
 #                         -keywords <filter_module[,filter_module...]> \
 #                         [-output <output.csv>] [-ports <port1,port2,...>] \
-#                         [--keyword-batch-size <n>]
+#                         [--keyword-batch-size <n>] \
+#                         [-const-source-fallback 0|1] [-const-trace-depth <N>]
 #
 # Example:
 #   ./trace_and_filter.sh -module ysyx_22050058_id \
@@ -31,6 +32,8 @@ TOP=""
 KEYWORD_BATCH_SIZE="${KEYWORD_BATCH_SIZE:-8}"
 KEYWORD_CONTINUE_ON_ERROR=0
 KEYWORD_LOG_INSTANCES=0
+CONST_SOURCE_FALLBACK="${NPI_CONST_SOURCE_FALLBACK:-1}"
+CONST_TRACE_DEPTH="${NPI_CONST_TRACE_MAX_DEPTH:-16}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -45,14 +48,23 @@ while [ $# -gt 0 ]; do
         --keyword-batch-size|-keyword-batch-size) KEYWORD_BATCH_SIZE="$2"; shift 2 ;;
         --keyword-continue-on-error|-keyword-continue-on-error) KEYWORD_CONTINUE_ON_ERROR=1; shift ;;
         --keyword-log-instances|-keyword-log-instances) KEYWORD_LOG_INSTANCES=1; shift ;;
+        -const-source-fallback|--const-source-fallback) CONST_SOURCE_FALLBACK="$2"; shift 2 ;;
+        -const-trace-depth|--const-trace-depth) CONST_TRACE_DEPTH="$2"; shift 2 ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
     esac
 done
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>]" >&2
     exit 1
 fi
+case "$CONST_SOURCE_FALLBACK" in
+    0|1) ;;
+    *) echo "[ERROR] -const-source-fallback must be 0 or 1, got: $CONST_SOURCE_FALLBACK" >&2; exit 1 ;;
+esac
+case "$CONST_TRACE_DEPTH" in
+    ''|*[!0-9]*) echo "[ERROR] -const-trace-depth must be 0 or a positive integer, got: $CONST_TRACE_DEPTH" >&2; exit 1 ;;
+esac
 
 if [ -n "$FILELIST" ] || [ -n "$TOP" ] || [ -n "$INCDIR" ]; then
     echo "[ERROR] KDB input is mandatory. Do not use -filelist, -top, or -incdir; use -lib <kdb.elab++>." >&2
@@ -112,6 +124,8 @@ log_step "filter_instance_list=$INSTANCE_LIST"
 log_step "keyword_batch_size=$KEYWORD_BATCH_SIZE"
 log_step "keyword_continue_on_error=$KEYWORD_CONTINUE_ON_ERROR"
 log_step "keyword_log_instances=$KEYWORD_LOG_INSTANCES"
+log_step "const_source_fallback=$CONST_SOURCE_FALLBACK"
+log_step "const_trace_depth=$CONST_TRACE_DEPTH"
 log_step "boundary_filtered=$BOUNDARY_FILTERED"
 log_step "full_owner_filtered=$FULL_FILTERED"
 log_step "final_output=$OUTPUT"
@@ -119,6 +133,7 @@ log_step "final_output=$OUTPUT"
 # Build npi_trace.sh command
 TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
 TRACE_CMD="$TRACE_CMD -lib $LIB"
+TRACE_CMD="$TRACE_CMD -const-source-fallback $CONST_SOURCE_FALLBACK -const-trace-depth $CONST_TRACE_DEPTH"
 if [ -n "$PORTS" ]; then
     TRACE_CMD="$TRACE_CMD -ports $PORTS"
 fi

@@ -700,6 +700,75 @@ proc is_module_boundary_signal { signame } {
     return [regexp {^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)(\[[0-9]+(:[0-9]+)?\])?(\.[A-Za-z_][A-Za-z0-9_$]*(\[[0-9]+(:[0-9]+)?\])?)*$} $signame]
 }
 
+proc append_unique_signal { list_var signame } {
+    upvar 1 $list_var values
+
+    set signame [normalize_signal_name $signame]
+    if { $signame eq "" } {
+        return 0
+    }
+    if { [lsearch -exact $values $signame] >= 0 } {
+        return 0
+    }
+
+    lappend values $signame
+    return 1
+}
+
+proc collect_loads_by_name { signame all_loads_var module_loads_var } {
+    upvar 1 $all_loads_var all_loads
+    upvar 1 $module_loads_var module_loads
+
+    set signame [normalize_signal_name $signame]
+    if { $signame eq "" || [is_const_literal_name $signame] } {
+        return
+    }
+
+    set loadList {}
+    if { [catch { ::npi_L1::npi_nl_trace_load $signame loadList 1 1 } err] } {
+        log_step "load_assign_trace_error passMod=1 signal=$signame error=$err"
+        set loadList {}
+    }
+
+    foreach hdl $loadList {
+        set sig [hdl_to_name $hdl]
+        if { $sig eq "" } {
+            continue
+        }
+        append_unique_signal all_loads $sig
+    }
+
+    set moduleLoadList {}
+    if { [catch { ::npi_L1::npi_nl_trace_load $signame moduleLoadList 1 0 } err] } {
+        log_step "load_assign_trace_error passMod=0 signal=$signame error=$err"
+        set moduleLoadList {}
+    }
+    foreach hdl $moduleLoadList {
+        set sig [hdl_to_name $hdl]
+        if { [is_module_boundary_signal $sig] } {
+            append_unique_signal module_loads $sig
+            append_unique_signal all_loads $sig
+        }
+    }
+
+    # npi_nl_trace_load can stop at assign-generated SigTap/Combo pins for
+    # sliced fanout such as "assign B = A[10:0]". The connection API with
+    # assignCell=0 passes through assign cells and, with isStopAtPin=1, returns
+    # real module instance ports connected to the same network.
+    set connLoadList {}
+    if { [catch { ::npi_L1::npi_nl_sig_2_mod_inst_conn $signame connLoadList 0 1 } err] } {
+        log_step "load_assign_conn_error signal=$signame error=$err"
+        set connLoadList {}
+    }
+    foreach hdl $connLoadList {
+        set sig [hdl_to_name $hdl]
+        if { [is_module_boundary_signal $sig] } {
+            append_unique_signal module_loads $sig
+            append_unique_signal all_loads $sig
+        }
+    }
+}
+
 # -----------------------------------------------------------------------
 # Format signal name for better readability
 # Remove common prefix and simplify the output
@@ -935,38 +1004,16 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 continue
             }
 
-            # Trace loads
-            set loadList {}
-            set r2 [::npi_L1::npi_nl_trace_load $signame loadList 0 1]
+            collect_loads_by_name $signame all_loads module_loads
 
-            # If no loads found, try handle-based tracing
-            # Only retry if loadList is actually empty
-            if { [llength $loadList] == 0 } {
+            # If string-based tracing returns no endpoint, keep the old
+            # handle-based fallback for the direct connection only.
+            if { [llength $all_loads] == 0 } {
                 set loadList {}
                 catch { ::npi_L1::npi_nl_trace_load_by_hdl $sig_hdl loadList }
-            }
-
-            foreach hdl $loadList {
-                set sig [hdl_to_name $hdl]
-                if { $sig ne "" } {
-                    lappend all_loads $sig
-                }
-            }
-
-            # Trace module-boundary loads. passMod=0 keeps module port
-            # connections as trace endpoints; these are emitted to the side CSV.
-            if { $module_outfh ne "" } {
-                set moduleLoadList {}
-                catch { ::npi_L1::npi_nl_trace_load $signame moduleLoadList 0 0 }
-                if { [llength $moduleLoadList] == 0 } {
-                    set moduleLoadList {}
-                    catch { ::npi_L1::npi_nl_trace_load_by_hdl $sig_hdl moduleLoadList 0 0 }
-                }
-                foreach hdl $moduleLoadList {
+                foreach hdl $loadList {
                     set sig [hdl_to_name $hdl]
-                    if { [is_module_boundary_signal $sig] } {
-                        lappend module_loads $sig
-                    }
+                    append_unique_signal all_loads $sig
                 }
             }
         }
@@ -979,6 +1026,14 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         }
         set all_drivers $filtered_drivers
 
+        set filtered_loads {}
+        foreach sig $all_loads {
+            if { ![is_self_port_signal $sig $inst_path $portname] } {
+                lappend filtered_loads $sig
+            }
+        }
+        set all_loads $filtered_loads
+
         set filtered_module_drivers {}
         foreach sig $module_drivers {
             if { ![is_self_port_signal $sig $inst_path $portname] } {
@@ -986,6 +1041,14 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             }
         }
         set module_drivers $filtered_module_drivers
+
+        set filtered_module_loads {}
+        foreach sig $module_loads {
+            if { ![is_self_port_signal $sig $inst_path $portname] } {
+                lappend filtered_module_loads $sig
+            }
+        }
+        set module_loads $filtered_module_loads
 
         # Remove duplicates
         set all_drivers [lsort -unique $all_drivers]

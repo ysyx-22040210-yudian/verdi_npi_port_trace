@@ -369,8 +369,13 @@ class RoundedSection:
         self.body = self.ttk.Frame(self.frame, style="Card.TFrame")
         self.window = self.canvas.create_window((self.margin, self.margin), window=self.frame, anchor="nw")
         if title:
-            self.title = self.ttk.Label(self.frame, text=title, style="SectionTitle.TLabel")
-            self.title.pack(anchor="w", pady=(0, 10))
+            title_row = self.ttk.Frame(self.frame, style="Card.TFrame")
+            title_row.pack(fill="x", pady=(0, 10))
+            marker = self.tk.Canvas(title_row, width=8, height=20, borderwidth=0, highlightthickness=0, background=THEME["card_bg"])
+            marker.pack(side="left", padx=(0, 8))
+            draw_rounded_rect(marker, 1, 2, 7, 18, 3, fill=THEME["accent"], outline=THEME["accent"])
+            self.title = self.ttk.Label(title_row, text=title, style="SectionTitle.TLabel")
+            self.title.pack(side="left", anchor="w")
         self.body.pack(fill="both", expand=True)
         self.frame.bind("<Configure>", self._sync_height)
         self.canvas.bind("<Configure>", self._sync_width)
@@ -393,13 +398,25 @@ class RoundedSection:
         self.canvas.delete("rounded_bg")
         draw_rounded_rect(
             self.canvas,
-            3,
-            4,
-            width - 2,
+            6,
+            8,
+            width - 3,
             height - 1,
             self.radius,
-            fill="#eadfd3",
-            outline="#eadfd3",
+            fill="#dfd1c3",
+            outline="#dfd1c3",
+            width=1,
+            tags="rounded_bg",
+        )
+        draw_rounded_rect(
+            self.canvas,
+            3,
+            5,
+            width - 5,
+            height - 4,
+            self.radius,
+            fill="#efe6dc",
+            outline="#efe6dc",
             width=1,
             tags="rounded_bg",
         )
@@ -412,6 +429,15 @@ class RoundedSection:
             self.radius,
             fill=THEME["card_bg"],
             outline=THEME["border"],
+            width=1,
+            tags="rounded_bg",
+        )
+        self.canvas.create_line(
+            12,
+            3,
+            width - 16,
+            3,
+            fill="#fff8ef",
             width=1,
             tags="rounded_bg",
         )
@@ -686,6 +712,300 @@ class RoundedButton:
             self.command()
 
 
+class RoundedToggle:
+    def __init__(
+        self,
+        tk_module,
+        parent,
+        text: str,
+        variable,
+        ui_family: str,
+        background: str = None,
+    ) -> None:
+        self.tk = tk_module
+        self.text = text
+        self.variable = variable
+        self.ui_family = ui_family
+        self.background = background or THEME["card_bg"]
+        self.width = max(150, len(text) * 7 + 56)
+        self.height = 32
+        self.hover = False
+        self.canvas = self.tk.Canvas(
+            parent,
+            width=self.width,
+            height=self.height,
+            borderwidth=0,
+            highlightthickness=0,
+            background=self.background,
+            cursor="hand2",
+        )
+        self.canvas.bind("<Enter>", self._enter)
+        self.canvas.bind("<Leave>", self._leave)
+        self.canvas.bind("<ButtonRelease-1>", self._toggle)
+        try:
+            self.variable.trace_add("write", lambda *_args: self._draw())
+        except Exception:
+            pass
+        self._draw()
+
+    def pack(self, *args, **kwargs) -> None:
+        self.canvas.pack(*args, **kwargs)
+
+    def grid(self, *args, **kwargs) -> None:
+        self.canvas.grid(*args, **kwargs)
+
+    def _is_on(self) -> bool:
+        try:
+            return bool(self.variable.get())
+        except Exception:
+            return False
+
+    def _draw(self) -> None:
+        is_on = self._is_on()
+        self.canvas.delete("all")
+        track_fill = THEME["accent"] if is_on else "#e8ded2"
+        track_outline = THEME["accent_hover"] if is_on else THEME["border"]
+        knob_x = 25 if is_on else 13
+        if self.hover and not is_on:
+            track_fill = "#efe4d8"
+        if self.hover and is_on:
+            track_fill = THEME["accent_hover"]
+        draw_rounded_rect(
+            self.canvas,
+            1,
+            7,
+            43,
+            25,
+            9,
+            fill=track_fill,
+            outline=track_outline,
+            width=1,
+        )
+        self.canvas.create_oval(
+            knob_x,
+            9,
+            knob_x + 14,
+            23,
+            fill="#ffffff",
+            outline="#f8efe5",
+            width=1,
+        )
+        self.canvas.create_text(
+            52,
+            self.height // 2,
+            text=self.text,
+            anchor="w",
+            fill=THEME["text"] if is_on else THEME["muted"],
+            font=(self.ui_family, 9, "bold" if is_on else "normal"),
+        )
+
+    def _enter(self, _event) -> None:
+        self.hover = True
+        self._draw()
+
+    def _leave(self, _event) -> None:
+        self.hover = False
+        self._draw()
+
+    def _toggle(self, _event) -> None:
+        try:
+            self.variable.set(not bool(self.variable.get()))
+        except Exception:
+            pass
+
+
+class RoundedInput:
+    def __init__(
+        self,
+        tk_module,
+        parent,
+        variable,
+        ui_family: str,
+        background: str = None,
+        width: int = 260,
+        height: int = 36,
+    ) -> None:
+        self.tk = tk_module
+        self.variable = variable
+        self.ui_family = ui_family
+        self.background = background or THEME["card_bg"]
+        self.height = height
+        self.focused = False
+        self.canvas = self.tk.Canvas(
+            parent,
+            width=width,
+            height=height,
+            borderwidth=0,
+            highlightthickness=0,
+            background=self.background,
+        )
+        self.entry = self.tk.Entry(
+            self.canvas,
+            textvariable=variable,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            background=THEME["field_bg"],
+            foreground=THEME["text"],
+            insertbackground=THEME["text"],
+            selectbackground=THEME["accent_soft"],
+            selectforeground=THEME["text"],
+            font=(ui_family, 10),
+        )
+        self.window = self.canvas.create_window(13, height // 2, window=self.entry, anchor="w", height=height - 14)
+        self.canvas.bind("<Configure>", self._on_configure)
+        self.entry.bind("<FocusIn>", self._focus_in)
+        self.entry.bind("<FocusOut>", self._focus_out)
+        self.canvas.bind("<Button-1>", lambda _event: self.entry.focus_set())
+        self._draw(width, height)
+
+    def pack(self, *args, **kwargs) -> None:
+        self.canvas.pack(*args, **kwargs)
+
+    def grid(self, *args, **kwargs) -> None:
+        self.canvas.grid(*args, **kwargs)
+
+    def configure(self, **kwargs) -> None:
+        if "state" in kwargs:
+            self.entry.configure(state=kwargs["state"])
+        self.entry.configure(**{key: value for key, value in kwargs.items() if key != "state"})
+
+    config = configure
+
+    def _draw(self, width: int, height: int) -> None:
+        self.canvas.delete("input_bg")
+        outline = THEME["accent"] if self.focused else THEME["border"]
+        shadow = "#eadfd3" if not self.focused else "#e2cabb"
+        draw_rounded_rect(
+            self.canvas,
+            3,
+            4,
+            width - 2,
+            height - 1,
+            12,
+            fill=shadow,
+            outline=shadow,
+            tags="input_bg",
+        )
+        draw_rounded_rect(
+            self.canvas,
+            1,
+            1,
+            width - 4,
+            height - 5,
+            12,
+            fill=THEME["field_bg"],
+            outline=outline,
+            width=1,
+            tags="input_bg",
+        )
+        self.canvas.create_line(13, 3, max(13, width - 18), 3, fill="#fff8ef", tags="input_bg")
+        self.canvas.tag_lower("input_bg")
+
+    def _on_configure(self, event) -> None:
+        self.canvas.itemconfigure(self.window, width=max(20, event.width - 26))
+        self._draw(event.width, self.height)
+
+    def _focus_in(self, _event) -> None:
+        self.focused = True
+        self._draw(self.canvas.winfo_width(), self.height)
+
+    def _focus_out(self, _event) -> None:
+        self.focused = False
+        self._draw(self.canvas.winfo_width(), self.height)
+
+
+class ModeTabButton:
+    def __init__(self, tk_module, parent, mode: str, text: str, command, ui_family: str) -> None:
+        self.tk = tk_module
+        self.mode = mode
+        self.text = text
+        self.command = command
+        self.ui_family = ui_family
+        self.selected = False
+        self.hover = False
+        self.width = max(130, len(text) * 9 + 36)
+        self.height = 42
+        self.canvas = self.tk.Canvas(
+            parent,
+            width=self.width,
+            height=self.height,
+            borderwidth=0,
+            highlightthickness=0,
+            background=THEME["card_bg"],
+            cursor="hand2",
+        )
+        self.canvas.bind("<Enter>", self._enter)
+        self.canvas.bind("<Leave>", self._leave)
+        self.canvas.bind("<ButtonRelease-1>", lambda _event: self.command(self.mode))
+        self._draw()
+
+    def pack(self, *args, **kwargs) -> None:
+        self.canvas.pack(*args, **kwargs)
+
+    def set_selected(self, selected: bool) -> None:
+        self.selected = selected
+        self._draw()
+
+    def _draw(self) -> None:
+        self.canvas.delete("all")
+        if self.selected:
+            fill = THEME["surface_bg"]
+            outline = THEME["accent"]
+            text = THEME["text"]
+        else:
+            fill = "#f2e9de" if self.hover else "#eee4d8"
+            outline = "#e2d4c6"
+            text = THEME["muted"]
+        draw_rounded_rect(
+            self.canvas,
+            3,
+            4,
+            self.width - 2,
+            self.height - 1,
+            15,
+            fill="#dfd1c3",
+            outline="#dfd1c3",
+        )
+        draw_rounded_rect(
+            self.canvas,
+            1,
+            1,
+            self.width - 4,
+            self.height - 5,
+            15,
+            fill=fill,
+            outline=outline,
+            width=1,
+        )
+        if self.selected:
+            draw_rounded_rect(
+                self.canvas,
+                12,
+                self.height - 11,
+                self.width - 16,
+                self.height - 7,
+                3,
+                fill=THEME["accent"],
+                outline=THEME["accent"],
+            )
+        self.canvas.create_text(
+            (self.width - 3) // 2,
+            (self.height - 4) // 2,
+            text=self.text,
+            fill=text,
+            font=(self.ui_family, 10, "bold"),
+        )
+
+    def _enter(self, _event) -> None:
+        self.hover = True
+        self._draw()
+
+    def _leave(self, _event) -> None:
+        self.hover = False
+        self._draw()
+
+
 def add_value(cmd: List[str], flag: str, value: object) -> None:
     value_text = str(value).strip()
     if value_text:
@@ -892,8 +1212,8 @@ class ResultViewer:
         top = top_card.body
 
         ttk.Label(top, text="File", style="Field.TLabel").pack(side="left")
-        entry = ttk.Entry(top, textvariable=self.current_path)
-        entry.pack(side="left", fill="x", expand=True, padx=8)
+        self.file_entry = RoundedInput(self.tk, top, self.current_path, self.ui_family, background=THEME["card_bg"])
+        self.file_entry.pack(side="left", fill="x", expand=True, padx=8)
         RoundedButton(self.tk, top, "Browse", self.browse, ui_family=self.ui_family, background=THEME["card_bg"]).pack(side="left")
         RoundedButton(self.tk, top, "Open", self.load_current, variant="accent", ui_family=self.ui_family, background=THEME["card_bg"]).pack(side="left", padx=(6, 0))
 
@@ -1148,16 +1468,24 @@ class TraceGui:
 
         mode_card = RoundedSection(self.tk, self.ttk, outer, "", padding=10)
         mode_card.pack(fill="x", pady=(10, 0))
-        self.notebook = ttk.Notebook(mode_card.body)
-        self.notebook.pack(fill="x")
-        self.notebook.bind("<<NotebookTabChanged>>", lambda _event: self._mode_changed())
+        mode_bar = ttk.Frame(mode_card.body, style="Card.TFrame")
+        mode_bar.pack(fill="x", pady=(0, 10))
+        self.mode_buttons = {}
+        for mode in ("xlsx", "csv", "raw"):
+            button = ModeTabButton(self.tk, mode_bar, mode, MODE_LABELS[mode], self._select_mode, self.ui_family)
+            button.pack(side="left", padx=(0, 8))
+            self.mode_buttons[mode] = button
 
-        self.xlsx_tab = ttk.Frame(self.notebook, padding=12, style="Card.TFrame")
-        self.csv_tab = ttk.Frame(self.notebook, padding=12, style="Card.TFrame")
-        self.raw_tab = ttk.Frame(self.notebook, padding=12, style="Card.TFrame")
-        self.notebook.add(self.xlsx_tab, text=MODE_LABELS["xlsx"])
-        self.notebook.add(self.csv_tab, text=MODE_LABELS["csv"])
-        self.notebook.add(self.raw_tab, text=MODE_LABELS["raw"])
+        self.mode_content = ttk.Frame(mode_card.body, style="Card.TFrame")
+        self.mode_content.pack(fill="x")
+        self.xlsx_tab = ttk.Frame(self.mode_content, padding=12, style="Card.TFrame")
+        self.csv_tab = ttk.Frame(self.mode_content, padding=12, style="Card.TFrame")
+        self.raw_tab = ttk.Frame(self.mode_content, padding=12, style="Card.TFrame")
+        self.mode_frames = {
+            "xlsx": self.xlsx_tab,
+            "csv": self.csv_tab,
+            "raw": self.raw_tab,
+        }
 
         self._build_xlsx_tab(self.xlsx_tab)
         self._build_csv_tab(self.csv_tab)
@@ -1277,30 +1605,40 @@ class TraceGui:
     def _path_row(self, parent, row: int, label: str, key: str, kind: str) -> None:
         ttk = self.ttk
         ttk.Label(parent, text=label, width=18, style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=4)
-        entry = ttk.Entry(parent, textvariable=self._var(key))
+        entry = RoundedInput(self.tk, parent, self._var(key), self.ui_family, background=THEME["card_bg"])
         entry.grid(row=row, column=1, sticky="ew", padx=6, pady=4)
         RoundedButton(self.tk, parent, "Browse", lambda: self._browse_path(key, kind), ui_family=self.ui_family, background=THEME["card_bg"]).grid(row=row, column=2, sticky="ew", pady=4)
+        parent._rounded_inputs = getattr(parent, "_rounded_inputs", [])
+        parent._rounded_inputs.append(entry)
         parent.columnconfigure(1, weight=1)
 
     def _entry_row(self, parent, row: int, label: str, key: str) -> None:
         ttk = self.ttk
         ttk.Label(parent, text=label, width=18, style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self._var(key), width=22).grid(row=row, column=1, sticky="w", padx=6, pady=4)
+        entry = RoundedInput(self.tk, parent, self._var(key), self.ui_family, background=THEME["card_bg"], width=210)
+        entry.grid(row=row, column=1, sticky="w", padx=6, pady=4)
+        parent._rounded_inputs = getattr(parent, "_rounded_inputs", [])
+        parent._rounded_inputs.append(entry)
 
     def _text_row(self, parent, row: int, label: str, key: str, load_command) -> None:
         ttk = self.ttk
         ttk.Label(parent, text=label, width=18, style="Field.TLabel").grid(row=row, column=0, sticky="nw", pady=4)
-        entry = ttk.Entry(parent, textvariable=self._var(key))
+        entry = RoundedInput(self.tk, parent, self._var(key), self.ui_family, background=THEME["card_bg"])
         entry.grid(row=row, column=1, sticky="ew", padx=6, pady=4)
         RoundedButton(self.tk, parent, "Load List", load_command, ui_family=self.ui_family, background=THEME["card_bg"], width=94).grid(row=row, column=2, sticky="ew", pady=4)
+        parent._rounded_inputs = getattr(parent, "_rounded_inputs", [])
+        parent._rounded_inputs.append(entry)
         parent.columnconfigure(1, weight=1)
 
     def _check_row(self, parent, row: int, items: List[Tuple[str, str]]) -> None:
         ttk = self.ttk
         frame = ttk.Frame(parent, style="Card.TFrame")
         frame.grid(row=row, column=0, columnspan=3, sticky="w", pady=5)
+        frame._rounded_toggles = []
         for label, key in items:
-            ttk.Checkbutton(frame, text=label, variable=self._var(key), style="Field.TCheckbutton").pack(side="left", padx=(0, 16))
+            toggle = RoundedToggle(self.tk, frame, label, self._var(key), self.ui_family, background=THEME["card_bg"])
+            toggle.pack(side="left", padx=(0, 12))
+            frame._rounded_toggles.append(toggle)
 
     def _browse_path(self, key: str, kind: str) -> None:
         current = str(self._var(key).get())
@@ -1337,15 +1675,30 @@ class TraceGui:
     def _mode_changed(self) -> None:
         if self.suspend_preview:
             return
-        selected = self.notebook.index(self.notebook.select())
-        mode = ["xlsx", "csv", "raw"][selected]
+        mode = str(self._var("mode").get())
+        self._show_mode(mode)
+        self._update_command_preview()
+
+    def _select_mode(self, mode: str) -> None:
+        if self.suspend_preview:
+            return
         self._var("mode").set(mode)
+        self._show_mode(mode)
         self._update_command_preview()
 
     def _apply_mode_to_notebook(self) -> None:
         mode = str(self._var("mode").get())
-        index = {"xlsx": 0, "csv": 1, "raw": 2}.get(mode, 0)
-        self.notebook.select(index)
+        self._show_mode(mode)
+
+    def _show_mode(self, mode: str) -> None:
+        mode = mode if mode in getattr(self, "mode_frames", {}) else "xlsx"
+        for key, frame in self.mode_frames.items():
+            if key == mode:
+                frame.pack(fill="x")
+            else:
+                frame.pack_forget()
+        for key, button in self.mode_buttons.items():
+            button.set_selected(key == mode)
 
     def _collect_config(self) -> Dict[str, object]:
         cfg: Dict[str, object] = {"version": CONFIG_VERSION}

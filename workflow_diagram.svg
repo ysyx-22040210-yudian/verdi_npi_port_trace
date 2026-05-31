@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff8ef"/>
+      <stop offset="54%" stop-color="#f5ecdf"/>
+      <stop offset="100%" stop-color="#efe1d0"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d97757"/>
+      <stop offset="100%" stop-color="#9f5137"/>
+    </linearGradient>
+    <linearGradient id="dark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#332821"/>
+      <stop offset="100%" stop-color="#1e1915"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d9e8ef"/>
+      <stop offset="100%" stop-color="#b9d3df"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#6b4c3a" flood-opacity="0.18"/>
+    </filter>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#6b4c3a" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto">
+      <path d="M 0 0 L 14 7 L 0 14 z" fill="#9f5137"/>
+    </marker>
+    <style>
+      .title { font: 800 42px "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", Arial, sans-serif; fill: #29231f; }
+      .subtitle { font: 500 18px "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", Arial, sans-serif; fill: #7b7168; }
+      .section { font: 800 22px "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", Arial, sans-serif; fill: #29231f; }
+      .label { font: 700 18px "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", Arial, sans-serif; fill: #29231f; }
+      .small { font: 500 14px "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", Arial, sans-serif; fill: #61574f; }
+      .tiny { font: 500 12px "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", Arial, sans-serif; fill: #71675e; }
+      .white { fill: #ffffff; }
+      .mono { font: 600 13px Consolas, Menlo, monospace; fill: #4b423b; }
+      .footerMono { font: 600 13px Consolas, Menlo, monospace; fill: #f6efe7; }
+      .card { fill: #fffdf8; stroke: #dfd1c3; stroke-width: 1.3; filter: url(#shadow); }
+      .mini { fill: #fffaf3; stroke: #e2d4c6; stroke-width: 1; filter: url(#softShadow); }
+      .lane { fill: #ffffff; fill-opacity: 0.46; stroke: #eadccc; stroke-width: 1; }
+      .arrow { stroke: #9f5137; stroke-width: 3; fill: none; marker-end: url(#arrow); stroke-linecap: round; stroke-linejoin: round; }
+      .dash { stroke-dasharray: 8 8; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="url(#bg)"/>
+  <circle cx="1370" cy="145" r="180" fill="#fff2e3" opacity="0.62"/>
+  <circle cx="170" cy="835" r="220" fill="#ead8c5" opacity="0.34"/>
+
+  <text x="72" y="82" class="title">Verdi NPI 端口追踪工作流</text>
+  <text x="74" y="116" class="subtitle">基于 KDB 的 RTL 端口追踪、过滤模块匹配、CSV 过滤和 XLSX 反标流程</text>
+
+  <rect x="72" y="152" width="1456" height="74" rx="24" class="card"/>
+  <text x="104" y="184" class="section">核心心智模型</text>
+  <text x="104" y="210" class="small">module 决定检查对象 · keywords 决定匹配对象 · ports 决定端口边界 · NPI 负责追踪 · Python 负责聚合 · GUI 负责展示</text>
+
+  <rect x="72" y="270" width="240" height="560" rx="28" class="lane"/>
+  <text x="104" y="312" class="section">输入参数</text>
+
+  <rect x="104" y="342" width="176" height="72" rx="18" class="mini"/>
+  <text x="126" y="372" class="label">KDB 数据库</text>
+  <text x="126" y="396" class="tiny">simv.daidir/kdb.elab++</text>
+
+  <rect x="104" y="434" width="176" height="72" rx="18" class="mini"/>
+  <text x="126" y="464" class="label">目标模块</text>
+  <text x="126" y="488" class="tiny">-module 定义名</text>
+
+  <rect x="104" y="526" width="176" height="72" rx="18" class="mini"/>
+  <text x="126" y="556" class="label">过滤模块</text>
+  <text x="126" y="580" class="tiny">-keywords 定义名</text>
+
+  <rect x="104" y="618" width="176" height="72" rx="18" class="mini"/>
+  <text x="126" y="648" class="label">端口列表</text>
+  <text x="126" y="672" class="tiny">可选 ports 列表</text>
+
+  <rect x="104" y="710" width="176" height="72" rx="18" class="mini"/>
+  <text x="126" y="740" class="label">模板配置</text>
+  <text x="126" y="764" class="tiny">XLSX / GUI JSON</text>
+
+  <rect x="366" y="270" width="328" height="560" rx="28" class="lane"/>
+  <text x="398" y="312" class="section">入口层</text>
+
+  <rect x="398" y="342" width="264" height="84" rx="22" fill="url(#accent)" filter="url(#softShadow)"/>
+  <text x="426" y="376" class="label white">图形界面入口</text>
+  <text x="426" y="401" class="tiny white">trace_gui.sh / trace_gui.py</text>
+
+  <rect x="398" y="454" width="264" height="84" rx="22" class="mini"/>
+  <text x="426" y="488" class="label">XLSX 反标</text>
+  <text x="426" y="513" class="tiny">annotate_trace_xlsx.sh</text>
+
+  <rect x="398" y="566" width="264" height="84" rx="22" class="mini"/>
+  <text x="426" y="600" class="label">CSV 过滤</text>
+  <text x="426" y="625" class="tiny">trace_and_filter.sh</text>
+
+  <rect x="398" y="678" width="264" height="84" rx="22" class="mini"/>
+  <text x="426" y="712" class="label">原始追踪</text>
+  <text x="426" y="737" class="tiny">npi_trace.sh</text>
+
+  <rect x="748" y="270" width="392" height="560" rx="28" class="lane"/>
+  <text x="780" y="312" class="section">Verdi NPI 核心层</text>
+
+  <rect x="780" y="342" width="328" height="68" rx="18" class="mini"/>
+  <text x="806" y="372" class="label">导入设计</text>
+  <text x="806" y="394" class="tiny">Verdi batch 打开 KDB</text>
+
+  <rect x="780" y="430" width="328" height="68" rx="18" class="mini"/>
+  <text x="806" y="460" class="label">查找目标实例</text>
+  <text x="806" y="482" class="tiny">按 module 定义名查找</text>
+
+  <rect x="780" y="518" width="328" height="68" rx="18" class="mini"/>
+  <text x="806" y="548" class="label">追踪端口</text>
+  <text x="806" y="570" class="tiny">按端口方向追 driver/load</text>
+
+  <rect x="780" y="606" width="328" height="68" rx="18" class="mini"/>
+  <text x="806" y="636" class="label">补强追踪</text>
+  <text x="806" y="658" class="tiny">常数回溯 · assign fanout · RegCombo</text>
+
+  <rect x="780" y="694" width="328" height="68" rx="18" class="mini"/>
+  <text x="806" y="724" class="label">查找过滤实例</text>
+  <text x="806" y="746" class="tiny">大项目分批搜索</text>
+
+  <rect x="1194" y="270" width="334" height="560" rx="28" class="lane"/>
+  <text x="1226" y="312" class="section">Python 聚合层</text>
+
+  <rect x="1226" y="342" width="270" height="68" rx="18" class="mini"/>
+  <text x="1252" y="372" class="label">流式读取 CSV</text>
+  <text x="1252" y="394" class="tiny">full.csv / boundary.csv</text>
+
+  <rect x="1226" y="430" width="270" height="68" rx="18" class="mini"/>
+  <text x="1252" y="460" class="label">匹配实例归属</text>
+  <text x="1252" y="482" class="tiny">InstanceMatcher + 缓存</text>
+
+  <rect x="1226" y="518" width="270" height="68" rx="18" class="mini"/>
+  <text x="1252" y="548" class="label">汇总端口结果</text>
+  <text x="1252" y="570" class="tiny">yes/no/常数/悬空/实际端点</text>
+
+  <rect x="1226" y="606" width="270" height="68" rx="18" class="mini"/>
+  <text x="1252" y="636" class="label">拆分子系统</text>
+  <text x="1252" y="658" class="tiny">实例路径前 N 层</text>
+
+  <rect x="1226" y="694" width="270" height="68" rx="18" class="mini"/>
+  <text x="1252" y="724" class="label">写出结果</text>
+  <text x="1252" y="746" class="tiny">CSV · XLSX · GUI 查看器</text>
+
+  <path class="arrow" d="M 312 550 C 338 550 346 550 366 550"/>
+  <path class="arrow" d="M 694 550 C 720 550 728 550 748 550"/>
+  <path class="arrow" d="M 1140 550 C 1166 550 1174 550 1194 550"/>
+
+  <path class="arrow dash" d="M 530 426 C 530 438 530 442 530 454"/>
+  <path class="arrow dash" d="M 530 538 C 530 550 530 554 530 566"/>
+  <path class="arrow dash" d="M 530 650 C 530 662 530 666 530 678"/>
+
+  <path class="arrow dash" d="M 944 410 C 944 420 944 421 944 430"/>
+  <path class="arrow dash" d="M 944 498 C 944 508 944 509 944 518"/>
+  <path class="arrow dash" d="M 944 586 C 944 596 944 597 944 606"/>
+  <path class="arrow dash" d="M 944 674 C 944 684 944 685 944 694"/>
+
+  <path class="arrow dash" d="M 1361 410 C 1361 420 1361 421 1361 430"/>
+  <path class="arrow dash" d="M 1361 498 C 1361 508 1361 509 1361 518"/>
+  <path class="arrow dash" d="M 1361 586 C 1361 596 1361 597 1361 606"/>
+  <path class="arrow dash" d="M 1361 674 C 1361 684 1361 685 1361 694"/>
+
+  <rect x="72" y="872" width="1456" height="64" rx="22" fill="url(#dark)" filter="url(#shadow)"/>
+  <text x="104" y="910" class="small white">大项目稳态配置：</text>
+  <text x="258" y="910" class="footerMono">--stream · --keyword-batch-size 1 · -const-source-fallback 0 · -const-trace-depth 4 · 减少日志输出</text>
+</svg>

@@ -6,7 +6,8 @@
 #                         -keywords <filter_module[,filter_module...]> \
 #                         [-output <output.csv>] [-ports <port1,port2,...>] \
 #                         [--keyword-batch-size <n>] \
-#                         [-const-source-fallback 0|1] [-const-trace-depth <N>]
+#                         [-const-source-fallback 0|1] [-const-trace-depth <N>] \
+#                         [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
 #
 # Example:
 #   ./trace_and_filter.sh -module ysyx_22050058_id \
@@ -34,6 +35,8 @@ KEYWORD_CONTINUE_ON_ERROR=0
 KEYWORD_LOG_INSTANCES=0
 CONST_SOURCE_FALLBACK="${NPI_CONST_SOURCE_FALLBACK:-1}"
 CONST_TRACE_DEPTH="${NPI_CONST_TRACE_MAX_DEPTH:-16}"
+ASSIGN_TRACE_DEPTH="${NPI_ASSIGN_TRACE_MAX_DEPTH:-2}"
+ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -50,12 +53,14 @@ while [ $# -gt 0 ]; do
         --keyword-log-instances|-keyword-log-instances) KEYWORD_LOG_INSTANCES=1; shift ;;
         -const-source-fallback|--const-source-fallback) CONST_SOURCE_FALLBACK="$2"; shift 2 ;;
         -const-trace-depth|--const-trace-depth) CONST_TRACE_DEPTH="$2"; shift 2 ;;
+        -assign-trace-depth|--assign-trace-depth) ASSIGN_TRACE_DEPTH="$2"; shift 2 ;;
+        -assign-expr-trace-depth|--assign-expr-trace-depth) ASSIGN_EXPR_TRACE_DEPTH="$2"; shift 2 ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
     esac
 done
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]" >&2
     exit 1
 fi
 case "$CONST_SOURCE_FALLBACK" in
@@ -64,6 +69,12 @@ case "$CONST_SOURCE_FALLBACK" in
 esac
 case "$CONST_TRACE_DEPTH" in
     ''|*[!0-9]*) echo "[ERROR] -const-trace-depth must be 0 or a positive integer, got: $CONST_TRACE_DEPTH" >&2; exit 1 ;;
+esac
+case "$ASSIGN_TRACE_DEPTH" in
+    ''|*[!0-9]*) echo "[ERROR] -assign-trace-depth must be 0 or a positive integer, got: $ASSIGN_TRACE_DEPTH" >&2; exit 1 ;;
+esac
+case "$ASSIGN_EXPR_TRACE_DEPTH" in
+    ''|*[!0-9]*) echo "[ERROR] -assign-expr-trace-depth must be 0 or a positive integer, got: $ASSIGN_EXPR_TRACE_DEPTH" >&2; exit 1 ;;
 esac
 
 if [ -n "$FILELIST" ] || [ -n "$TOP" ] || [ -n "$INCDIR" ]; then
@@ -126,6 +137,8 @@ log_step "keyword_continue_on_error=$KEYWORD_CONTINUE_ON_ERROR"
 log_step "keyword_log_instances=$KEYWORD_LOG_INSTANCES"
 log_step "const_source_fallback=$CONST_SOURCE_FALLBACK"
 log_step "const_trace_depth=$CONST_TRACE_DEPTH"
+log_step "assign_trace_depth=$ASSIGN_TRACE_DEPTH"
+log_step "assign_expr_trace_depth=$ASSIGN_EXPR_TRACE_DEPTH"
 log_step "boundary_filtered=$BOUNDARY_FILTERED"
 log_step "full_owner_filtered=$FULL_FILTERED"
 log_step "final_output=$OUTPUT"
@@ -134,6 +147,8 @@ log_step "final_output=$OUTPUT"
 TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
 TRACE_CMD="$TRACE_CMD -lib $LIB"
 TRACE_CMD="$TRACE_CMD -const-source-fallback $CONST_SOURCE_FALLBACK -const-trace-depth $CONST_TRACE_DEPTH"
+TRACE_CMD="$TRACE_CMD -assign-trace-depth $ASSIGN_TRACE_DEPTH"
+TRACE_CMD="$TRACE_CMD -assign-expr-trace-depth $ASSIGN_EXPR_TRACE_DEPTH"
 if [ -n "$PORTS" ]; then
     TRACE_CMD="$TRACE_CMD -ports $PORTS"
 fi

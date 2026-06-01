@@ -21,6 +21,8 @@
   "keyword_log_instances": false,
   "const_source_fallback": false,
   "const_trace_depth": "4",
+  "assign_trace_depth": "2",
+  "assign_expr_trace_depth": "1",
   "csv_output": "",
   "raw_full_output": "",
   "raw_module_output": "",

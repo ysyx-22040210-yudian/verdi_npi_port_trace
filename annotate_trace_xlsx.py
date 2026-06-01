@@ -1047,6 +1047,10 @@ def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tupl
             str(args.const_source_fallback),
             "-const-trace-depth",
             str(args.const_trace_depth),
+            "-assign-trace-depth",
+            str(args.assign_trace_depth),
+            "-assign-expr-trace-depth",
+            str(args.assign_expr_trace_depth),
         ]
     )
 
@@ -1253,6 +1257,29 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "-assign-trace-depth",
+        "--assign-trace-depth",
+        type=int,
+        default=2,
+        help=(
+            "maximum recursive continuation depth when NPI trace stops at a "
+            "plain assign/pass-through net such as assign B = A. Use 0 to "
+            "disable assign endpoint continuation."
+        ),
+    )
+    parser.add_argument(
+        "-assign-expr-trace-depth",
+        "--assign-expr-trace-depth",
+        type=int,
+        default=1,
+        help=(
+            "maximum recursive continuation depth on driver/load paths when "
+            "NPI stops at a continuous-assign expression endpoint such as "
+            "assign A = {b0, b1} or assign B = {C, A, D}. "
+            "Use 0 to disable expression continuation."
+        ),
+    )
+    parser.add_argument(
         "--match-cache-size",
         type=int,
         default=200000,
@@ -1293,6 +1320,10 @@ def parse_args():
         parser.error("--keyword-batch-size must be 0 or a positive integer.")
     if args.const_trace_depth < 0:
         parser.error("-const-trace-depth must be 0 or a positive integer.")
+    if args.assign_trace_depth < 0:
+        parser.error("-assign-trace-depth must be 0 or a positive integer.")
+    if args.assign_expr_trace_depth < 0:
+        parser.error("-assign-expr-trace-depth must be 0 or a positive integer.")
     return args
 
 
@@ -1338,6 +1369,8 @@ def main() -> None:
     log_step(f"workdir={workdir}")
     log_step(f"const_source_fallback={args.const_source_fallback}")
     log_step(f"const_trace_depth={args.const_trace_depth}")
+    log_step(f"assign_trace_depth={args.assign_trace_depth}")
+    log_step(f"assign_expr_trace_depth={args.assign_expr_trace_depth}")
 
     try:
         workbook, sheet = load_workbook(template, args.sheet)

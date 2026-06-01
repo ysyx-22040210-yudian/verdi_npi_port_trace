@@ -41,6 +41,8 @@ DEFAULT_CONFIG = {
     "keyword_log_instances": False,
     "const_source_fallback": True,
     "const_trace_depth": "16",
+    "assign_trace_depth": "2",
+    "assign_expr_trace_depth": "1",
     "csv_output": "",
     "raw_full_output": "",
     "raw_module_output": "",
@@ -1053,6 +1055,8 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     ports = csv_text(str(cfg.get("ports", "")))
     const_fallback = as_bool(cfg.get("const_source_fallback", True))
     const_depth = str(cfg.get("const_trace_depth", "16")).strip()
+    assign_depth = str(cfg.get("assign_trace_depth", "2")).strip()
+    assign_expr_depth = str(cfg.get("assign_expr_trace_depth", "1")).strip()
 
     require({"lib": lib}, "lib", "KDB/elab directory")
 
@@ -1077,6 +1081,8 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_int_bool(cmd, "-regcombo-as-keyword", as_bool(cfg.get("regcombo_as_keyword", False)))
         add_int_bool(cmd, "-const-source-fallback", const_fallback)
         add_value(cmd, "-const-trace-depth", const_depth)
+        add_value(cmd, "-assign-trace-depth", assign_depth)
+        add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
         add_value(cmd, "--match-cache-size", cfg.get("match_cache_size", "200000"))
         add_value(cmd, "--keyword-batch-size", cfg.get("keyword_batch_size", "8"))
         add_bool(cmd, "--keyword-continue-on-error", as_bool(cfg.get("keyword_continue_on_error", False)))
@@ -1097,6 +1103,8 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_bool(cmd, "--keyword-log-instances", as_bool(cfg.get("keyword_log_instances", False)))
         add_int_bool(cmd, "-const-source-fallback", const_fallback)
         add_value(cmd, "-const-trace-depth", const_depth)
+        add_value(cmd, "-assign-trace-depth", assign_depth)
+        add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
         return cmd, None
 
     if mode == "raw":
@@ -1110,6 +1118,8 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-module-out", cfg.get("raw_module_output", ""))
         add_int_bool(cmd, "-const-source-fallback", const_fallback)
         add_value(cmd, "-const-trace-depth", const_depth)
+        add_value(cmd, "-assign-trace-depth", assign_depth)
+        add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
         return cmd, str(cfg.get("raw_full_output", "")).strip()
 
     raise ValueError(f"unknown mode: {mode}")
@@ -1227,18 +1237,23 @@ class ResultViewer:
 
         body = ttk.Frame(self.root, padding=12, style="Card.TFrame")
         body.pack(fill="both", expand=True, padx=14, pady=8)
+        self.header_canvas = self.tk.Canvas(body, borderwidth=0, highlightthickness=0, background=THEME["card_bg"])
+        self.header_frame = ttk.Frame(self.header_canvas, style="Card.TFrame")
         self.canvas = self.tk.Canvas(body, borderwidth=0, highlightthickness=0, background=THEME["card_bg"])
         self.table_frame = ttk.Frame(self.canvas, style="Card.TFrame")
         yscroll = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
-        xscroll = ttk.Scrollbar(body, orient="horizontal", command=self.canvas.xview)
+        xscroll = ttk.Scrollbar(body, orient="horizontal", command=self._xview)
         self.canvas.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.header_window = self.header_canvas.create_window((0, 0), window=self.header_frame, anchor="nw")
         self.table_window = self.canvas.create_window((0, 0), window=self.table_frame, anchor="nw")
+        self.header_frame.bind("<Configure>", self._update_header_scrollregion)
         self.table_frame.bind("<Configure>", self._update_scrollregion)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
+        self.header_canvas.grid(row=0, column=0, sticky="ew")
+        self.canvas.grid(row=1, column=0, sticky="nsew")
+        yscroll.grid(row=1, column=1, sticky="ns")
+        xscroll.grid(row=2, column=0, sticky="ew")
         body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
 
         self.status = self.tk.StringVar(value="No file loaded")
         ttk.Label(self.root, textvariable=self.status, anchor="w", style="Muted.TLabel").pack(fill="x", padx=16, pady=(0, 12))
@@ -1280,10 +1295,13 @@ class ResultViewer:
             self._show_error(str(exc))
 
     def _clear_text(self) -> None:
+        for child in self.header_frame.winfo_children():
+            child.destroy()
         for child in self.table_frame.winfo_children():
             child.destroy()
 
     def _finish_text(self) -> None:
+        self._update_header_scrollregion()
         self._update_scrollregion()
 
     def _render_rows(self, rows: List[List[object]], title: str, sheet_name: str = "") -> None:
@@ -1303,34 +1321,108 @@ class ResultViewer:
             return
 
         column_count = max(len(row) for row in rows)
+        column_widths = self._column_widths(rows, column_count)
         for col_idx in range(column_count):
-            self.table_frame.columnconfigure(col_idx, minsize=120)
+            self.header_frame.columnconfigure(col_idx, minsize=column_widths[col_idx])
+            self.table_frame.columnconfigure(col_idx, minsize=column_widths[col_idx])
 
-        for row_idx, row in enumerate(rows):
-            is_header = row_idx == 0
+        header = rows[0]
+        for col_idx in range(column_count):
+            value = header[col_idx] if col_idx < len(header) else ""
+            raw_text = "" if value is None else str(value)
+            self._make_table_label(
+                self.header_frame,
+                raw_text,
+                is_header=True,
+                row_idx=0,
+                col_idx=col_idx,
+                column_width=column_widths[col_idx],
+            )
+
+        for data_idx, row in enumerate(rows[1:]):
             for col_idx in range(column_count):
                 value = row[col_idx] if col_idx < len(row) else ""
                 raw_text = "" if value is None else str(value)
-                display_text = wrap_cell_text(raw_text, width=28 if not is_header else 18, max_lines=6)
-                label = self.tk.Label(
+                self._make_table_label(
                     self.table_frame,
-                    text=display_text,
-                    anchor="nw",
-                    justify="left",
-                    relief="solid",
-                    borderwidth=1,
-                    padx=7,
-                    pady=5,
-                    background=THEME["table_header"] if is_header else (THEME["table_alt"] if row_idx % 2 == 0 else THEME["table_row"]),
-                    foreground=THEME["text"],
-                    highlightbackground=THEME["border"],
-                    font=(self.ui_family, 9, "bold") if is_header else (self.ui_family, 9),
-                    wraplength=220,
+                    raw_text,
+                    is_header=False,
+                    row_idx=data_idx,
+                    col_idx=col_idx,
+                    alt_row=data_idx % 2 == 1,
+                    column_width=column_widths[col_idx],
                 )
-                label.grid(row=row_idx, column=col_idx, sticky="nsew")
-                label.bind("<Button-1>", lambda _event, text=raw_text: self._show_cell_text(text))
         self._finish_text()
         self.status.set(f"{title}  rows: {max(len(rows) - 1, 0)}")
+
+    def _column_widths(self, rows: List[List[object]], column_count: int) -> List[int]:
+        try:
+            from tkinter import font as tkfont
+
+            body_font = tkfont.Font(family=self.ui_family, size=9)
+            header_font = tkfont.Font(family=self.ui_family, size=9, weight="bold")
+            body_char_px = max(body_font.measure("0"), 7)
+            header_char_px = max(header_font.measure("0"), body_char_px)
+        except Exception:
+            body_char_px = 8
+            header_char_px = 8
+
+        widths: List[int] = []
+        for col_idx in range(column_count):
+            max_chars = 0
+            for row_idx, row in enumerate(rows):
+                value = row[col_idx] if col_idx < len(row) else ""
+                raw_text = "" if value is None else str(value)
+                if not raw_text:
+                    continue
+                parts = re.split(r"[\n\r,;/|]", raw_text)
+                longest = max((len(part.strip()) for part in parts), default=0)
+                max_chars = max(max_chars, longest if row_idx else min(longest, 26))
+            char_px = header_char_px if col_idx == 0 else body_char_px
+            width = max(120, min(360, max_chars * char_px + 28))
+            widths.append(width)
+        return widths
+
+    def _make_table_label(
+        self,
+        parent,
+        raw_text: str,
+        is_header: bool,
+        row_idx: int,
+        col_idx: int,
+        alt_row: bool = False,
+        column_width: int = 120,
+    ) -> None:
+        text_chars = max(10, int((column_width - 20) / 8))
+        display_text = wrap_cell_text(raw_text, width=min(text_chars, 42), max_lines=6)
+        label = self.tk.Label(
+            parent,
+            text=display_text,
+            anchor="nw",
+            justify="left",
+            relief="solid",
+            borderwidth=1,
+            padx=7,
+            pady=5,
+            background=THEME["table_header"] if is_header else (THEME["table_alt"] if alt_row else THEME["table_row"]),
+            foreground=THEME["text"],
+            highlightbackground=THEME["border"],
+            font=(self.ui_family, 9, "bold") if is_header else (self.ui_family, 9),
+            width=text_chars,
+            wraplength=max(80, column_width - 18),
+        )
+        label.grid(row=row_idx, column=col_idx, sticky="nsew")
+        label.bind("<Button-1>", lambda _event, text=raw_text: self._show_cell_text(text))
+
+    def _xview(self, *args) -> None:
+        self.header_canvas.xview(*args)
+        self.canvas.xview(*args)
+
+    def _update_header_scrollregion(self, _event=None) -> None:
+        bbox = self.header_canvas.bbox("all")
+        self.header_canvas.configure(scrollregion=bbox)
+        if bbox:
+            self.header_canvas.configure(height=min(max(bbox[3] - bbox[1], 34), 160))
 
     def _update_scrollregion(self, _event=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1560,9 +1652,11 @@ class TraceGui:
         self._entry_row(parent, 5, "match cache size", "match_cache_size")
         self._entry_row(parent, 6, "keyword batch size", "keyword_batch_size")
         self._entry_row(parent, 7, "const trace depth", "const_trace_depth")
+        self._entry_row(parent, 8, "assign trace depth", "assign_trace_depth")
+        self._entry_row(parent, 9, "assign expr depth", "assign_expr_trace_depth")
         self._check_row(
             parent,
-            8,
+            10,
             [
                 ("stream", "stream"),
                 ("no params", "no_params"),
@@ -1572,7 +1666,7 @@ class TraceGui:
         )
         self._check_row(
             parent,
-            9,
+            11,
             [
                 ("RegCombo as keyword", "regcombo_as_keyword"),
                 ("const source fallback", "const_source_fallback"),
@@ -1585,9 +1679,11 @@ class TraceGui:
         self._path_row(parent, 0, "output csv", "csv_output", "save_csv")
         self._entry_row(parent, 1, "keyword batch size", "keyword_batch_size")
         self._entry_row(parent, 2, "const trace depth", "const_trace_depth")
+        self._entry_row(parent, 3, "assign trace depth", "assign_trace_depth")
+        self._entry_row(parent, 4, "assign expr depth", "assign_expr_trace_depth")
         self._check_row(
             parent,
-            3,
+            5,
             [
                 ("const source fallback", "const_source_fallback"),
                 ("keyword continue on error", "keyword_continue_on_error"),
@@ -1600,7 +1696,9 @@ class TraceGui:
         self._path_row(parent, 1, "module boundary csv", "raw_module_output", "save_csv")
         self._path_row(parent, 2, "srcfile deprecated", "srcfile", "file")
         self._entry_row(parent, 3, "const trace depth", "const_trace_depth")
-        self._check_row(parent, 4, [("const source fallback", "const_source_fallback")])
+        self._entry_row(parent, 4, "assign trace depth", "assign_trace_depth")
+        self._entry_row(parent, 5, "assign expr depth", "assign_expr_trace_depth")
+        self._check_row(parent, 6, [("const source fallback", "const_source_fallback")])
 
     def _path_row(self, parent, row: int, label: str, key: str, kind: str) -> None:
         ttk = self.ttk

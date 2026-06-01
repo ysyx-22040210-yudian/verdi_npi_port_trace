@@ -1,0 +1,1 @@
+full_coverage_trace_test.v

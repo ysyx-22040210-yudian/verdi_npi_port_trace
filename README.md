@@ -39,7 +39,13 @@ simv.daidir/kdb.elab++
 | `npi_find_module_params.tcl` | 采集目标 module 例化 parameter。 |
 | `filter_trace.py` | CSV 过滤、合并、按实例拆分。 |
 | `multi_module_trace_template.xlsx` | 多 module 测试模板。 |
+| `all_features_trace_test.v` | 单一 RTL 场景覆盖多 module、多 keywords、parameter、常数、悬空、Reg endpoint、assign 透传/拼接/切片、单 bit 端口、loader fanout、子系统拆分。 |
+| `all_features_modules.list` / `all_features_keywords.list` / `all_features_ports.list` | 全特性回归使用的 module、keywords、ports 列表文件。 |
+| `all_features_gui_xlsx.json` | 全特性 GUI XLSX 模式配置，可用于 `trace_gui.py --build-command` 或 GUI 加载。 |
+| `run_all_features_trace_test.sh` | 构建 KDB 并执行 GUI 命令生成、CSV 过滤、XLSX 反标、子系统拆分和结果断言的全特性回归。 |
 | `run_full_coverage_trace_test.sh` | 覆盖常数、assign、单 bit、多 module、多 keywords、XLSX 反标的回归测试。 |
+| `run_assign_passthrough_trace_test.sh` | 专门覆盖 `u_child(.a(b)); assign b = c;` 这类普通 assign 透传 driver 追踪。 |
+| `run_assign_loader_slice_trace_test.sh` | 专门覆盖 loader 方向 `assign B=A[10:0]`、`assign C=A[20:11]` 这类切片 fanout 追踪。 |
 | `WORKFLOW_GUIDE_FOR_LLMS.md` | 面向其他大模型的工具工作流程说明。 |
 | `workflow_diagram.svg` | 工具流程图。 |
 
@@ -243,8 +249,8 @@ A[7]
 | `match cache size` | `match_cache_size` | `--match-cache-size` | `200000` | `--stream` 模式下，缓存“某个 trace endpoint 是否属于 keywords 实例”的判断结果。值越大重复判断越少，但运行内存占用越高；`0` 表示关闭缓存。 |
 | `keyword batch size` | `keyword_batch_size` | `--keyword-batch-size` | `8` | 每个 Verdi 进程搜索多少个 keyword module。大项目 keywords 很多时建议设为 `1`、`2` 或 `4`，降低单个 Verdi 进程资源峰值。允许跑慢，但更稳。 |
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 module port 回溯常数 tie 的最大深度。用于 `Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0` 这类场景。`0` 表示关闭递归回溯。 |
-| `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 当 NPI trace 停在普通透传 net，例如 `assign B = A` 的 `B` 时，继续沿同方向追踪的最大深度。`0` 表示关闭。 |
-| `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 当 driver / loader 方向遇到连续赋值表达式 endpoint 时继续展开的次数，例如 driver 方向 `assign A = {b0, b1}`，loader 方向 `assign B = {C, A, D}` 或 `assign B0 = A[10:0]`。用于限制复杂表达式递归扩散，`0` 表示关闭。 |
+| `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 当 NPI trace 停在普通透传 net 时继续沿同方向追踪的最大深度，例如 driver 方向 `assign B = A`，loader 方向 `assign B0 = A[10:0]`、`assign B1 = A[20:11]`。这类单信号/切片连接不视为组合逻辑，`0` 表示关闭。 |
+| `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 当 driver / loader 方向遇到允许展开的连续赋值表达式 endpoint 时继续展开的次数，例如 driver 方向 `assign A = {b0, b1}`，loader 方向 `assign B = {C, A, D}`。用于限制拼接表达式递归扩散，`0` 表示关闭。 |
 | `stream` | `stream` | `--stream` | `true` | 启用流式聚合反标。Python 端边读 CSV 边聚合，配合匹配缓存降低大项目运行内存压力。大项目建议打开。 |
 | `no params` | `no_params` | `--no-params` | `false` | 跳过 module parameter 采集。打开后 parameter 列通常显示 `PARAM_SKIPPED`，端口反标仍继续。若大项目 parameter 采集阶段不稳定，可先打开此项。 |
 | `strict params` | `strict_params` | `--strict-params` | `false` | parameter 采集失败时是否直接中断整个 XLSX 反标。默认关闭，失败时记录 `PARAM_TRACE_FAILED` 并继续端口反标。 |
@@ -270,8 +276,8 @@ A[7]
 | `output csv` 的 `Browse` | 无独立字段 | 无 | 无 | 打开保存文件窗口，选择过滤结果 CSV 路径。 |
 | `keyword batch size` | `keyword_batch_size` | `--keyword-batch-size` | `8` | 每个 Verdi 进程搜索多少个 keyword module。大项目建议调小，减少单次 Verdi 资源峰值。 |
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
-| `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传 assign endpoint 的继续追踪深度。 |
-| `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | driver/load 方向 assign 表达式 endpoint 的继续展开次数。 |
+| `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 的继续追踪深度，例如 `assign B=A`、`assign B0=A[10:0]`。 |
+| `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | driver/load 方向拼接表达式 endpoint 的继续展开次数，例如 `assign A={b0,b1}`、`assign B={C,A,D}`。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 | `keyword continue on error` | `keyword_continue_on_error` | `--keyword-continue-on-error` | `false` | 单个 keyword 实例搜索失败时是否继续。 |
 | `keyword log instances` | `keyword_log_instances` | `--keyword-log-instances` | `false` | 是否打印所有 keyword 实例路径。大项目建议关闭。 |
@@ -312,8 +318,8 @@ CSV 模式常见输出：
 | `srcfile deprecated` | `srcfile` | `-srcfile` | 空 | 旧参数，当前一般不需要填写。端口方向和连接关系通过 NPI API 获取。 |
 | `srcfile deprecated` 的 `Browse` | 无独立字段 | 无 | 无 | 打开文件选择窗口，用于兼容旧流程。 |
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
-| `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传 assign endpoint 继续追踪深度。 |
-| `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | assign 表达式 endpoint 继续展开次数。 |
+| `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 继续追踪深度。 |
+| `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 拼接表达式 assign endpoint 继续展开次数。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 
 ## GUI 全局按钮和窗口
@@ -373,8 +379,8 @@ CSV 模式常见输出：
 | `keyword_log_instances` | `keyword log instances` | boolean | `false` | 是否打印每个 keyword 实例路径。 |
 | `const_source_fallback` | `const source fallback` | boolean | `true` | 是否启用源码 fallback 常数识别。 |
 | `const_trace_depth` | `const trace depth` | string/integer | `16` | 多层父 port 常数回溯深度。 |
-| `assign_trace_depth` | `assign trace depth` | string/integer | `2` | 普通透传 assign 继续追踪深度。 |
-| `assign_expr_trace_depth` | `assign expr depth` | string/integer | `1` | assign 表达式 endpoint 继续展开次数。 |
+| `assign_trace_depth` | `assign trace depth` | string/integer | `2` | 普通透传/单信号切片 assign 继续追踪深度。 |
+| `assign_expr_trace_depth` | `assign expr depth` | string/integer | `1` | 拼接表达式 assign endpoint 继续展开次数。 |
 | `csv_output` | `output csv` | string | 空 | CSV Filter 输出路径。仅 CSV 模式使用。 |
 | `raw_full_output` | `full trace csv` | string | 空 | Raw Trace 完整 CSV 输出路径。仅 Raw 模式使用。 |
 | `raw_module_output` | `module boundary csv` | string | 空 | Raw Trace module 边界 CSV 输出路径。仅 Raw 模式使用。 |
@@ -594,7 +600,16 @@ Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0
 assign B = A;
 ```
 
-如果 NPI trace 停在 `B`，工具会按 `-assign-trace-depth <N>` 继续沿同方向追踪。
+如果 NPI trace 停在 `B`，工具会按 `-assign-trace-depth <N>` 继续沿同方向追踪。普通 `assign B = A` 被视为信号连接，不视为组合逻辑或时序逻辑，因此 driver 方向会继续从 `B` 追到 `A`。即使 `-assign-expr-trace-depth 0`，这种普通透传仍然由 `-assign-trace-depth` 控制。
+
+典型场景：
+
+```verilog
+u_child(.a(b));
+assign b = c;
+```
+
+追 `u_child.a` 的 driver 时，工具会先看到父层连接信号 `b`，然后继续追到 `c`，不会停在 `b`。
 
 driver 方向拼接：
 
@@ -612,7 +627,15 @@ assign B0 = A[10:0];
 assign B1 = A[20:11];
 ```
 
-如果目标 output 高层连接信号是 `A`，工具会继续追 `B`、`B0`、`B1`，直到遇到 keywords 实例、常数、RegCombo 或其他真实 endpoint。
+如果目标 output 高层连接信号是 `A`，工具会继续追 `B`、`B0`、`B1`，直到遇到 keywords 实例、常数、RegCombo 或其他真实 endpoint。其中 `assign B0 = A[10:0]`、`assign B1 = A[20:11]` 是单信号切片连接，受 `-assign-trace-depth` 控制；`assign B = {C, A, D}` 是拼接表达式，受 `-assign-expr-trace-depth` 控制。
+
+工具不会把任意组合逻辑都当成连线穿透。例如：
+
+```verilog
+assign Y = A ^ B;
+```
+
+追 `A` 的 loader 时不会因为源码 fallback 穿过这个 XOR 到 `Y`，避免把真实组合逻辑误判成 keywords 连接。
 
 ## 单 bit 端口 trace
 
@@ -653,6 +676,9 @@ export VERDI_LICENSE_FILE=27000@IC_EDA
 bash -n annotate_trace_xlsx.sh trace_and_filter.sh npi_trace.sh trace_gui.sh
 python3 -m py_compile annotate_trace_xlsx.py filter_trace.py find_instances_batched.py trace_gui.py
 
+bash run_all_features_trace_test.sh
+bash run_assign_loader_slice_trace_test.sh
+bash run_assign_passthrough_trace_test.sh
 bash run_full_coverage_trace_test.sh
 ```
 
@@ -699,6 +725,20 @@ trace_gui.py
 trace_gui.sh
 trace_gui_demo_xlsx.json
 full_coverage_gui_xlsx.json
+all_features_trace_test.v
+all_features_trace_test.f
+all_features_trace_template.xlsx
+all_features_modules.list
+all_features_keywords.list
+all_features_ports.list
+all_features_gui_xlsx.json
+run_all_features_trace_test.sh
+assign_passthrough_trace_test.v
+assign_passthrough_trace_test.f
+assign_loader_slice_trace_test.v
+assign_loader_slice_trace_test.f
+run_assign_loader_slice_trace_test.sh
+run_assign_passthrough_trace_test.sh
 run_full_coverage_trace_test.sh
 multi_module_trace_template.xlsx
 README.md

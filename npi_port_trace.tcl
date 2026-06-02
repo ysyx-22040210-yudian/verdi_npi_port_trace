@@ -923,18 +923,20 @@ proc source_module_port_driver_sources { srcfile signame } {
     return $sources
 }
 
-proc source_assign_load_fanouts { sig_hdl signame } {
-    global assign_expr_trace_max_depth
+proc rhs_is_concat_expr { rhs } {
+    set rhs [string trim $rhs]
+    regsub -all {\s+} $rhs "" rhs_no_space
+    return [expr {[string index $rhs_no_space 0] eq "\{" && [string index $rhs_no_space end] eq "\}"}]
+}
 
-    if { $assign_expr_trace_max_depth <= 0 } {
-        return {}
-    }
+proc rhs_is_simple_signal_expr { rhs } {
+    set rhs [string trim $rhs]
+    regsub -all {\s+} $rhs "" rhs_no_space
+    return [expr {[llength [expr_item_source_signals $rhs_no_space ""]] > 0}]
+}
 
+proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} } {
     set bit [signal_bit_index $signame]
-    if { $bit eq "" } {
-        return {}
-    }
-
     set srcfile [get_handle_source_file $sig_hdl]
     if { $srcfile eq "" } {
         return {}
@@ -952,35 +954,72 @@ proc source_assign_load_fanouts { sig_hdl signame } {
         set lhs_leaf [lindex $assign 0]
         set lhs_select [lindex $assign 1]
         set rhs [lindex $assign 2]
-        if { [rhs_references_signal_bit $rhs $leaf $bit] } {
-            set lhs_bits [rhs_lhs_bits_for_signal_bit $rhs $leaf $bit $width_map]
+        set is_simple [rhs_is_simple_signal_expr $rhs]
+        set is_concat [rhs_is_concat_expr $rhs]
+        if { !$is_simple && !($include_expr && $is_concat) } {
+            continue
+        }
+        if { ![rhs_references_signal_bit $rhs $leaf $bit] } {
+            continue
+        }
+
+        if { $bit eq "" } {
             if { $prefix ne "" } {
                 append_unique_signal fanouts "${prefix}.${lhs_leaf}"
             } else {
                 append_unique_signal fanouts $lhs_leaf
             }
-            if { [llength $lhs_bits] == 0 } {
+            continue
+        }
+
+        set lhs_bits [rhs_lhs_bits_for_signal_bit $rhs $leaf $bit $width_map]
+        if { $prefix ne "" } {
+            append_unique_signal fanouts "${prefix}.${lhs_leaf}"
+        } else {
+            append_unique_signal fanouts $lhs_leaf
+        }
+        if { [llength $lhs_bits] == 0 } {
+            continue
+        }
+        foreach lhs_bit $lhs_bits {
+            set lhs_bit [lhs_select_bit_from_rhs_offset $lhs_select $lhs_bit]
+            if { $lhs_bit eq "" } {
                 continue
             }
-            foreach lhs_bit $lhs_bits {
-                set lhs_bit [lhs_select_bit_from_rhs_offset $lhs_select $lhs_bit]
-                if { $lhs_bit eq "" } {
-                    continue
-                }
-                set select ""
-                if { $lhs_bit ne "" } {
-                    set select "\[$lhs_bit\]"
-                }
-                if { $prefix ne "" } {
-                    append_unique_signal fanouts "${prefix}.${lhs_leaf}${select}"
-                } else {
-                    append_unique_signal fanouts "${lhs_leaf}${select}"
-                }
+            set select ""
+            if { $lhs_bit ne "" } {
+                set select "\[$lhs_bit\]"
+            }
+            if { $prefix ne "" } {
+                append_unique_signal fanouts "${prefix}.${lhs_leaf}${select}"
+            } else {
+                append_unique_signal fanouts "${lhs_leaf}${select}"
             }
         }
     }
 
+    return $fanouts
+}
+
+proc source_assign_direct_load_fanouts { sig_hdl signame } {
+    set fanouts [source_assign_load_fanouts_core $sig_hdl $signame 0]
     if { [llength $fanouts] > 0 } {
+        set srcfile [get_handle_source_file $sig_hdl]
+        log_step "source_assign_direct_load_fanout signal=$signame source=$srcfile fanouts=[join $fanouts ,]"
+    }
+    return $fanouts
+}
+
+proc source_assign_load_fanouts { sig_hdl signame } {
+    global assign_expr_trace_max_depth
+
+    if { $assign_expr_trace_max_depth <= 0 } {
+        return {}
+    }
+
+    set fanouts [source_assign_load_fanouts_core $sig_hdl $signame 1]
+    if { [llength $fanouts] > 0 } {
+        set srcfile [get_handle_source_file $sig_hdl]
         log_step "source_assign_load_fanout signal=$signame source=$srcfile fanouts=[join $fanouts ,]"
     }
     return $fanouts
@@ -1183,13 +1222,7 @@ proc rhs_driver_sources_for_whole { rhs prefix {width_map {}} } {
     return $sources
 }
 
-proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} } {
-    global assign_expr_trace_max_depth
-
-    if { $assign_expr_trace_max_depth <= 0 } {
-        return {}
-    }
-
+proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {include_expr 1} } {
     set bit [signal_bit_index $signame]
     set srcfile $srcfile_hint
     if { $srcfile eq "" && $sig_hdl ne "" } {
@@ -1215,12 +1248,27 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} } {
             continue
         }
         if { $bit eq "" } {
+            set direct_sources [expr_item_source_signals $rhs $prefix]
+            foreach source $direct_sources {
+                append_unique_signal sources $source
+            }
+            if { [llength $direct_sources] > 0 || !$include_expr } {
+                continue
+            }
             foreach source [rhs_driver_sources_for_whole $rhs $prefix $width_map] {
                 append_unique_signal sources $source
             }
         } else {
             set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $bit]
             if { $rhs_bit eq "" } {
+                continue
+            }
+            set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
+            if { $direct_source ne "" } {
+                append_unique_signal sources $direct_source
+                continue
+            }
+            if { !$include_expr } {
                 continue
             }
             foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
@@ -1248,7 +1296,7 @@ proc source_assign_const_chain { signame srcfile depth visited_var } {
     lappend visited $signame
 
     set consts {}
-    foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile] {
+    foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile 1] {
         if { [is_const_literal_name $source_sig] } {
             append_unique_signal consts $source_sig
         } else {
@@ -1260,10 +1308,22 @@ proc source_assign_const_chain { signame srcfile depth visited_var } {
     return $consts
 }
 
+proc source_assign_direct_driver_sources { sig_hdl signame {srcfile_hint ""} } {
+    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 0]
+    if { [llength $sources] > 0 } {
+        log_step "source_assign_direct_driver_source signal=$signame source=$srcfile_hint drivers=[join $sources ,]"
+    }
+    return $sources
+}
+
 proc source_assign_driver_sources { sig_hdl signame {srcfile_hint ""} } {
     global assign_expr_trace_max_depth
 
-    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint]
+    if { $assign_expr_trace_max_depth <= 0 } {
+        return {}
+    }
+
+    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 1]
     if { [llength $sources] == 0 } {
         return {}
     }
@@ -1728,7 +1788,7 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
 
-    if { $expr_depth <= 0 || $srcfile_hint eq "" } {
+    if { ($net_depth <= 0 && $expr_depth <= 0) || $srcfile_hint eq "" } {
         return
     }
 
@@ -1737,7 +1797,28 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         append_unique_signal module_drivers $port_sig
     }
 
+    set direct_sources {}
+    if { $net_depth > 0 } {
+        foreach source_sig [source_assign_direct_driver_sources "" $signame $srcfile_hint] {
+            append_unique_signal direct_sources $source_sig
+            append_unique_signal all_drivers $source_sig
+            if { [is_module_boundary_signal $source_sig] } {
+                append_unique_signal module_drivers $source_sig
+            }
+            if { ![is_const_literal_name $source_sig] } {
+                collect_drivers_by_name_rec $source_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint
+            }
+        }
+    }
+
+    if { $expr_depth <= 0 } {
+        return
+    }
+
     foreach source_sig [source_assign_driver_sources "" $signame $srcfile_hint] {
+        if { [lsearch -exact $direct_sources $source_sig] >= 0 } {
+            continue
+        }
         append_unique_signal all_drivers $source_sig
         if { [is_module_boundary_signal $source_sig] } {
             append_unique_signal module_drivers $source_sig
@@ -1820,11 +1901,27 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    if { $net_depth <= 0 && $expr_depth <= 0 } {
+        return
+    }
+
+    set direct_fanouts {}
+    if { $net_depth > 0 } {
+        foreach fanout_sig [source_assign_direct_load_fanouts $hdl $signame] {
+            append_unique_signal direct_fanouts $fanout_sig
+            append_unique_signal all_loads $fanout_sig
+            collect_loads_by_name_rec $fanout_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited
+        }
+    }
+
     if { $expr_depth <= 0 } {
         return
     }
 
     foreach fanout_sig [source_assign_load_fanouts $hdl $signame] {
+        if { [lsearch -exact $direct_fanouts $fanout_sig] >= 0 } {
+            continue
+        }
         append_unique_signal all_loads $fanout_sig
         collect_loads_by_name_rec $fanout_sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited
     }
@@ -2157,7 +2254,23 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set driver_srcfile_hint [get_handle_source_file $sig_hdl]
             collect_drivers_by_name $signame all_drivers module_drivers $driver_srcfile_hint
             if { [llength $all_drivers] == $driver_count_before } {
+                set direct_sources {}
+                if { $assign_trace_max_depth > 0 } {
+                    foreach source_sig [source_assign_direct_driver_sources $sig_hdl $signame $driver_srcfile_hint] {
+                        append_unique_signal direct_sources $source_sig
+                        append_unique_signal all_drivers $source_sig
+                        if { $module_outfh ne "" && [is_module_boundary_signal $source_sig] } {
+                            append_unique_signal module_drivers $source_sig
+                        }
+                        if { ![is_const_literal_name $source_sig] } {
+                            collect_drivers_by_name $source_sig all_drivers module_drivers $driver_srcfile_hint
+                        }
+                    }
+                }
                 foreach source_sig [source_assign_driver_sources $sig_hdl $signame $driver_srcfile_hint] {
+                    if { [lsearch -exact $direct_sources $source_sig] >= 0 } {
+                        continue
+                    }
                     append_unique_signal all_drivers $source_sig
                     if { $module_outfh ne "" && [is_module_boundary_signal $source_sig] } {
                         append_unique_signal module_drivers $source_sig
@@ -2222,10 +2335,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             }
 
             collect_loads_by_name $signame all_loads module_loads
-            foreach fanout_sig [source_assign_load_fanouts $sig_hdl $signame] {
-                append_unique_signal all_loads $fanout_sig
-                collect_loads_by_name $fanout_sig all_loads module_loads
-            }
+            set source_load_visited {}
+            collect_source_load_fanouts $sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth source_load_visited
 
             # If string-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.

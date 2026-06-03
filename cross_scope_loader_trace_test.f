@@ -1,0 +1,1 @@
+cross_scope_loader_trace_test.v

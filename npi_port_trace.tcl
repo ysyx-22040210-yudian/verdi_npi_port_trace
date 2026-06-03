@@ -935,9 +935,12 @@ proc rhs_is_simple_signal_expr { rhs } {
     return [expr {[llength [expr_item_source_signals $rhs_no_space ""]] > 0}]
 }
 
-proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} } {
+proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile_hint ""} } {
     set bit [signal_bit_index $signame]
     set srcfile [get_handle_source_file $sig_hdl]
+    if { $srcfile eq "" } {
+        set srcfile $srcfile_hint
+    }
     if { $srcfile eq "" } {
         return {}
     }
@@ -1001,25 +1004,31 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} } {
     return $fanouts
 }
 
-proc source_assign_direct_load_fanouts { sig_hdl signame } {
-    set fanouts [source_assign_load_fanouts_core $sig_hdl $signame 0]
+proc source_assign_direct_load_fanouts { sig_hdl signame {srcfile_hint ""} } {
+    set fanouts [source_assign_load_fanouts_core $sig_hdl $signame 0 $srcfile_hint]
     if { [llength $fanouts] > 0 } {
         set srcfile [get_handle_source_file $sig_hdl]
+        if { $srcfile eq "" } {
+            set srcfile $srcfile_hint
+        }
         log_step "source_assign_direct_load_fanout signal=$signame source=$srcfile fanouts=[join $fanouts ,]"
     }
     return $fanouts
 }
 
-proc source_assign_load_fanouts { sig_hdl signame } {
+proc source_assign_load_fanouts { sig_hdl signame {srcfile_hint ""} } {
     global assign_expr_trace_max_depth
 
     if { $assign_expr_trace_max_depth <= 0 } {
         return {}
     }
 
-    set fanouts [source_assign_load_fanouts_core $sig_hdl $signame 1]
+    set fanouts [source_assign_load_fanouts_core $sig_hdl $signame 1 $srcfile_hint]
     if { [llength $fanouts] > 0 } {
         set srcfile [get_handle_source_file $sig_hdl]
+        if { $srcfile eq "" } {
+            set srcfile $srcfile_hint
+        }
         log_step "source_assign_load_fanout signal=$signame source=$srcfile fanouts=[join $fanouts ,]"
     }
     return $fanouts
@@ -1675,9 +1684,9 @@ proc should_expand_assign_endpoint { hdl signame } {
         return 0
     }
 
-    # Generated logic, module ports, and expression instances are real trace
-    # endpoints. Expanding through them can cross logic that should stay
-    # visible in the result.
+    # Generated logic and expression instances are real trace endpoints.
+    # Module port/pin endpoints are still structural connections, so they are
+    # allowed below when the normalized name is a clean module-boundary signal.
     foreach bad {
         "/" "_ExprInst__"
         "Always" "Initial" "Init" "SigOp"
@@ -1692,7 +1701,7 @@ proc should_expand_assign_endpoint { hdl signame } {
     if { $kind ne "" } {
         if { [string first "port" $kind] >= 0 ||
              [string match "*pin" $kind] } {
-            return 0
+            return [is_module_boundary_signal $signame]
         }
         if { [string first "net" $kind] >= 0 ||
              [string first "sig" $kind] >= 0 ||
@@ -1702,6 +1711,137 @@ proc should_expand_assign_endpoint { hdl signame } {
     }
 
     return [is_module_boundary_signal $signame]
+}
+
+proc trace_source_hint_for_hdl { hdl fallback } {
+    set srcfile [get_handle_source_file $hdl]
+    if { $srcfile ne "" } {
+        return $srcfile
+    }
+    return $fallback
+}
+
+proc source_instance_module_name { srcfile instname } {
+    if { $srcfile eq "" || $instname eq "" } {
+        return ""
+    }
+    foreach inst [build_instantiation_stmt_list $srcfile] {
+        if { [lindex $inst 1] eq $instname } {
+            return [lindex $inst 0]
+        }
+    }
+    return ""
+}
+
+proc source_module_port_direction { srcfile inst_path portname } {
+    if { $srcfile eq "" || $inst_path eq "" || $portname eq "" } {
+        return "unknown"
+    }
+    set instname [lindex [split $inst_path "."] end]
+    set modname [source_instance_module_name $srcfile $instname]
+    if { $modname eq "" } {
+        return "unknown"
+    }
+    set dir_map [build_port_dir_map $srcfile $modname]
+    if { [dict exists $dir_map $portname] } {
+        return [dict get $dir_map $portname]
+    }
+    return "unknown"
+}
+
+proc module_port_high_conn_pairs { hdl signame role {srcfile_hint ""} } {
+    set signame [normalize_signal_name $signame]
+    if { ![is_module_boundary_signal $signame] } {
+        return {}
+    }
+
+    set base [strip_signal_selects $signame]
+    if { ![regexp {^(.+)\.([A-Za-z_][A-Za-z0-9_$]*)$} $base -> inst_path portname] } {
+        return {}
+    }
+
+    set dir [module_boundary_port_direction $hdl $signame]
+    if { $dir eq "unknown" } {
+        set srcfile [trace_source_hint_for_hdl $hdl $srcfile_hint]
+        set dir [source_module_port_direction $srcfile $inst_path $portname]
+    }
+    set cross 0
+    if { $role eq "driver" } {
+        if { $dir eq "input" || $dir eq "inout" } {
+            set cross 1
+        }
+    } elseif { $role eq "load" } {
+        if { $dir eq "output" || $dir eq "inout" } {
+            set cross 1
+        }
+    }
+    if { !$cross } {
+        return {}
+    }
+
+    set port_hdl [get_inst_port_handle_by_signal $inst_path $base]
+    if { $port_hdl eq "" } {
+        return {}
+    }
+
+    set pairs {}
+    set high_hdls [get_high_conn_sigs_for_port_hdl $inst_path $port_hdl]
+    foreach high_hdl $high_hdls {
+        set high_name [hdl_to_name $high_hdl]
+        if { $high_name eq "" } {
+            continue
+        }
+        lappend pairs [list $high_hdl $high_name]
+    }
+    return $pairs
+}
+
+proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_drivers_var net_depth expr_depth visited_var srcfile_hint } {
+    upvar 1 $all_drivers_var all_drivers
+    upvar 1 $module_drivers_var module_drivers
+    upvar 1 $visited_var visited
+
+    if { $net_depth <= 0 } {
+        return
+    }
+
+    foreach pair [module_port_high_conn_pairs $hdl $signame driver $srcfile_hint] {
+        set high_hdl [lindex $pair 0]
+        set high_sig [lindex $pair 1]
+        append_unique_signal all_drivers $high_sig
+        if { [is_module_boundary_signal $high_sig] } {
+            append_unique_signal module_drivers $high_sig
+        }
+        if { ![is_const_literal_name $high_sig] } {
+            log_step "driver_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
+            set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
+            collect_drivers_by_name_rec $high_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
+        }
+    }
+}
+
+proc collect_load_module_port_high_conns { hdl signame all_loads_var module_loads_var net_depth expr_depth visited_var {srcfile_hint ""} } {
+    upvar 1 $all_loads_var all_loads
+    upvar 1 $module_loads_var module_loads
+    upvar 1 $visited_var visited
+
+    if { $net_depth <= 0 } {
+        return
+    }
+
+    foreach pair [module_port_high_conn_pairs $hdl $signame load $srcfile_hint] {
+        set high_hdl [lindex $pair 0]
+        set high_sig [lindex $pair 1]
+        append_unique_signal all_loads $high_sig
+        if { [is_module_boundary_signal $high_sig] } {
+            append_unique_signal module_loads $high_sig
+        }
+        if { ![is_const_literal_name $high_sig] } {
+            log_step "load_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
+            set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
+            collect_loads_by_name_rec $high_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
+        }
+    }
 }
 
 proc should_expand_assign_expr_endpoint { hdl signame } {
@@ -1795,6 +1935,11 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
     foreach port_sig [source_module_port_driver_sources $srcfile_hint $signame] {
         append_unique_signal all_drivers $port_sig
         append_unique_signal module_drivers $port_sig
+        collect_driver_module_port_high_conns "" $port_sig all_drivers module_drivers $net_depth $expr_depth visited $srcfile_hint
+        if { $net_depth > 0 && ![is_const_literal_name $port_sig] } {
+            log_step "driver_module_port_continue from=$signame via=$port_sig remaining_net_depth=$net_depth"
+            collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint
+        }
     }
 
     set direct_sources {}
@@ -1854,12 +1999,15 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
             continue
         }
         append_unique_signal all_drivers $sig
+        collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
         if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
             log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
-            collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint
+            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+            collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
         } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
-            collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $srcfile_hint
+            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+            collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
         }
     }
 
@@ -1873,30 +2021,43 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
         if { [is_module_boundary_signal $sig] } {
             append_unique_signal module_drivers $sig
             append_unique_signal all_drivers $sig
+            collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
             if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
                 log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
-                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint
+                set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
             } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
                 log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
-                collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $srcfile_hint
+                set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+                collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
             }
         }
     }
 
+    set conn_driver_count_before [llength $all_drivers]
     collect_conn_module_ports_by_name $signame driver all_drivers module_drivers
+    if { $net_depth > 0 } {
+        foreach sig [lrange $all_drivers $conn_driver_count_before end] {
+            if { [is_module_boundary_signal $sig] && ![is_const_literal_name $sig] } {
+                collect_driver_module_port_high_conns "" $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
+                log_step "driver_conn_module_port_continue from=$signame via=$sig remaining_net_depth=$net_depth"
+                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint
+            }
+        }
+    }
     collect_source_driver_sources $signame $srcfile_hint all_drivers module_drivers $net_depth $expr_depth $visited_var
 }
 
-proc collect_loads_by_name { signame all_loads_var module_loads_var } {
+proc collect_loads_by_name { signame all_loads_var module_loads_var {srcfile_hint ""} } {
     global assign_trace_max_depth assign_expr_trace_max_depth
     upvar 1 $all_loads_var all_loads
     upvar 1 $module_loads_var module_loads
 
     set visited {}
-    collect_loads_by_name_rec $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth visited
+    collect_loads_by_name_rec $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth visited $srcfile_hint
 }
 
-proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var net_depth expr_depth visited_var } {
+proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var net_depth expr_depth visited_var {srcfile_hint ""} } {
     upvar 1 $all_loads_var all_loads
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
@@ -1907,10 +2068,10 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
 
     set direct_fanouts {}
     if { $net_depth > 0 } {
-        foreach fanout_sig [source_assign_direct_load_fanouts $hdl $signame] {
+        foreach fanout_sig [source_assign_direct_load_fanouts $hdl $signame $srcfile_hint] {
             append_unique_signal direct_fanouts $fanout_sig
             append_unique_signal all_loads $fanout_sig
-            collect_loads_by_name_rec $fanout_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited
+            collect_loads_by_name_rec $fanout_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint
         }
     }
 
@@ -1918,16 +2079,16 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
         return
     }
 
-    foreach fanout_sig [source_assign_load_fanouts $hdl $signame] {
+    foreach fanout_sig [source_assign_load_fanouts $hdl $signame $srcfile_hint] {
         if { [lsearch -exact $direct_fanouts $fanout_sig] >= 0 } {
             continue
         }
         append_unique_signal all_loads $fanout_sig
-        collect_loads_by_name_rec $fanout_sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited
+        collect_loads_by_name_rec $fanout_sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited $srcfile_hint
     }
 }
 
-proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_depth expr_depth visited_var } {
+proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_depth expr_depth visited_var {srcfile_hint ""} } {
     upvar 1 $all_loads_var all_loads
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
@@ -1952,14 +2113,16 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
             continue
         }
         append_unique_signal all_loads $sig
+        set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+        collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint
         if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
             log_step "load_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
-            collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var
+            collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
         } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
             log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
-            collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var
+            collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
         }
-        collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var
+        collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint
     }
 
     set moduleLoadList {}
@@ -1972,14 +2135,16 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
         if { [is_module_boundary_signal $sig] } {
             append_unique_signal module_loads $sig
             append_unique_signal all_loads $sig
+            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+            collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint
             if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
                 log_step "load_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
-                collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var
+                collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
             } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
                 log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
-                collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var
+                collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
             }
-            collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var
+            collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint
         }
     }
 
@@ -1997,14 +2162,16 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
         if { [is_module_boundary_signal $sig] } {
             append_unique_signal module_loads $sig
             append_unique_signal all_loads $sig
+            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+            collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint
             if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
                 log_step "load_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
-                collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var
+                collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
             } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
                 log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
-                collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var
+                collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
             }
-            collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var
+            collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint
         }
     }
 }
@@ -2291,12 +2458,16 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                     set sig [hdl_to_name $hdl]
                     if { $sig ne "" } {
                         append_unique_signal all_drivers $sig
+                        set fallback_driver_visited {}
+                        collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_driver_visited $driver_srcfile_hint
                         if { [should_expand_assign_endpoint $hdl $sig] } {
                             log_step "driver_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
-                            collect_drivers_by_name $sig all_drivers module_drivers $driver_srcfile_hint
+                            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
                         } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
                             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
-                            collect_drivers_by_name $sig all_drivers module_drivers $driver_srcfile_hint
+                            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
                         }
                     }
                 }
@@ -2313,12 +2484,16 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                     if { [is_module_boundary_signal $sig] } {
                         append_unique_signal module_drivers $sig
                         append_unique_signal all_drivers $sig
+                        set fallback_module_driver_visited {}
+                        collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_module_driver_visited $driver_srcfile_hint
                         if { [should_expand_assign_endpoint $hdl $sig] } {
                             log_step "driver_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
-                            collect_drivers_by_name $sig all_drivers module_drivers $driver_srcfile_hint
+                            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
                         } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
                             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
-                            collect_drivers_by_name $sig all_drivers module_drivers $driver_srcfile_hint
+                            set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
                         }
                     }
                 }
@@ -2334,9 +2509,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 continue
             }
 
-            collect_loads_by_name $signame all_loads module_loads
+            set load_srcfile_hint [get_handle_source_file $sig_hdl]
+            collect_loads_by_name $signame all_loads module_loads $load_srcfile_hint
             set source_load_visited {}
-            collect_source_load_fanouts $sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth source_load_visited
+            collect_source_load_fanouts $sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth source_load_visited $load_srcfile_hint
 
             # If string-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.
@@ -2346,12 +2522,15 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 foreach hdl $loadList {
                     set sig [hdl_to_name $hdl]
                     append_unique_signal all_loads $sig
+                    set fallback_load_visited {}
+                    set next_load_srcfile_hint [trace_source_hint_for_hdl $hdl $load_srcfile_hint]
+                    collect_load_module_port_high_conns $hdl $sig all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth fallback_load_visited $next_load_srcfile_hint
                     if { [should_expand_assign_endpoint $hdl $sig] } {
                         log_step "load_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
-                        collect_loads_by_name $sig all_loads module_loads
+                        collect_loads_by_name $sig all_loads module_loads $next_load_srcfile_hint
                     } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
                         log_step "load_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
-                        collect_loads_by_name $sig all_loads module_loads
+                        collect_loads_by_name $sig all_loads module_loads $next_load_srcfile_hint
                     }
                 }
             }

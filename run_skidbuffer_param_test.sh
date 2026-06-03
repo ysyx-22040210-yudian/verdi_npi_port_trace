@@ -10,7 +10,11 @@ log_step() {
 
 RUN_DIR="$(pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RTL_DIR="/mnt/hgfs/VMshare-2/CPU_CORE/ysyx/skidbuffer_param_kdb_test"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+RTL_DIR="$REPO_ROOT/skidbuffer_param_kdb_test"
+if [ ! -d "$RTL_DIR" ]; then
+    RTL_DIR="/mnt/hgfs/VMshare-2/CPU_CORE/ysyx/skidbuffer_param_kdb_test"
+fi
 
 BUILD_DIR="$RUN_DIR/skidbuffer_param_build"
 FILELIST="$RUN_DIR/skidbuffer_param_rtl.f"

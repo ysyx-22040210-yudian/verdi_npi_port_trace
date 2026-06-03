@@ -1,0 +1,1 @@
+bit_assign_trace_test.v

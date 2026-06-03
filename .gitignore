@@ -1,0 +1,15 @@
+*_build/
+verdiLog/
+__pycache__/
+*.pyc
+
+*.log
+*.csv
+*_instances.txt
+module_parameters.csv
+novas.conf
+novas.rc
+
+*_annotated*.xlsx
+*_filtered*.xlsx
+trace_gui_demo_annotated*.xlsx

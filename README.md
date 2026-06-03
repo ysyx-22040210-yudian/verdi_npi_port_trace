@@ -44,6 +44,8 @@ simv.daidir/kdb.elab++
 | `all_features_gui_xlsx.json` | 全特性 GUI XLSX 模式配置，可用于 `trace_gui.py --build-command` 或 GUI 加载。 |
 | `run_all_features_trace_test.sh` | 构建 KDB 并执行 GUI 命令生成、CSV 过滤、XLSX 反标、子系统拆分和结果断言的全特性回归。 |
 | `run_full_coverage_trace_test.sh` | 覆盖常数、assign、单 bit、多 module、多 keywords、XLSX 反标的回归测试。 |
+| `run_keyword_assign_driver_trace_test.sh` | 专门覆盖 `KeyMod u_key(.out(c)); assign b = c; u_child(.a(b));` 这种 input driver 经普通 assign 透传命中 keyword 输出的场景。 |
+| `run_module_port_passthrough_trace_test.sh` | 专门覆盖非 keywords module port/pin 不停止，继续穿过普通端口透传后命中 keywords 的 driver/load 场景。 |
 | `run_assign_passthrough_trace_test.sh` | 专门覆盖 `u_child(.a(b)); assign b = c;` 这类普通 assign 透传 driver 追踪。 |
 | `run_assign_loader_slice_trace_test.sh` | 专门覆盖 loader 方向 `assign B=A[10:0]`、`assign C=A[20:11]` 这类切片 fanout 追踪。 |
 | `WORKFLOW_GUIDE_FOR_LLMS.md` | 面向其他大模型的工具工作流程说明。 |
@@ -602,6 +604,8 @@ assign B = A;
 
 如果 NPI trace 停在 `B`，工具会按 `-assign-trace-depth <N>` 继续沿同方向追踪。普通 `assign B = A` 被视为信号连接，不视为组合逻辑或时序逻辑，因此 driver 方向会继续从 `B` 追到 `A`。即使 `-assign-expr-trace-depth 0`，这种普通透传仍然由 `-assign-trace-depth` 控制。
 
+module port/pin 也按结构连接处理：如果该端口属于 `-keywords` 对应实例，过滤阶段会直接命中 `yes`；如果不是 keywords 实例，trace 会继续跨过端口 high-side 连接向后追，直到遇到组合逻辑、时序逻辑、常数、悬空或达到 `-assign-trace-depth` 限制。
+
 典型场景：
 
 ```verilog
@@ -677,6 +681,8 @@ bash -n annotate_trace_xlsx.sh trace_and_filter.sh npi_trace.sh trace_gui.sh
 python3 -m py_compile annotate_trace_xlsx.py filter_trace.py find_instances_batched.py trace_gui.py
 
 bash run_all_features_trace_test.sh
+bash run_keyword_assign_driver_trace_test.sh
+bash run_module_port_passthrough_trace_test.sh
 bash run_assign_loader_slice_trace_test.sh
 bash run_assign_passthrough_trace_test.sh
 bash run_full_coverage_trace_test.sh
@@ -733,6 +739,12 @@ all_features_keywords.list
 all_features_ports.list
 all_features_gui_xlsx.json
 run_all_features_trace_test.sh
+keyword_assign_driver_trace_test.v
+keyword_assign_driver_trace_test.f
+run_keyword_assign_driver_trace_test.sh
+module_port_passthrough_trace_test.v
+module_port_passthrough_trace_test.f
+run_module_port_passthrough_trace_test.sh
 assign_passthrough_trace_test.v
 assign_passthrough_trace_test.f
 assign_loader_slice_trace_test.v
@@ -783,6 +795,55 @@ PYTHON_BIN=/path/to/python3 ./trace_gui.sh
 - `.a(1'b0)`：NPI 通常能直接识别。
 - 多层父 port 透传到 `.p(1'b0)`：需要 `-const-trace-depth` 足够大。
 - `.a(parent_net)` 且 `assign parent_net = 1'b0`：需要 `-const-source-fallback 1`，并且 KDB 记录的源码路径在当前机器可访问。
+
+### 怎么确认源码 fallback 是否成功
+
+看运行日志中的 `source_*` 标记。只要出现下面这类日志，就说明工具已经读取 KDB 记录的 RTL 源码路径，并用源码 fallback 补充了 NPI trace：
+
+```text
+source_assign_direct_driver_source signal=... source=... drivers=...
+source_assign_driver_source signal=... source=... drivers=...
+source_assign_direct_load_fanout signal=... source=... fanouts=...
+source_assign_load_fanout signal=... source=... fanouts=...
+source_module_port_driver signal=... source=... drivers=...
+const_driver_from_parent_signal signal=... source=... value=Const:...
+```
+
+快速查看命令：
+
+```bash
+grep -nE "source_|const_driver_from_parent_signal|module_port_high_continue" <run.log>
+```
+
+判断规则：
+
+- `source=...` 是 fallback 实际读取到的 RTL 源码文件。
+- `drivers=...` / `fanouts=...` 是源码解析补出来并继续追踪的信号。
+- 如果这些信号继续出现在 `*_full.csv`、`*_module_connections.csv` 或最终过滤 CSV 中，就说明 fallback 结果已经参与本次判断。
+
+可以用开关对比确认：
+
+```bash
+# 关闭 assign / fanout / module port 继续展开
+./trace_and_filter.sh ... -assign-trace-depth 0 -assign-expr-trace-depth 0
+
+# 打开 assign / fanout / module port 继续展开
+./trace_and_filter.sh ... -assign-trace-depth 4 -assign-expr-trace-depth 1
+```
+
+如果打开后多出通过 `assign`、slice、拼接或非 keywords module port/pin 继续追到的 endpoint，并且日志中有 `source_*` 或 `module_port_high_continue`，就可以确认源码 fallback / 结构连接继续追踪生效。
+
+常数源码 fallback 单独看：
+
+```bash
+-const-source-fallback 1
+```
+
+成功时通常会出现：
+
+```text
+const_driver_from_parent_signal signal=... source=... value=Const:...
+```
 
 ### 大项目跑得慢怎么办
 

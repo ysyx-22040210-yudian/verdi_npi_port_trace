@@ -91,6 +91,27 @@ def get_signal_column(header):
         return header.index("signal_full_name")
     return header.index("module_signal_full_name")
 
+def normalize_port_dir(port_dir):
+    text = (port_dir or "").strip().lower()
+    if text in {"input", "npiinput", "1"}:
+        return "input"
+    if text in {"output", "npioutput", "2"}:
+        return "output"
+    if text in {"inout", "npiinout", "3"}:
+        return "inout"
+    return "unknown"
+
+def role_matches_port_direction(port_dir, role):
+    direction = normalize_port_dir(port_dir)
+    role = (role or "").strip().lower()
+    if direction == "input":
+        return role == "driver"
+    if direction == "output":
+        return role == "load"
+    if direction == "inout":
+        return role in {"driver", "load"}
+    return role in {"driver", "load"}
+
 def normalized_header(header):
     header = list(header)
     if "module_signal_full_name" in header and "signal_full_name" not in header:
@@ -115,12 +136,20 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
         log_step("input_header={}".format(",".join(header)))
         writer.writerow(normalized_header(header) if normalize_header else header)
         signal_idx = get_signal_column(header)
+        port_dir_idx = header.index("port_dir") if "port_dir" in header else -1
+        role_idx = header.index("role") if "role" in header else -1
         log_step("signal_column={} index={}".format(header[signal_idx], signal_idx))
+        log_step("role_direction_filter=enabled port_dir_index={} role_index={}".format(port_dir_idx, role_idx))
         if normalize_header:
             log_step("normalizing module_signal_full_name header to signal_full_name")
 
         for row in reader:
             total_count += 1
+            if role_idx >= 0 and port_dir_idx >= 0:
+                port_dir = row[port_dir_idx] if len(row) > port_dir_idx else ""
+                role = row[role_idx] if len(row) > role_idx else ""
+                if not role_matches_port_direction(port_dir, role):
+                    continue
             if len(row) > signal_idx and signal_belongs_to_instance(row[signal_idx], instances):
                 writer.writerow(row)
                 matched_count += 1

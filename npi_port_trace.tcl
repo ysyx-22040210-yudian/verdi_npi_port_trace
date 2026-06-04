@@ -549,6 +549,122 @@ proc signal_scope_prefix { signame } {
     return ""
 }
 
+proc signal_effective_scope_prefix { signame {scope_hint ""} } {
+    set prefix [signal_scope_prefix $signame]
+    if { $prefix ne "" } {
+        return $prefix
+    }
+    return $scope_hint
+}
+
+proc signal_scope_hint_after { signame {scope_hint ""} } {
+    set prefix [signal_scope_prefix $signame]
+    if { $prefix ne "" } {
+        return $prefix
+    }
+    return $scope_hint
+}
+
+proc source_module_port_candidate_exists { candidate } {
+    if { [info commands ::npi_L1::npi_mod_inst_get_port] eq "" } {
+        return 1
+    }
+    if { [is_const_literal_name $candidate] } {
+        return 1
+    }
+
+    set base [strip_signal_selects [normalize_signal_name $candidate]]
+    if { ![regexp {^(.+)\.([A-Za-z_][A-Za-z0-9_$]*)$} $base -> inst_path portname] } {
+        return 1
+    }
+
+    set hdlList {}
+    if { [catch { ::npi_L1::npi_mod_inst_get_port $inst_path hdlList } _] } {
+        log_step "source_module_port_skip_nonexistent signal=$candidate inst=$inst_path port=$portname"
+        return 0
+    }
+    foreach port_hdl $hdlList {
+        if { [get_port_name $port_hdl] eq $portname } {
+            return 1
+        }
+    }
+
+    log_step "source_module_port_skip_nonexistent signal=$candidate inst=$inst_path port=$portname"
+    return 0
+}
+
+proc source_has_assign_driver_for_signal { candidate srcfile } {
+    if { $srcfile eq "" } {
+        return 0
+    }
+    set leaf [signal_leaf_name $candidate]
+    if { $leaf eq "" } {
+        return 0
+    }
+    set scope [signal_scope_prefix $candidate]
+    set ctx [source_context_for_signal $candidate $srcfile]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $scope $srcfile]
+    }
+    foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
+        if { [lindex $assign 0] eq $leaf } {
+            return 1
+        }
+    }
+    return 0
+}
+
+proc source_signal_candidate_exists { candidate {mode "strict"} {srcfile ""} } {
+    if { [info commands ::npi_L1::npi_nl_trace_driver] eq "" } {
+        return 1
+    }
+    if { [is_const_literal_name $candidate] } {
+        return 1
+    }
+    set candidate_prefix [signal_scope_prefix $candidate]
+    if { $candidate_prefix eq "" } {
+        return 1
+    }
+    if { [string first "." $candidate_prefix] < 0 } {
+        return 1
+    }
+
+    set driverList {}
+    if { ![catch { ::npi_L1::npi_nl_trace_driver $candidate driverList 0 1 }] &&
+         [llength $driverList] > 0 } {
+        return 1
+    }
+
+    set loadList {}
+    if { ![catch { ::npi_L1::npi_nl_trace_load $candidate loadList 0 1 }] &&
+         [llength $loadList] > 0 } {
+        return 1
+    }
+
+    if { [source_module_port_candidate_exists $candidate] } {
+        return 1
+    }
+
+    if { $mode eq "driver" && [source_has_assign_driver_for_signal $candidate $srcfile] } {
+        return 1
+    }
+
+    log_step "source_assign_skip_nonexistent signal=$candidate"
+    return 0
+}
+
+proc append_source_signal_candidate { list_var candidate {mode "strict"} {srcfile ""} } {
+    upvar 1 $list_var values
+    if { [source_signal_candidate_exists $candidate $mode $srcfile] } {
+        append_unique_signal values $candidate
+    }
+}
+
 proc assign_lhs_leaf_name { lhs } {
     set lhs [string trim $lhs]
     regsub {\[[^\]]+\]\s*$} $lhs "" lhs
@@ -734,27 +850,221 @@ proc strip_leading_block_end_tokens { stmt } {
     return $stmt
 }
 
-proc build_assign_stmt_list { srcfile } {
-    global assign_stmt_list_cache
-
+proc read_source_text_without_line_comments { srcfile } {
     if { $srcfile eq "" || ![file exists $srcfile] } {
-        return {}
+        return ""
     }
-    if { [info exists assign_stmt_list_cache($srcfile)] } {
-        return $assign_stmt_list_cache($srcfile)
-    }
-
     set fh [open $srcfile r]
     set text ""
     foreach line [split [read $fh] "\n"] {
         regsub {//.*$} $line "" line
-        append text " " [string trim $line]
+        append text [string trim $line] "\n"
     }
     close $fh
+    return $text
+}
 
+proc build_module_text_map { srcfile } {
+    global module_text_map_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
+    if { [info exists module_text_map_cache($srcfile)] } {
+        return $module_text_map_cache($srcfile)
+    }
+
+    set modules {}
+    set in_module 0
+    set modname ""
+    set text ""
+    foreach line [split [read_source_text_without_line_comments $srcfile] "\n"] {
+        set trimmed [string trim $line]
+        if { !$in_module } {
+            if { [regexp {^module\s+([A-Za-z_][A-Za-z0-9_$]*)([^A-Za-z0-9_$]|$)} $trimmed -> name _] } {
+                set in_module 1
+                set modname $name
+                set text "$trimmed\n"
+                if { [regexp {(^|[^A-Za-z0-9_$])endmodule([^A-Za-z0-9_$]|$)} $trimmed] } {
+                    dict set modules $modname $text
+                    set in_module 0
+                    set modname ""
+                    set text ""
+                }
+            }
+            continue
+        }
+
+        append text "$trimmed\n"
+        if { [regexp {(^|[^A-Za-z0-9_$])endmodule([^A-Za-z0-9_$]|$)} $trimmed] } {
+            dict set modules $modname $text
+            set in_module 0
+            set modname ""
+            set text ""
+        }
+    }
+
+    set module_text_map_cache($srcfile) $modules
+    return $modules
+}
+
+proc source_module_text { srcfile module } {
+    if { $module eq "" } {
+        return ""
+    }
+    set modules [build_module_text_map $srcfile]
+    if { [dict exists $modules $module] } {
+        return [dict get $modules $module]
+    }
+    return ""
+}
+
+proc source_module_names_in_file { srcfile } {
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
+    return [dict keys [build_module_text_map $srcfile]]
+}
+
+proc source_module_name_by_port { srcfile portname } {
+    if { $srcfile eq "" || $portname eq "" || ![file exists $srcfile] } {
+        return ""
+    }
+
+    set matches {}
+    foreach modname [source_module_names_in_file $srcfile] {
+        set dir_map [build_port_dir_map $srcfile $modname]
+        if { [dict exists $dir_map $portname] } {
+            lappend matches $modname
+        }
+    }
+    if { [llength $matches] == 1 } {
+        return [lindex $matches 0]
+    }
+    return ""
+}
+
+proc source_module_name_by_signal { srcfile leaf } {
+    if { $srcfile eq "" || $leaf eq "" || ![file exists $srcfile] } {
+        return ""
+    }
+
+    set matches {}
+    foreach modname [source_module_names_in_file $srcfile] {
+        set width_map [build_signal_width_map_for_module $srcfile $modname]
+        if { [dict exists $width_map $leaf] } {
+            lappend matches $modname
+        }
+    }
+    if { [llength $matches] == 1 } {
+        return [lindex $matches 0]
+    }
+    return ""
+}
+
+proc source_file_for_scope_instance { scope {fallback ""} } {
+    global source_scope_file_cache
+
+    set scope [strip_signal_selects [normalize_signal_name $scope]]
+    if { $scope eq "" } {
+        return $fallback
+    }
+    if { [info exists source_scope_file_cache($scope)] } {
+        set cached $source_scope_file_cache($scope)
+        if { $cached ne "" } {
+            return $cached
+        }
+        return $fallback
+    }
+
+    set srcfile ""
+    if { [info commands ::npi_L1::npi_mod_inst_get_port] ne "" } {
+        set hdlList {}
+        if { ![catch { ::npi_L1::npi_mod_inst_get_port $scope hdlList }] } {
+            foreach port_hdl $hdlList {
+                set srcfile [get_handle_source_file $port_hdl]
+                if { $srcfile ne "" } {
+                    break
+                }
+            }
+        }
+    }
+
+    set source_scope_file_cache($scope) $srcfile
+    if { $srcfile ne "" } {
+        return $srcfile
+    }
+    return $fallback
+}
+
+proc source_context_for_signal { signame {srcfile_hint ""} {scope_hint ""} } {
+    global source_scope_module_context_cache
+
+    set signame [normalize_signal_name $signame]
+    set leaf [signal_leaf_name $signame]
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set srcfile $srcfile_hint
+    set module ""
+
+    if { $prefix eq "" } {
+        return [list $srcfile ""]
+    }
+
+    if { [info exists source_scope_module_context_cache($prefix)] } {
+        set cached $source_scope_module_context_cache($prefix)
+        set cached_srcfile [lindex $cached 0]
+        set cached_module [lindex $cached 1]
+        if { $cached_srcfile ne "" && $cached_module ne "" } {
+            return $cached
+        }
+    }
+
+    set cache_key "${prefix}::${srcfile_hint}"
+    if { [info exists source_scope_module_context_cache($cache_key)] } {
+        return $source_scope_module_context_cache($cache_key)
+    }
+
+    if { $srcfile_hint ne "" } {
+        set module [source_scope_module_name $prefix $srcfile_hint]
+    }
+
+    set scope_srcfile [source_file_for_scope_instance $prefix ""]
+    if { $scope_srcfile ne "" } {
+        set srcfile $scope_srcfile
+    }
+
+    set base [strip_signal_selects $signame]
+    if { $module eq "" &&
+         [regexp {^(.+)\.([A-Za-z_][A-Za-z0-9_$]*)$} $base -> inst_path portname] &&
+         $inst_path eq $prefix } {
+        set module [source_module_name_by_port $srcfile $portname]
+    }
+
+    if { $module eq "" } {
+        set module [source_module_name_by_signal $srcfile $leaf]
+    }
+
+    if { $module ne "" } {
+        if { $srcfile ne "" && [source_module_text $srcfile $module] eq "" &&
+             $srcfile_hint ne "" && [source_module_text $srcfile_hint $module] ne "" } {
+            set srcfile $srcfile_hint
+        }
+    }
+
+    set result [list $srcfile $module]
+    set source_scope_module_context_cache($cache_key) $result
+    if { $srcfile ne "" && $module ne "" } {
+        set source_scope_module_context_cache($prefix) $result
+    }
+    return $result
+}
+
+proc parse_assign_stmt_text { text } {
     set assigns {}
     foreach stmt [split $text ";"] {
         set stmt [strip_leading_block_end_tokens $stmt]
+        regsub -all {\s+} $stmt " " stmt
+        set stmt [string trim $stmt]
         # The simple semicolon splitter can leave a leading procedural
         # block terminator before the next continuous assign, for example
         # "end assign a = b" after an always block. Keep only the continuous
@@ -771,27 +1081,53 @@ proc build_assign_stmt_list { srcfile } {
             }
         }
     }
+    return $assigns
+}
+
+proc build_assign_stmt_list { srcfile } {
+    global assign_stmt_list_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
+    if { [info exists assign_stmt_list_cache($srcfile)] } {
+        return $assign_stmt_list_cache($srcfile)
+    }
+
+    set text [read_source_text_without_line_comments $srcfile]
+    set assigns [parse_assign_stmt_text $text]
 
     set assign_stmt_list_cache($srcfile) $assigns
     return $assigns
 }
 
-proc build_signal_width_map { srcfile } {
+proc build_assign_stmt_list_for_module { srcfile module } {
+    global assign_stmt_list_module_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
+        return [build_assign_stmt_list $srcfile]
+    }
+
+    set key "${srcfile}::${module}"
+    if { [info exists assign_stmt_list_module_cache($key)] } {
+        return $assign_stmt_list_module_cache($key)
+    }
+
+    set text [source_module_text $srcfile $module]
+    if { $text eq "" } {
+        set assigns [build_assign_stmt_list $srcfile]
+    } else {
+        set assigns [parse_assign_stmt_text $text]
+    }
+    set assign_stmt_list_module_cache($key) $assigns
+    return $assigns
+}
+
+proc parse_signal_width_text { text } {
     global signal_width_map_cache
 
-    if { $srcfile eq "" || ![file exists $srcfile] } {
-        return {}
-    }
-    if { [info exists signal_width_map_cache($srcfile)] } {
-        return $signal_width_map_cache($srcfile)
-    }
-
-    set fh [open $srcfile r]
-    set lines [split [read $fh] "\n"]
-    close $fh
-
     set widths {}
-    foreach line $lines {
+    foreach line [split $text "\n"] {
         regsub {//.*$} $line "" line
         set line [string trim $line]
         if { $line eq "" } {
@@ -820,8 +1156,44 @@ proc build_signal_width_map { srcfile } {
             }
         }
     }
+    return $widths
+}
+
+proc build_signal_width_map { srcfile } {
+    global signal_width_map_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
+    if { [info exists signal_width_map_cache($srcfile)] } {
+        return $signal_width_map_cache($srcfile)
+    }
+
+    set widths [parse_signal_width_text [read_source_text_without_line_comments $srcfile]]
 
     set signal_width_map_cache($srcfile) $widths
+    return $widths
+}
+
+proc build_signal_width_map_for_module { srcfile module } {
+    global signal_width_map_module_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
+        return [build_signal_width_map $srcfile]
+    }
+
+    set key "${srcfile}::${module}"
+    if { [info exists signal_width_map_module_cache($key)] } {
+        return $signal_width_map_module_cache($key)
+    }
+
+    set text [source_module_text $srcfile $module]
+    if { $text eq "" } {
+        set widths [build_signal_width_map $srcfile]
+    } else {
+        set widths [parse_signal_width_text $text]
+    }
+    set signal_width_map_module_cache($key) $widths
     return $widths
 }
 
@@ -840,6 +1212,25 @@ proc conn_references_signal_bit { conn leaf bit } {
     return [lhs_select_contains_bit $select $bit]
 }
 
+proc parse_instantiation_stmt_text { text } {
+    set insts {}
+    foreach stmt [split $text ";"] {
+        set stmt [strip_leading_block_end_tokens $stmt]
+        regsub -all {\s+} $stmt " " stmt
+        set stmt [string trim $stmt]
+        if { $stmt eq "" } {
+            continue
+        }
+        if { [regexp {^(module|endmodule|assign|always|initial|input|output|inout|wire|reg|logic|parameter|localparam)([^A-Za-z0-9_$]|$)} $stmt] } {
+            continue
+        }
+        if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)\s*(#\s*\(.*\)\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*\((.*)\)$} $stmt -> modname _ instname conn_text] } {
+            lappend insts [list $modname $instname $conn_text]
+        }
+    }
+    return $insts
+}
+
 proc build_instantiation_stmt_list { srcfile } {
     global inst_stmt_list_cache
 
@@ -850,33 +1241,73 @@ proc build_instantiation_stmt_list { srcfile } {
         return $inst_stmt_list_cache($srcfile)
     }
 
-    set fh [open $srcfile r]
-    set text ""
-    foreach line [split [read $fh] "\n"] {
-        regsub {//.*$} $line "" line
-        append text " " [string trim $line]
-    }
-    close $fh
-
-    set insts {}
-    foreach stmt [split $text ";"] {
-        set stmt [strip_leading_block_end_tokens $stmt]
-        if { $stmt eq "" } {
-            continue
-        }
-        if { [regexp {^(module|endmodule|assign|always|initial|input|output|inout|wire|reg|logic|parameter|localparam)\b} $stmt] } {
-            continue
-        }
-        if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)\s*(#\s*\(.*\)\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*\((.*)\)$} $stmt -> modname _ instname conn_text] } {
-            lappend insts [list $modname $instname $conn_text]
-        }
-    }
+    set insts [parse_instantiation_stmt_text [read_source_text_without_line_comments $srcfile]]
 
     set inst_stmt_list_cache($srcfile) $insts
     return $insts
 }
 
-proc source_module_port_driver_sources { srcfile signame } {
+proc build_instantiation_stmt_list_for_module { srcfile module } {
+    global inst_stmt_list_module_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
+        return [build_instantiation_stmt_list $srcfile]
+    }
+
+    set key "${srcfile}::${module}"
+    if { [info exists inst_stmt_list_module_cache($key)] } {
+        return $inst_stmt_list_module_cache($key)
+    }
+
+    set text [source_module_text $srcfile $module]
+    if { $text eq "" } {
+        set insts [build_instantiation_stmt_list $srcfile]
+    } else {
+        set insts [parse_instantiation_stmt_text $text]
+    }
+    set inst_stmt_list_module_cache($key) $insts
+    return $insts
+}
+
+proc source_scope_module_name { scope srcfile } {
+    global source_scope_module_cache
+
+    set scope [strip_signal_selects [normalize_signal_name $scope]]
+    if { $scope eq "" || $srcfile eq "" || ![file exists $srcfile] } {
+        return ""
+    }
+
+    set key "${srcfile}::${scope}"
+    if { [info exists source_scope_module_cache($key)] } {
+        return $source_scope_module_cache($key)
+    }
+
+    set parts [split $scope "."]
+    set module [lindex $parts 0]
+    if { [source_module_text $srcfile $module] eq "" } {
+        set source_scope_module_cache($key) ""
+        return ""
+    }
+
+    for {set idx 1} {$idx < [llength $parts]} {incr idx} {
+        set instname [lindex $parts $idx]
+        set found ""
+        foreach inst [build_instantiation_stmt_list_for_module $srcfile $module] {
+            if { [lindex $inst 1] eq $instname } {
+                set found [lindex $inst 0]
+                break
+            }
+        }
+        if { $found ne "" } {
+            set module $found
+        }
+    }
+
+    set source_scope_module_cache($key) $module
+    return $module
+}
+
+proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
     if { $srcfile eq "" || ![file exists $srcfile] } {
         return {}
     }
@@ -886,33 +1317,38 @@ proc source_module_port_driver_sources { srcfile signame } {
         return {}
     }
     set bit [signal_bit_index $signame]
-    set prefix [signal_scope_prefix $signame]
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
 
     set sources {}
-    foreach inst [build_instantiation_stmt_list $srcfile] {
+    foreach inst [build_instantiation_stmt_list_for_module $srcfile $module] {
         set modname [lindex $inst 0]
         set instname [lindex $inst 1]
         set conn_text [lindex $inst 2]
-        set dir_map [build_port_dir_map $srcfile $modname]
-        if { [dict size $dir_map] == 0 } {
-            continue
-        }
 
         foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
-            if { ![dict exists $dir_map $port] } {
-                continue
-            }
-            set dir [dict get $dir_map $port]
-            if { $dir ne "output" && $dir ne "inout" } {
-                continue
-            }
             if { ![conn_references_signal_bit $conn $leaf $bit] } {
                 continue
             }
             if { $prefix ne "" } {
-                append_unique_signal sources "${prefix}.${instname}.${port}"
+                set candidate "${prefix}.${instname}.${port}"
             } else {
-                append_unique_signal sources "${instname}.${port}"
+                set candidate "${instname}.${port}"
+            }
+            set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
+            if { $dir ne "output" && $dir ne "inout" } {
+                continue
+            }
+            if { [source_module_port_candidate_exists $candidate] } {
+                append_unique_signal sources $candidate
             }
         }
     }
@@ -921,6 +1357,84 @@ proc source_module_port_driver_sources { srcfile signame } {
         log_step "source_module_port_driver signal=$signame source=$srcfile drivers=[join $sources ,]"
     }
     return $sources
+}
+
+proc source_candidate_port_direction { candidate srcfile modname portname } {
+    set base [strip_signal_selects [normalize_signal_name $candidate]]
+    if { [regexp {^(.+)\.([A-Za-z_][A-Za-z0-9_$]*)$} $base -> inst_path _] } {
+        set port_hdl [get_inst_port_handle_by_signal $inst_path $base]
+        if { $port_hdl ne "" } {
+            set dir [get_port_direction $port_hdl]
+            if { $dir ne "unknown" } {
+                return $dir
+            }
+            set port_srcfile [get_handle_source_file $port_hdl]
+            if { $port_srcfile ne "" } {
+                set dir_map [build_port_dir_map $port_srcfile $modname]
+                if { [dict exists $dir_map $portname] } {
+                    return [dict get $dir_map $portname]
+                }
+            }
+        }
+    }
+
+    set dir_map [build_port_dir_map $srcfile $modname]
+    if { [dict exists $dir_map $portname] } {
+        return [dict get $dir_map $portname]
+    }
+    return "unknown"
+}
+
+proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
+    if { $srcfile eq "" || ![file exists $srcfile] } {
+        return {}
+    }
+
+    set leaf [signal_leaf_name $signame]
+    if { $leaf eq "" } {
+        return {}
+    }
+    set bit [signal_bit_index $signame]
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
+
+    set fanouts {}
+    foreach inst [build_instantiation_stmt_list_for_module $srcfile $module] {
+        set modname [lindex $inst 0]
+        set instname [lindex $inst 1]
+        set conn_text [lindex $inst 2]
+
+        foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
+            if { ![conn_references_signal_bit $conn $leaf $bit] } {
+                continue
+            }
+            if { $prefix ne "" } {
+                set candidate "${prefix}.${instname}.${port}"
+            } else {
+                set candidate "${instname}.${port}"
+            }
+            set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
+            if { $dir ne "input" && $dir ne "inout" } {
+                continue
+            }
+            if { [source_module_port_candidate_exists $candidate] } {
+                append_unique_signal fanouts $candidate
+            }
+        }
+    }
+
+    if { [llength $fanouts] > 0 } {
+        log_step "source_module_port_load signal=$signame source=$srcfile fanouts=[join $fanouts ,]"
+    }
+    return $fanouts
 }
 
 proc rhs_is_concat_expr { rhs } {
@@ -950,10 +1464,19 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
         return {}
     }
     set prefix [signal_scope_prefix $signame]
-    set width_map [build_signal_width_map $srcfile]
+    set ctx [source_context_for_signal $signame $srcfile]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
+    set width_map [build_signal_width_map_for_module $srcfile $module]
 
     set fanouts {}
-    foreach assign [build_assign_stmt_list $srcfile] {
+    foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
         set lhs_leaf [lindex $assign 0]
         set lhs_select [lindex $assign 1]
         set rhs [lindex $assign 2]
@@ -968,18 +1491,24 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
 
         if { $bit eq "" } {
             if { $prefix ne "" } {
-                append_unique_signal fanouts "${prefix}.${lhs_leaf}"
+                set candidate "${prefix}.${lhs_leaf}"
             } else {
-                append_unique_signal fanouts $lhs_leaf
+                set candidate $lhs_leaf
+            }
+            if { [source_signal_candidate_exists $candidate strict $srcfile] } {
+                append_unique_signal fanouts $candidate
             }
             continue
         }
 
         set lhs_bits [rhs_lhs_bits_for_signal_bit $rhs $leaf $bit $width_map]
         if { $prefix ne "" } {
-            append_unique_signal fanouts "${prefix}.${lhs_leaf}"
+            set candidate "${prefix}.${lhs_leaf}"
         } else {
-            append_unique_signal fanouts $lhs_leaf
+            set candidate $lhs_leaf
+        }
+        if { [source_signal_candidate_exists $candidate strict $srcfile] } {
+            append_unique_signal fanouts $candidate
         }
         if { [llength $lhs_bits] == 0 } {
             continue
@@ -994,9 +1523,12 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
                 set select "\[$lhs_bit\]"
             }
             if { $prefix ne "" } {
-                append_unique_signal fanouts "${prefix}.${lhs_leaf}${select}"
+                set candidate "${prefix}.${lhs_leaf}${select}"
             } else {
-                append_unique_signal fanouts "${lhs_leaf}${select}"
+                set candidate "${lhs_leaf}${select}"
+            }
+            if { [source_signal_candidate_exists $candidate strict $srcfile] } {
+                append_unique_signal fanouts $candidate
             }
         }
     }
@@ -1231,7 +1763,7 @@ proc rhs_driver_sources_for_whole { rhs prefix {width_map {}} } {
     return $sources
 }
 
-proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {include_expr 1} } {
+proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {include_expr 1} {scope_hint ""} } {
     set bit [signal_bit_index $signame]
     set srcfile $srcfile_hint
     if { $srcfile eq "" && $sig_hdl ne "" } {
@@ -1245,11 +1777,20 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
     if { $leaf eq "" } {
         return {}
     }
-    set prefix [signal_scope_prefix $signame]
-    set width_map [build_signal_width_map $srcfile]
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
+    set width_map [build_signal_width_map_for_module $srcfile $module]
 
     set sources {}
-    foreach assign [build_assign_stmt_list $srcfile] {
+    foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
         set lhs_leaf [lindex $assign 0]
         set lhs_select [lindex $assign 1]
         set rhs [lindex $assign 2]
@@ -1259,13 +1800,13 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
         if { $bit eq "" } {
             set direct_sources [expr_item_source_signals $rhs $prefix]
             foreach source $direct_sources {
-                append_unique_signal sources $source
+                append_source_signal_candidate sources $source driver $srcfile
             }
             if { [llength $direct_sources] > 0 || !$include_expr } {
                 continue
             }
             foreach source [rhs_driver_sources_for_whole $rhs $prefix $width_map] {
-                append_unique_signal sources $source
+                append_source_signal_candidate sources $source driver $srcfile
             }
         } else {
             set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $bit]
@@ -1274,14 +1815,14 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
             }
             set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
             if { $direct_source ne "" } {
-                append_unique_signal sources $direct_source
+                append_source_signal_candidate sources $direct_source driver $srcfile
                 continue
             }
             if { !$include_expr } {
                 continue
             }
             foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
-                append_unique_signal sources $source
+                append_source_signal_candidate sources $source driver $srcfile
             }
         }
     }
@@ -1289,7 +1830,7 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
     return $sources
 }
 
-proc source_assign_const_chain { signame srcfile depth visited_var } {
+proc source_assign_const_chain { signame srcfile depth visited_var {scope_hint ""} } {
     upvar 1 $visited_var visited
 
     if { $depth <= 0 || $srcfile eq "" } {
@@ -1305,11 +1846,12 @@ proc source_assign_const_chain { signame srcfile depth visited_var } {
     lappend visited $signame
 
     set consts {}
-    foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile 1] {
+    foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile 1 $scope_hint] {
         if { [is_const_literal_name $source_sig] } {
             append_unique_signal consts $source_sig
         } else {
-            foreach const_sig [source_assign_const_chain $source_sig $srcfile [expr {$depth - 1}] visited] {
+            set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
+            foreach const_sig [source_assign_const_chain $source_sig $srcfile [expr {$depth - 1}] visited $next_scope_hint] {
                 append_unique_signal consts $const_sig
             }
         }
@@ -1317,22 +1859,22 @@ proc source_assign_const_chain { signame srcfile depth visited_var } {
     return $consts
 }
 
-proc source_assign_direct_driver_sources { sig_hdl signame {srcfile_hint ""} } {
-    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 0]
+proc source_assign_direct_driver_sources { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
+    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 0 $scope_hint]
     if { [llength $sources] > 0 } {
         log_step "source_assign_direct_driver_source signal=$signame source=$srcfile_hint drivers=[join $sources ,]"
     }
     return $sources
 }
 
-proc source_assign_driver_sources { sig_hdl signame {srcfile_hint ""} } {
+proc source_assign_driver_sources { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
     global assign_expr_trace_max_depth
 
     if { $assign_expr_trace_max_depth <= 0 } {
         return {}
     }
 
-    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 1]
+    set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 1 $scope_hint]
     if { [llength $sources] == 0 } {
         return {}
     }
@@ -1346,7 +1888,8 @@ proc source_assign_driver_sources { sig_hdl signame {srcfile_hint ""} } {
     if { $srcfile ne "" && $assign_expr_trace_max_depth > 0 } {
         foreach source_sig $sources {
             set visited {}
-            foreach const_sig [source_assign_const_chain $source_sig $srcfile $assign_expr_trace_max_depth visited] {
+            set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
+            foreach const_sig [source_assign_const_chain $source_sig $srcfile $assign_expr_trace_max_depth visited $next_scope_hint] {
                 append_unique_signal expanded_sources $const_sig
             }
         }
@@ -1765,6 +2308,23 @@ proc module_port_high_conn_pairs { hdl signame role {srcfile_hint ""} } {
         set srcfile [trace_source_hint_for_hdl $hdl $srcfile_hint]
         set dir [source_module_port_direction $srcfile $inst_path $portname]
     }
+
+    set port_hdl [get_inst_port_handle_by_signal $inst_path $base]
+    if { $dir eq "unknown" && $port_hdl ne "" } {
+        set dir [get_port_direction $port_hdl]
+    }
+    if { $dir eq "unknown" } {
+        set ctx [source_context_for_signal $signame $srcfile_hint]
+        set ctx_srcfile [lindex $ctx 0]
+        set ctx_module [lindex $ctx 1]
+        if { $ctx_srcfile ne "" && $ctx_module ne "" } {
+            set dir_map [build_port_dir_map $ctx_srcfile $ctx_module]
+            if { [dict exists $dir_map $portname] } {
+                set dir [dict get $dir_map $portname]
+            }
+        }
+    }
+
     set cross 0
     if { $role eq "driver" } {
         if { $dir eq "input" || $dir eq "inout" } {
@@ -1779,7 +2339,6 @@ proc module_port_high_conn_pairs { hdl signame role {srcfile_hint ""} } {
         return {}
     }
 
-    set port_hdl [get_inst_port_handle_by_signal $inst_path $base]
     if { $port_hdl eq "" } {
         return {}
     }
@@ -1801,7 +2360,7 @@ proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
 
-    if { $net_depth <= 0 } {
+    if { $net_depth <= 0 && $expr_depth <= 0 } {
         return
     }
 
@@ -1815,7 +2374,12 @@ proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_
         if { ![is_const_literal_name $high_sig] } {
             log_step "driver_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
-            collect_drivers_by_name_rec $high_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
+            set next_scope_hint [signal_scope_hint_after $high_sig]
+            if { $net_depth > 0 } {
+                collect_drivers_by_name_rec $high_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint $next_scope_hint
+            } else {
+                collect_drivers_by_name_rec $high_sig all_drivers module_drivers 0 [expr {$expr_depth - 1}] visited $next_srcfile_hint $next_scope_hint
+            }
         }
     }
 }
@@ -1825,7 +2389,7 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
-    if { $net_depth <= 0 } {
+    if { $net_depth <= 0 && $expr_depth <= 0 } {
         return
     }
 
@@ -1839,7 +2403,11 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
         if { ![is_const_literal_name $high_sig] } {
             log_step "load_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
-            collect_loads_by_name_rec $high_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
+            if { $net_depth > 0 } {
+                collect_loads_by_name_rec $high_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
+            } else {
+                collect_loads_by_name_rec $high_sig all_loads module_loads 0 [expr {$expr_depth - 1}] visited $next_srcfile_hint
+            }
         }
     }
 }
@@ -1914,16 +2482,16 @@ proc signal_seen_or_mark { visited_var signame } {
     return 0
 }
 
-proc collect_drivers_by_name { signame all_drivers_var module_drivers_var {srcfile_hint ""} } {
+proc collect_drivers_by_name { signame all_drivers_var module_drivers_var {srcfile_hint ""} {scope_hint ""} } {
     global assign_trace_max_depth assign_expr_trace_max_depth
     upvar 1 $all_drivers_var all_drivers
     upvar 1 $module_drivers_var module_drivers
 
     set visited {}
-    collect_drivers_by_name_rec $signame all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth visited $srcfile_hint
+    collect_drivers_by_name_rec $signame all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth visited $srcfile_hint $scope_hint
 }
 
-proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module_drivers_var net_depth expr_depth visited_var } {
+proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module_drivers_var net_depth expr_depth visited_var {scope_hint ""} } {
     upvar 1 $all_drivers_var all_drivers
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
@@ -1932,26 +2500,28 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         return
     }
 
-    foreach port_sig [source_module_port_driver_sources $srcfile_hint $signame] {
+    foreach port_sig [source_module_port_driver_sources $srcfile_hint $signame $scope_hint] {
         append_unique_signal all_drivers $port_sig
         append_unique_signal module_drivers $port_sig
         collect_driver_module_port_high_conns "" $port_sig all_drivers module_drivers $net_depth $expr_depth visited $srcfile_hint
         if { $net_depth > 0 && ![is_const_literal_name $port_sig] } {
             log_step "driver_module_port_continue from=$signame via=$port_sig remaining_net_depth=$net_depth"
-            collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint
+            set next_scope_hint [signal_scope_hint_after $port_sig $scope_hint]
+            collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint
         }
     }
 
     set direct_sources {}
     if { $net_depth > 0 } {
-        foreach source_sig [source_assign_direct_driver_sources "" $signame $srcfile_hint] {
+        foreach source_sig [source_assign_direct_driver_sources "" $signame $srcfile_hint $scope_hint] {
             append_unique_signal direct_sources $source_sig
             append_unique_signal all_drivers $source_sig
             if { [is_module_boundary_signal $source_sig] } {
                 append_unique_signal module_drivers $source_sig
             }
             if { ![is_const_literal_name $source_sig] } {
-                collect_drivers_by_name_rec $source_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint
+                set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
+                collect_drivers_by_name_rec $source_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint
             }
         }
     }
@@ -1960,7 +2530,7 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         return
     }
 
-    foreach source_sig [source_assign_driver_sources "" $signame $srcfile_hint] {
+    foreach source_sig [source_assign_driver_sources "" $signame $srcfile_hint $scope_hint] {
         if { [lsearch -exact $direct_sources $source_sig] >= 0 } {
             continue
         }
@@ -1969,12 +2539,13 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
             append_unique_signal module_drivers $source_sig
         }
         if { ![is_const_literal_name $source_sig] } {
-            collect_drivers_by_name_rec $source_sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] visited $srcfile_hint
+            set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
+            collect_drivers_by_name_rec $source_sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] visited $srcfile_hint $next_scope_hint
         }
     }
 }
 
-proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var net_depth expr_depth visited_var {srcfile_hint ""} } {
+proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var net_depth expr_depth visited_var {srcfile_hint ""} {scope_hint ""} } {
     upvar 1 $all_drivers_var all_drivers
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
@@ -1986,6 +2557,8 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     if { [signal_seen_or_mark visited $signame] } {
         return
     }
+
+    collect_driver_module_port_high_conns "" $signame all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
 
     set driverList {}
     if { [catch { ::npi_L1::npi_nl_trace_driver $signame driverList 0 1 } err] } {
@@ -2003,11 +2576,13 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
         if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
             log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
-            collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
+            set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
+            collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
         } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
-            collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
+            set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
+            collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
         }
     }
 
@@ -2025,11 +2600,13 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
             if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
                 log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
-                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint
+                set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
+                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
             } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
                 log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
-                collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint
+                set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
+                collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
             }
         }
     }
@@ -2041,11 +2618,12 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
             if { [is_module_boundary_signal $sig] && ![is_const_literal_name $sig] } {
                 collect_driver_module_port_high_conns "" $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
                 log_step "driver_conn_module_port_continue from=$signame via=$sig remaining_net_depth=$net_depth"
-                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint
+                set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
+                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint $next_scope_hint
             }
         }
     }
-    collect_source_driver_sources $signame $srcfile_hint all_drivers module_drivers $net_depth $expr_depth $visited_var
+    collect_source_driver_sources $signame $srcfile_hint all_drivers module_drivers $net_depth $expr_depth $visited_var $scope_hint
 }
 
 proc collect_loads_by_name { signame all_loads_var module_loads_var {srcfile_hint ""} } {
@@ -2068,10 +2646,27 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
 
     set direct_fanouts {}
     if { $net_depth > 0 } {
+        foreach port_sig [source_module_port_load_fanouts $srcfile_hint $signame] {
+            append_unique_signal direct_fanouts $port_sig
+            append_unique_signal all_loads $port_sig
+            append_unique_signal module_loads $port_sig
+            set next_ctx [source_context_for_signal $port_sig $srcfile_hint]
+            set next_srcfile_hint [lindex $next_ctx 0]
+            if { $next_srcfile_hint eq "" } {
+                set next_srcfile_hint $srcfile_hint
+            }
+            collect_load_module_port_high_conns "" $port_sig all_loads module_loads $net_depth $expr_depth visited $next_srcfile_hint
+            collect_loads_by_name_rec $port_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
+        }
         foreach fanout_sig [source_assign_direct_load_fanouts $hdl $signame $srcfile_hint] {
             append_unique_signal direct_fanouts $fanout_sig
             append_unique_signal all_loads $fanout_sig
-            collect_loads_by_name_rec $fanout_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint
+            set next_ctx [source_context_for_signal $fanout_sig $srcfile_hint]
+            set next_srcfile_hint [lindex $next_ctx 0]
+            if { $next_srcfile_hint eq "" } {
+                set next_srcfile_hint $srcfile_hint
+            }
+            collect_loads_by_name_rec $fanout_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint
         }
     }
 
@@ -2084,7 +2679,12 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
             continue
         }
         append_unique_signal all_loads $fanout_sig
-        collect_loads_by_name_rec $fanout_sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited $srcfile_hint
+        set next_ctx [source_context_for_signal $fanout_sig $srcfile_hint]
+        set next_srcfile_hint [lindex $next_ctx 0]
+        if { $next_srcfile_hint eq "" } {
+            set next_srcfile_hint $srcfile_hint
+        }
+        collect_loads_by_name_rec $fanout_sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited $next_srcfile_hint
     }
 }
 
@@ -2100,6 +2700,13 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
     if { [signal_seen_or_mark visited $signame] } {
         return
     }
+
+    # A load trace can reach a plain parent-scope net through module-port
+    # continuation. In large designs, NPI may stop at that net and not return
+    # continuous-assign fanout handles, so run source fallback for every
+    # recursive load entry, not only for the original -ports signal.
+    collect_load_module_port_high_conns "" $signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint
+    collect_source_load_fanouts "" $signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint
 
     set loadList {}
     if { [catch { ::npi_L1::npi_nl_trace_load $signame loadList 1 1 } err] } {
@@ -2391,6 +2998,17 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 continue
             }
 
+            set driver_scope_hint [signal_scope_prefix $signame]
+            if { $driver_scope_hint eq "" } {
+                if { $dir eq "output" } {
+                    set driver_scope_hint $inst_path
+                } elseif { $parent_path ne "" } {
+                    set driver_scope_hint $parent_path
+                } else {
+                    set driver_scope_hint $inst_path
+                }
+            }
+
             set const_driver_for_connection 0
 
             if { $module_outfh ne "" && [is_const_literal_name $signame] } {
@@ -2419,22 +3037,23 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set driver_count_before [llength $all_drivers]
             set module_driver_count_before [llength $module_drivers]
             set driver_srcfile_hint [get_handle_source_file $sig_hdl]
-            collect_drivers_by_name $signame all_drivers module_drivers $driver_srcfile_hint
+            collect_drivers_by_name $signame all_drivers module_drivers $driver_srcfile_hint $driver_scope_hint
             if { [llength $all_drivers] == $driver_count_before } {
                 set direct_sources {}
                 if { $assign_trace_max_depth > 0 } {
-                    foreach source_sig [source_assign_direct_driver_sources $sig_hdl $signame $driver_srcfile_hint] {
+                    foreach source_sig [source_assign_direct_driver_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
                         append_unique_signal direct_sources $source_sig
                         append_unique_signal all_drivers $source_sig
                         if { $module_outfh ne "" && [is_module_boundary_signal $source_sig] } {
                             append_unique_signal module_drivers $source_sig
                         }
                         if { ![is_const_literal_name $source_sig] } {
-                            collect_drivers_by_name $source_sig all_drivers module_drivers $driver_srcfile_hint
+                            set next_scope_hint [signal_scope_hint_after $source_sig $driver_scope_hint]
+                            collect_drivers_by_name $source_sig all_drivers module_drivers $driver_srcfile_hint $next_scope_hint
                         }
                     }
                 }
-                foreach source_sig [source_assign_driver_sources $sig_hdl $signame $driver_srcfile_hint] {
+                foreach source_sig [source_assign_driver_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
                     if { [lsearch -exact $direct_sources $source_sig] >= 0 } {
                         continue
                     }
@@ -2443,7 +3062,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         append_unique_signal module_drivers $source_sig
                     }
                     if { ![is_const_literal_name $source_sig] } {
-                        collect_drivers_by_name $source_sig all_drivers module_drivers $driver_srcfile_hint
+                        set next_scope_hint [signal_scope_hint_after $source_sig $driver_scope_hint]
+                        collect_drivers_by_name $source_sig all_drivers module_drivers $driver_srcfile_hint $next_scope_hint
                     }
                 }
             }
@@ -2463,11 +3083,13 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         if { [should_expand_assign_endpoint $hdl $sig] } {
                             log_step "driver_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
-                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
+                            set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint $next_scope_hint
                         } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
                             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
-                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
+                            set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint $next_scope_hint
                         }
                     }
                 }
@@ -2489,11 +3111,13 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         if { [should_expand_assign_endpoint $hdl $sig] } {
                             log_step "driver_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
-                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
+                            set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint $next_scope_hint
                         } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
                             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
-                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint
+                            set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
+                            collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint $next_scope_hint
                         }
                     }
                 }
@@ -2511,8 +3135,6 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             set load_srcfile_hint [get_handle_source_file $sig_hdl]
             collect_loads_by_name $signame all_loads module_loads $load_srcfile_hint
-            set source_load_visited {}
-            collect_source_load_fanouts $sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth source_load_visited $load_srcfile_hint
 
             # If string-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.

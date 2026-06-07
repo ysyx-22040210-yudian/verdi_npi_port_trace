@@ -41,15 +41,23 @@ from pathlib import Path
 
 rows = list(csv.DictReader(Path("keyword_assign_driver_filtered.csv").open()))
 hits = [
-    row["signal_full_name"]
+    (row["inst_full_name"], row["signal_full_name"])
     for row in rows
     if row["port_name"] == "a" and row["role"] == "driver"
 ]
-if not any("u_key.out" in signal for signal in hits):
+if not any("u_child_direct" in inst and "u_key.out" in signal for inst, signal in hits):
     raise SystemExit(f"missing KeyMod driver hit through assign b=c: {rows}")
+if not any("u_child_nested" in inst and "u_parent.u_key_nested.out" in signal for inst, signal in hits):
+    raise SystemExit(f"missing nested KeyMod driver hit through parent out -> assign b=c: {rows}")
 
 full_text = Path("AssignDriverChild_full.csv").read_text()
-for token in ["KeywordAssignDriverTop.c", "KeywordAssignDriverTop.u_key.out"]:
+for token in [
+    "KeywordAssignDriverTop.c",
+    "KeywordAssignDriverTop.u_key.out",
+    "KeywordAssignDriverTop.c_nested",
+    "KeywordAssignDriverTop.u_parent.out",
+    "KeywordAssignDriverTop.u_parent.u_key_nested.out",
+]:
     if token not in full_text:
         raise SystemExit(f"full trace missing expected token: {token}")
 

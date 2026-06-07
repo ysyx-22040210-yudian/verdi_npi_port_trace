@@ -253,6 +253,7 @@ A[7]
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 module port 回溯常数 tie 的最大深度。用于 `Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0` 这类场景。`0` 表示关闭递归回溯。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 当 NPI trace 停在普通透传 net 时继续沿同方向追踪的最大深度，例如 driver 方向 `assign B = A`，loader 方向 `assign B0 = A[10:0]`、`assign B1 = A[20:11]`。这类单信号/切片连接不视为组合逻辑，`0` 表示关闭。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 当 driver / loader 方向遇到允许展开的连续赋值表达式 endpoint 时继续展开的次数，例如 driver 方向 `assign A = {b0, b1}`，loader 方向 `assign B = {C, A, D}`。用于限制拼接表达式递归扩散，`0` 表示关闭。 |
+| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开后，NPI/source fallback 会打印更详细的递归、module port high-side、源码上下文、assign fanout 匹配和 skip 原因。用于定位 `a -> b -> c -> assign B/C -> keywords/RegCombo` 这类 trace 断点；大项目常规运行建议关闭。 |
 | `stream` | `stream` | `--stream` | `true` | 启用流式聚合反标。Python 端边读 CSV 边聚合，配合匹配缓存降低大项目运行内存压力。大项目建议打开。 |
 | `no params` | `no_params` | `--no-params` | `false` | 跳过 module parameter 采集。打开后 parameter 列通常显示 `PARAM_SKIPPED`，端口反标仍继续。若大项目 parameter 采集阶段不稳定，可先打开此项。 |
 | `strict params` | `strict_params` | `--strict-params` | `false` | parameter 采集失败时是否直接中断整个 XLSX 反标。默认关闭，失败时记录 `PARAM_TRACE_FAILED` 并继续端口反标。 |
@@ -280,6 +281,7 @@ A[7]
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 的继续追踪深度，例如 `assign B=A`、`assign B0=A[10:0]`。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | driver/load 方向拼接表达式 endpoint 的继续展开次数，例如 `assign A={b0,b1}`、`assign B={C,A,D}`。 |
+| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 NPI/source fallback 详细诊断日志。常规运行关闭，定位 trace 断点时打开。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 | `keyword continue on error` | `keyword_continue_on_error` | `--keyword-continue-on-error` | `false` | 单个 keyword 实例搜索失败时是否继续。 |
 | `keyword log instances` | `keyword_log_instances` | `--keyword-log-instances` | `false` | 是否打印所有 keyword 实例路径。大项目建议关闭。 |
@@ -322,6 +324,7 @@ CSV 模式常见输出：
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 继续追踪深度。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 拼接表达式 assign endpoint 继续展开次数。 |
+| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 Raw Trace 的详细诊断日志，用于定位 module port 跨层、源码上下文和 assign fanout 是否成功。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 
 ## GUI 全局按钮和窗口
@@ -383,6 +386,7 @@ CSV 模式常见输出：
 | `const_trace_depth` | `const trace depth` | string/integer | `16` | 多层父 port 常数回溯深度。 |
 | `assign_trace_depth` | `assign trace depth` | string/integer | `2` | 普通透传/单信号切片 assign 继续追踪深度。 |
 | `assign_expr_trace_depth` | `assign expr depth` | string/integer | `1` | 拼接表达式 assign endpoint 继续展开次数。 |
+| `trace_debug` | `trace debug` | boolean | `false` | 是否打开 trace 详细诊断日志。打开后日志会包含 `DEBUG collect_load_rec_enter`、`DEBUG source_module_port_load_probe`、`DEBUG source_assign_load_probe`、`DEBUG source_assign_load_empty` 等信息。 |
 | `csv_output` | `output csv` | string | 空 | CSV Filter 输出路径。仅 CSV 模式使用。 |
 | `raw_full_output` | `full trace csv` | string | 空 | Raw Trace 完整 CSV 输出路径。仅 Raw 模式使用。 |
 | `raw_module_output` | `module boundary csv` | string | 空 | Raw Trace module 边界 CSV 输出路径。仅 Raw 模式使用。 |
@@ -453,7 +457,8 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-source-fallback 0 \
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
-  -assign-expr-trace-depth 1
+  -assign-expr-trace-depth 1 \
+  -trace-debug 0
 ```
 
 ### CSV 过滤
@@ -469,7 +474,8 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-source-fallback 0 \
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
-  -assign-expr-trace-depth 1
+  -assign-expr-trace-depth 1 \
+  -trace-debug 0
 ```
 
 ### Raw Trace
@@ -484,6 +490,7 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
+  -trace-debug 1 \
   > target_full.csv
 ```
 
@@ -501,8 +508,72 @@ export NPI_CONST_SOURCE_FALLBACK=0
 export NPI_CONST_TRACE_MAX_DEPTH=4
 export NPI_ASSIGN_TRACE_MAX_DEPTH=2
 export NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH=1
+export NPI_TRACE_DEBUG=1
 
 verdi -batch -nologo -play ./npi_port_trace.tcl 2>&1 | tee npi_port_trace_debug.log
+```
+
+### Loader trace 断点定位
+
+如果 output 端口 loader 路径类似 `Child.a -> parent0.b -> parent1.c -> assign B=c[10:0], C=c[20:11] -> keywords/RegCombo`，先用 Raw Trace 打开详细日志：
+
+```bash
+./npi_trace.sh \
+  -module Child \
+  -lib build/simv.daidir/kdb.elab++ \
+  -ports a \
+  -module-out debug_child_module.csv \
+  -const-source-fallback 1 \
+  -const-trace-depth 8 \
+  -assign-trace-depth 30 \
+  -assign-expr-trace-depth 10 \
+  -trace-debug 1 \
+  > debug_child_full.csv \
+  2> debug_child_trace.log
+```
+
+重点看这些日志：
+
+```bash
+grep -E "DEBUG collect_load_rec_enter|DEBUG collect_source_load_fanouts_enter|DEBUG source_module_port_load_probe|DEBUG source_module_port_load_empty|DEBUG source_assign_load_probe|DEBUG source_assign_load_match|DEBUG source_assign_load_candidate|DEBUG source_assign_load_empty|source_module_port_load|source_assign.*load_fanout|load_module_port_high_continue" debug_child_trace.log
+```
+
+判读规则：
+- 没有 `load_module_port_high_continue from=...Child.a via=...parent0.b`：output port 没有跨到父层 high-side。
+- 有 `parent0.b`，但没有 `source_module_port_load ... fanouts=...parent1.c`：父层到同级 `parent1.c` 的 module port load fallback 没找到。
+- 有 `parent1.c`，但没有 `source_assign_direct_load_fanout signal=...c fanouts=...B,...C`：`c -> B/C` 的 assign fanout 没展开。看 `DEBUG source_assign_load_probe` 的 `srcfile/module/assign_count`，以及 `DEBUG source_assign_load_empty` 的 `match_count/candidate_count/rejected_count`。
+- full CSV 有 `B/C/u_key/RegCombo`，但反标 no：trace 阶段已经成功，问题在 keywords 实例过滤或 Excel 汇总阶段。
+
+### `trace-debug` 日志速查
+
+打开 `-trace-debug 1` 后，工具会把 `a -> b -> c` 这类跨层追踪过程拆成多个日志点。定位问题时建议先确认日志是否按顺序出现：
+
+| 日志关键字 | 说明 | 如果缺失通常说明 |
+| --- | --- | --- |
+| `DEBUG collect_load_rec_enter signal=...` | loader 递归进入某个信号。 | 没有继续递归到该信号，可能已经被 visited、深度耗尽，或 NPI 没返回这个端点。 |
+| `DEBUG collect_source_load_fanouts_enter signal=...` | 开始对 loader 方向做源码 fallback fanout 搜索。 | `-assign-trace-depth` / `-assign-expr-trace-depth` 为 0，或信号上下文无法解析。 |
+| `DEBUG source_context signal=... resolved_src=... module=...` | 从 KDB 端点解析到源码文件和当前 module 上下文。 | KDB 没记录可访问源码路径，或源码路径在当前机器不存在。 |
+| `DEBUG module_port_high_probe role=load/driver ... high_count=...` | 尝试从 module port/pin 穿到父层 high-side connection。 | 当前端点不是可穿透的 module port/pin，或 NPI 没返回 port handle。 |
+| `load_module_port_high_continue from=... via=...` | loader 方向已经从子层端口跨到父层连接信号。 | output 端口没有成功跨层，后续同级 input / assign fanout 不会被看到。 |
+| `driver_module_port_high_continue from=... via=...` | driver 方向已经从子层端口跨到父层连接信号。 | input 端口没有成功跨层，后续父层 tie / assign / keyword source 不会被看到。 |
+| `source_module_port_load signal=... fanouts=...` | 源码 fallback 找到同一层或父层中由该信号连接到的 input/inout port。 | 可能没有同级 module port 连接，也可能源码上下文不对。 |
+| `source_module_port_driver signal=... drivers=...` | 源码 fallback 找到同一层或父层中驱动该信号的 output/inout port。 | 可能没有同级 module port 驱动，也可能源码上下文不对。 |
+| `source_assign_direct_driver_source signal=... drivers=...` | driver 方向命中普通透传 assign，例如 `assign b = c`。 | `assign B=A` 这类普通透传没有被源码 fallback 展开。 |
+| `source_assign_driver_source signal=... drivers=...` | driver 方向命中可展开表达式，例如 `assign A={b0,b1}`。 | 拼接表达式没有展开，检查 `-assign-expr-trace-depth`。 |
+| `source_assign_direct_load_fanout signal=... fanouts=...` | loader 方向命中普通 fanout / slice，例如 `assign B=A[10:0]`。 | `A -> B/C` fanout 没展开，重点看 `DEBUG source_assign_load_empty`。 |
+| `source_assign_load_fanout signal=... fanouts=...` | loader 方向命中可展开表达式，例如 `assign B={C,A,D}`。 | 拼接 fanout 没展开，检查 `-assign-expr-trace-depth`。 |
+| `DEBUG source_assign_load_empty ... match_count=... candidate_count=... rejected_count=...` | 源码里找不到可继续追踪的 loader assign，或候选被拒绝。 | `match_count=0` 多半是源码上下文/信号名不匹配；`rejected_count>0` 看前面的 `source_assign_load_skip` 原因。 |
+
+driver 方向排查 `KeyMod u_key(.out(c)); assign b = c; u_child(.a(b));` 时，重点搜索：
+
+```bash
+grep -E "driver_module_port_high_continue|source_module_port_driver|source_assign_direct_driver_source|source_assign_driver_source|driver_assign_continue|DEBUG source_context" debug_child_trace.log
+```
+
+loader 方向排查 `output A -> sibling input c -> assign B/C -> keywords` 时，重点搜索：
+
+```bash
+grep -E "load_module_port_high_continue|source_module_port_load|source_assign_direct_load_fanout|source_assign_load_fanout|load_assign_continue|DEBUG source_assign_load" debug_child_trace.log
 ```
 
 查找 keywords 实例：

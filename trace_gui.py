@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "const_trace_depth": "16",
     "assign_trace_depth": "2",
     "assign_expr_trace_depth": "1",
+    "trace_debug": False,
     "csv_output": "",
     "raw_full_output": "",
     "raw_module_output": "",
@@ -1083,6 +1084,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-const-trace-depth", const_depth)
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
+        add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "--match-cache-size", cfg.get("match_cache_size", "200000"))
         add_value(cmd, "--keyword-batch-size", cfg.get("keyword_batch_size", "8"))
         add_bool(cmd, "--keyword-continue-on-error", as_bool(cfg.get("keyword_continue_on_error", False)))
@@ -1105,6 +1107,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-const-trace-depth", const_depth)
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
+        add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         return cmd, None
 
     if mode == "raw":
@@ -1120,6 +1123,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-const-trace-depth", const_depth)
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
+        add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         return cmd, str(cfg.get("raw_full_output", "")).strip()
 
     raise ValueError(f"unknown mode: {mode}")
@@ -1670,6 +1674,7 @@ class TraceGui:
             [
                 ("RegCombo as keyword", "regcombo_as_keyword"),
                 ("const source fallback", "const_source_fallback"),
+                ("trace debug", "trace_debug"),
                 ("keyword continue on error", "keyword_continue_on_error"),
                 ("keyword log instances", "keyword_log_instances"),
             ],
@@ -1686,6 +1691,7 @@ class TraceGui:
             5,
             [
                 ("const source fallback", "const_source_fallback"),
+                ("trace debug", "trace_debug"),
                 ("keyword continue on error", "keyword_continue_on_error"),
                 ("keyword log instances", "keyword_log_instances"),
             ],
@@ -1698,7 +1704,7 @@ class TraceGui:
         self._entry_row(parent, 3, "const trace depth", "const_trace_depth")
         self._entry_row(parent, 4, "assign trace depth", "assign_trace_depth")
         self._entry_row(parent, 5, "assign expr depth", "assign_expr_trace_depth")
-        self._check_row(parent, 6, [("const source fallback", "const_source_fallback")])
+        self._check_row(parent, 6, [("const source fallback", "const_source_fallback"), ("trace debug", "trace_debug")])
 
     def _path_row(self, parent, row: int, label: str, key: str, kind: str) -> None:
         ttk = self.ttk

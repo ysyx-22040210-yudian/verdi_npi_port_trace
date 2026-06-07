@@ -18,6 +18,15 @@ proc log_step {msg} {
     flush stderr
 }
 
+set trace_debug_enabled 0
+
+proc debug_step {msg} {
+    global trace_debug_enabled
+    if { $trace_debug_enabled } {
+        log_step "DEBUG $msg"
+    }
+}
+
 proc split_port_filter_spec { spec } {
     set spec [string trim $spec]
     if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)(\[[0-9]+(:[0-9]+)?\])$} $spec -> base select _] } {
@@ -167,6 +176,17 @@ if { [info exists env(NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH)] && $env(NPI_ASSIGN_EXPR_
     }
 }
 log_step "assign_expr_trace_max_depth=$assign_expr_trace_max_depth"
+
+if { [info exists env(NPI_TRACE_DEBUG)] && $env(NPI_TRACE_DEBUG) ne "" } {
+    set trace_debug_raw [string tolower $env(NPI_TRACE_DEBUG)]
+    if { $trace_debug_raw eq "1" ||
+         $trace_debug_raw eq "true" ||
+         $trace_debug_raw eq "yes" ||
+         $trace_debug_raw eq "on" } {
+        set trace_debug_enabled 1
+    }
+}
+log_step "trace_debug=$trace_debug_enabled"
 
 # Output file (written by shell via NPI_OUTFILE env var)
 if { [info exists env(NPI_OUTFILE)] && $env(NPI_OUTFILE) ne "" } {
@@ -540,6 +560,35 @@ proc signal_bit_index { signame } {
     return ""
 }
 
+proc signal_selected_bits { signame } {
+    set signame [normalize_signal_name $signame]
+    if { [regexp {\[([0-9]+)\]$} $signame -> bit] } {
+        return [list $bit]
+    }
+    if { [regexp {\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] } {
+        set bits {}
+        if { $hi >= $lo } {
+            for {set bit $lo} {$bit <= $hi} {incr bit} {
+                lappend bits $bit
+            }
+        } else {
+            for {set bit $hi} {$bit <= $lo} {incr bit} {
+                lappend bits $bit
+            }
+        }
+        return $bits
+    }
+    return {}
+}
+
+proc signal_select_suffix { signame } {
+    set signame [normalize_signal_name $signame]
+    if { [regexp {(\[[0-9]+(:[0-9]+)?\])$} $signame -> select] } {
+        return $select
+    }
+    return ""
+}
+
 proc signal_scope_prefix { signame } {
     set signame [normalize_signal_name $signame]
     regsub {\[[^\]]+\]$} $signame "" signame
@@ -654,6 +703,11 @@ proc source_signal_candidate_exists { candidate {mode "strict"} {srcfile ""} } {
         return 1
     }
 
+    if { $mode eq "driver" &&
+         [llength [source_module_port_driver_sources $srcfile $candidate]] > 0 } {
+        return 1
+    }
+
     log_step "source_assign_skip_nonexistent signal=$candidate"
     return 0
 }
@@ -680,6 +734,46 @@ proc assign_lhs_select { lhs } {
         return $select
     }
     return ""
+}
+
+proc lhs_is_concat_expr { lhs } {
+    set lhs [string trim $lhs]
+    regsub -all {\s+} $lhs "" lhs_no_space
+    return [expr {[string index $lhs_no_space 0] eq "\{" && [string index $lhs_no_space end] eq "\}"}]
+}
+
+proc lhs_concat_rhs_offsets_for_signal_bit { lhs leaf bit {width_map {}} } {
+    set lhs [string trim $lhs]
+    regsub -all {\s+} $lhs "" lhs_no_space
+    if { ![lhs_is_concat_expr $lhs_no_space] } {
+        return {}
+    }
+
+    set offsets {}
+    set lsb 0
+    foreach item [lreverse [split_concat_items $lhs_no_space]] {
+        set width [expr_item_width $item $width_map]
+        if { $width eq "" } {
+            return {}
+        }
+
+        set item_leaf [assign_lhs_leaf_name $item]
+        if { $item_leaf eq $leaf } {
+            set item_select [assign_lhs_select $item]
+            if { $bit eq "" } {
+                for {set item_offset 0} {$item_offset < $width} {incr item_offset} {
+                    lappend offsets [expr {$lsb + $item_offset}]
+                }
+            } else {
+                set item_offset [lhs_select_rhs_bit_for_target $item_select $bit]
+                if { $item_offset ne "" && $item_offset >= 0 && $item_offset < $width } {
+                    lappend offsets [expr {$lsb + $item_offset}]
+                }
+            }
+        }
+        incr lsb $width
+    }
+    return $offsets
 }
 
 proc lhs_select_contains_bit { select bit } {
@@ -997,6 +1091,55 @@ proc source_file_for_scope_instance { scope {fallback ""} } {
     return $fallback
 }
 
+proc source_file_for_scope_module { scope module {fallback ""} } {
+    global source_scope_module_file_cache
+
+    set scope [strip_signal_selects [normalize_signal_name $scope]]
+    if { $scope eq "" || $module eq "" } {
+        return $fallback
+    }
+
+    set key "${scope}::${module}"
+    if { [info exists source_scope_module_file_cache($key)] } {
+        set cached $source_scope_module_file_cache($key)
+        if { $cached ne "" } {
+            return $cached
+        }
+        return $fallback
+    }
+
+    set apis {
+        ::npi_L1::npi_mod_inst_get_port
+        ::npi_L1::npi_mod_inst_get_io
+        ::npi_L1::npi_mod_inst_get_net
+        ::npi_L1::npi_mod_inst_get_var
+        ::npi_L1::npi_mod_inst_get_instance
+        ::npi_L1::npi_mod_inst_get_cont_assign
+        ::npi_L1::npi_mod_inst_get_process_always
+        ::npi_L1::npi_mod_inst_get_process_init
+    }
+
+    foreach api $apis {
+        if { [info commands $api] eq "" } {
+            continue
+        }
+        set hdlList {}
+        if { [catch { $api $scope hdlList }] } {
+            continue
+        }
+        foreach hdl $hdlList {
+            set srcfile [get_handle_source_file $hdl]
+            if { $srcfile ne "" && [source_module_text $srcfile $module] ne "" } {
+                set source_scope_module_file_cache($key) $srcfile
+                return $srcfile
+            }
+        }
+    }
+
+    set source_scope_module_file_cache($key) ""
+    return $fallback
+}
+
 proc source_context_for_signal { signame {srcfile_hint ""} {scope_hint ""} } {
     global source_scope_module_context_cache
 
@@ -1045,6 +1188,12 @@ proc source_context_for_signal { signame {srcfile_hint ""} {scope_hint ""} } {
     }
 
     if { $module ne "" } {
+        if { $srcfile ne "" && [source_module_text $srcfile $module] eq "" } {
+            set scope_module_srcfile [source_file_for_scope_module $prefix $module ""]
+            if { $scope_module_srcfile ne "" } {
+                set srcfile $scope_module_srcfile
+            }
+        }
         if { $srcfile ne "" && [source_module_text $srcfile $module] eq "" &&
              $srcfile_hint ne "" && [source_module_text $srcfile_hint $module] ne "" } {
             set srcfile $srcfile_hint
@@ -1056,6 +1205,7 @@ proc source_context_for_signal { signame {srcfile_hint ""} {scope_hint ""} } {
     if { $srcfile ne "" && $module ne "" } {
         set source_scope_module_context_cache($prefix) $result
     }
+    debug_step "source_context signal=$signame scope_hint=$scope_hint prefix=$prefix src_hint=$srcfile_hint resolved_src=$srcfile module=$module"
     return $result
 }
 
@@ -1074,10 +1224,20 @@ proc parse_assign_stmt_text { text } {
             set stmt "assign $assign_tail"
         }
         if { [regexp {^assign\s+(.+?)\s*=\s*(.+)$} $stmt -> lhs rhs] } {
-            set lhs_leaf [assign_lhs_leaf_name $lhs]
-            if { $lhs_leaf ne "" } {
-                set lhs_select [assign_lhs_select $lhs]
-                lappend assigns [list $lhs_leaf $lhs_select $rhs]
+            if { [lhs_is_concat_expr $lhs] } {
+                foreach lhs_item [split_concat_items $lhs] {
+                    set lhs_leaf [assign_lhs_leaf_name $lhs_item]
+                    if { $lhs_leaf ne "" } {
+                        set lhs_select [assign_lhs_select $lhs_item]
+                        lappend assigns [list $lhs_leaf $lhs_select $rhs $lhs]
+                    }
+                }
+            } else {
+                set lhs_leaf [assign_lhs_leaf_name $lhs]
+                if { $lhs_leaf ne "" } {
+                    set lhs_select [assign_lhs_select $lhs]
+                    lappend assigns [list $lhs_leaf $lhs_select $rhs]
+                }
             }
         }
     }
@@ -1212,6 +1372,18 @@ proc conn_references_signal_bit { conn leaf bit } {
     return [lhs_select_contains_bit $select $bit]
 }
 
+proc conn_port_select_for_signal_bit { conn bit } {
+    if { $bit eq "" } {
+        return ""
+    }
+    set select [assign_lhs_select $conn]
+    set port_bit [lhs_select_rhs_bit_for_target $select $bit]
+    if { $port_bit eq "" } {
+        return ""
+    }
+    return "\[$port_bit\]"
+}
+
 proc parse_instantiation_stmt_text { text } {
     set insts {}
     foreach stmt [split $text ";"] {
@@ -1226,6 +1398,12 @@ proc parse_instantiation_stmt_text { text } {
         }
         if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)\s*(#\s*\(.*\)\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*\((.*)\)$} $stmt -> modname _ instname conn_text] } {
             lappend insts [list $modname $instname $conn_text]
+            continue
+        }
+        if { [regexp {([A-Za-z_][A-Za-z0-9_$]*)\s*(#\s*\(.*\)\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*\((\s*\.[A-Za-z_][A-Za-z0-9_$]*\s*\(.*)\)$} $stmt -> modname _ instname conn_text] } {
+            if { [lsearch -exact {for if case while begin end generate endgenerate} $modname] < 0 } {
+                lappend insts [list $modname $instname $conn_text]
+            }
         }
     }
     return $insts
@@ -1316,7 +1494,7 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
     if { $leaf eq "" } {
         return {}
     }
-    set bit [signal_bit_index $signame]
+    set selected_bits [signal_selected_bits $signame]
     set prefix [signal_effective_scope_prefix $signame $scope_hint]
     set ctx [source_context_for_signal $signame $srcfile $scope_hint]
     set ctx_srcfile [lindex $ctx 0]
@@ -1335,20 +1513,30 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
         set conn_text [lindex $inst 2]
 
         foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
-            if { ![conn_references_signal_bit $conn $leaf $bit] } {
-                continue
+            set target_bits $selected_bits
+            if { [llength $target_bits] == 0 } {
+                set target_bits [list ""]
             }
-            if { $prefix ne "" } {
-                set candidate "${prefix}.${instname}.${port}"
-            } else {
-                set candidate "${instname}.${port}"
-            }
-            set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
-            if { $dir ne "output" && $dir ne "inout" } {
-                continue
-            }
-            if { [source_module_port_candidate_exists $candidate] } {
-                append_unique_signal sources $candidate
+            foreach bit $target_bits {
+                if { ![conn_references_signal_bit $conn $leaf $bit] } {
+                    continue
+                }
+                set port_select [conn_port_select_for_signal_bit $conn $bit]
+                if { $bit ne "" && $port_select eq "" } {
+                    continue
+                }
+                if { $prefix ne "" } {
+                    set candidate "${prefix}.${instname}.${port}${port_select}"
+                } else {
+                    set candidate "${instname}.${port}${port_select}"
+                }
+                set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
+                if { $dir ne "output" && $dir ne "inout" } {
+                    continue
+                }
+                if { [source_module_port_candidate_exists $candidate] } {
+                    append_unique_signal sources $candidate
+                }
             }
         }
     }
@@ -1394,7 +1582,7 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
     if { $leaf eq "" } {
         return {}
     }
-    set bit [signal_bit_index $signame]
+    set selected_bits [signal_selected_bits $signame]
     set prefix [signal_effective_scope_prefix $signame $scope_hint]
     set ctx [source_context_for_signal $signame $srcfile $scope_hint]
     set ctx_srcfile [lindex $ctx 0]
@@ -1407,32 +1595,50 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
     }
 
     set fanouts {}
-    foreach inst [build_instantiation_stmt_list_for_module $srcfile $module] {
+    set inst_list [build_instantiation_stmt_list_for_module $srcfile $module]
+    debug_step "source_module_port_load_probe signal=$signame leaf=$leaf selected_bits=[join $selected_bits ,] prefix=$prefix srcfile=$srcfile module=$module inst_count=[llength $inst_list]"
+    foreach inst $inst_list {
         set modname [lindex $inst 0]
         set instname [lindex $inst 1]
         set conn_text [lindex $inst 2]
 
         foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
-            if { ![conn_references_signal_bit $conn $leaf $bit] } {
-                continue
+            set target_bits $selected_bits
+            if { [llength $target_bits] == 0 } {
+                set target_bits [list ""]
             }
-            if { $prefix ne "" } {
-                set candidate "${prefix}.${instname}.${port}"
-            } else {
-                set candidate "${instname}.${port}"
-            }
-            set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
-            if { $dir ne "input" && $dir ne "inout" } {
-                continue
-            }
-            if { [source_module_port_candidate_exists $candidate] } {
-                append_unique_signal fanouts $candidate
+            foreach bit $target_bits {
+                if { ![conn_references_signal_bit $conn $leaf $bit] } {
+                    continue
+                }
+                set port_select [conn_port_select_for_signal_bit $conn $bit]
+                if { $bit ne "" && $port_select eq "" } {
+                    debug_step "source_module_port_load_skip signal=$signame inst=$instname port=$port conn=$conn bit=$bit reason=port_select_empty"
+                    continue
+                }
+                if { $prefix ne "" } {
+                    set candidate "${prefix}.${instname}.${port}${port_select}"
+                } else {
+                    set candidate "${instname}.${port}${port_select}"
+                }
+                set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
+                if { $dir ne "input" && $dir ne "inout" } {
+                    debug_step "source_module_port_load_skip signal=$signame inst=$instname mod=$modname port=$port conn=$conn candidate=$candidate dir=$dir reason=direction"
+                    continue
+                }
+                set exists [source_module_port_candidate_exists $candidate]
+                debug_step "source_module_port_load_match signal=$signame inst=$instname mod=$modname port=$port conn=$conn bit=$bit candidate=$candidate dir=$dir exists=$exists"
+                if { $exists } {
+                    append_unique_signal fanouts $candidate
+                }
             }
         }
     }
 
     if { [llength $fanouts] > 0 } {
         log_step "source_module_port_load signal=$signame source=$srcfile fanouts=[join $fanouts ,]"
+    } else {
+        debug_step "source_module_port_load_empty signal=$signame source=$srcfile module=$module"
     }
     return $fanouts
 }
@@ -1476,18 +1682,31 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
     set width_map [build_signal_width_map_for_module $srcfile $module]
 
     set fanouts {}
-    foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
+    set assign_list [build_assign_stmt_list_for_module $srcfile $module]
+    set match_count 0
+    set candidate_count 0
+    set rejected_count 0
+    debug_step "source_assign_load_probe signal=$signame leaf=$leaf bit=$bit prefix=$prefix srcfile=$srcfile module=$module include_expr=$include_expr assign_count=[llength $assign_list]"
+    foreach assign $assign_list {
         set lhs_leaf [lindex $assign 0]
         set lhs_select [lindex $assign 1]
         set rhs [lindex $assign 2]
         set is_simple [rhs_is_simple_signal_expr $rhs]
         set is_concat [rhs_is_concat_expr $rhs]
         if { !$is_simple && !($include_expr && $is_concat) } {
+            if { [string first $leaf $rhs] >= 0 } {
+                debug_step "source_assign_load_skip signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs simple=$is_simple concat=$is_concat include_expr=$include_expr reason=unsupported_rhs"
+            }
             continue
         }
         if { ![rhs_references_signal_bit $rhs $leaf $bit] } {
+            if { [string first $leaf $rhs] >= 0 } {
+                debug_step "source_assign_load_skip signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs bit=$bit reason=rhs_bit_mismatch"
+            }
             continue
         }
+        incr match_count
+        debug_step "source_assign_load_match signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs simple=$is_simple concat=$is_concat"
 
         if { $bit eq "" } {
             if { $prefix ne "" } {
@@ -1495,8 +1714,13 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
             } else {
                 set candidate $lhs_leaf
             }
-            if { [source_signal_candidate_exists $candidate strict $srcfile] } {
+            incr candidate_count
+            set exists [source_signal_candidate_exists $candidate strict $srcfile]
+            debug_step "source_assign_load_candidate signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs candidate=$candidate exists=$exists"
+            if { $exists } {
                 append_unique_signal fanouts $candidate
+            } else {
+                incr rejected_count
             }
             continue
         }
@@ -1507,8 +1731,13 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
         } else {
             set candidate $lhs_leaf
         }
-        if { [source_signal_candidate_exists $candidate strict $srcfile] } {
+        incr candidate_count
+        set exists [source_signal_candidate_exists $candidate strict $srcfile]
+        debug_step "source_assign_load_candidate signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs candidate=$candidate exists=$exists lhs_bits=[join $lhs_bits ,]"
+        if { $exists } {
             append_unique_signal fanouts $candidate
+        } else {
+            incr rejected_count
         }
         if { [llength $lhs_bits] == 0 } {
             continue
@@ -1527,12 +1756,20 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
             } else {
                 set candidate "${lhs_leaf}${select}"
             }
-            if { [source_signal_candidate_exists $candidate strict $srcfile] } {
+            incr candidate_count
+            set exists [source_signal_candidate_exists $candidate strict $srcfile]
+            debug_step "source_assign_load_candidate signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs candidate=$candidate exists=$exists lhs_bit=$lhs_bit"
+            if { $exists } {
                 append_unique_signal fanouts $candidate
+            } else {
+                incr rejected_count
             }
         }
     }
 
+    if { [llength $fanouts] == 0 } {
+        debug_step "source_assign_load_empty signal=$signame srcfile=$srcfile module=$module include_expr=$include_expr assign_count=[llength $assign_list] match_count=$match_count candidate_count=$candidate_count rejected_count=$rejected_count"
+    }
     return $fanouts
 }
 
@@ -1764,6 +2001,7 @@ proc rhs_driver_sources_for_whole { rhs prefix {width_map {}} } {
 }
 
 proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {include_expr 1} {scope_hint ""} } {
+    set selected_bits [signal_selected_bits $signame]
     set bit [signal_bit_index $signame]
     set srcfile $srcfile_hint
     if { $srcfile eq "" && $sig_hdl ne "" } {
@@ -1794,10 +2032,46 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
         set lhs_leaf [lindex $assign 0]
         set lhs_select [lindex $assign 1]
         set rhs [lindex $assign 2]
+        set lhs_expr [lindex $assign 3]
         if { $lhs_leaf ne $leaf } {
             continue
         }
-        if { $bit eq "" } {
+
+        if { $lhs_expr ne "" } {
+            set rhs_offsets {}
+            if { [llength $selected_bits] == 0 } {
+                foreach rhs_bit [lhs_concat_rhs_offsets_for_signal_bit $lhs_expr $leaf "" $width_map] {
+                    if { [lsearch -exact $rhs_offsets $rhs_bit] < 0 } {
+                        lappend rhs_offsets $rhs_bit
+                    }
+                }
+            } else {
+                foreach target_bit $selected_bits {
+                    foreach rhs_bit [lhs_concat_rhs_offsets_for_signal_bit $lhs_expr $leaf $target_bit $width_map] {
+                        if { [lsearch -exact $rhs_offsets $rhs_bit] < 0 } {
+                            lappend rhs_offsets $rhs_bit
+                        }
+                    }
+                }
+            }
+
+            foreach rhs_bit $rhs_offsets {
+                set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
+                if { $direct_source ne "" } {
+                    append_source_signal_candidate sources $direct_source driver $srcfile
+                    continue
+                }
+                if { !$include_expr } {
+                    continue
+                }
+                foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
+                    append_source_signal_candidate sources $source driver $srcfile
+                }
+            }
+            continue
+        }
+
+        if { [llength $selected_bits] == 0 } {
             set direct_sources [expr_item_source_signals $rhs $prefix]
             foreach source $direct_sources {
                 append_source_signal_candidate sources $source driver $srcfile
@@ -1809,20 +2083,22 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
                 append_source_signal_candidate sources $source driver $srcfile
             }
         } else {
-            set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $bit]
-            if { $rhs_bit eq "" } {
-                continue
-            }
-            set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
-            if { $direct_source ne "" } {
-                append_source_signal_candidate sources $direct_source driver $srcfile
-                continue
-            }
-            if { !$include_expr } {
-                continue
-            }
-            foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
-                append_source_signal_candidate sources $source driver $srcfile
+            foreach target_bit $selected_bits {
+                set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $target_bit]
+                if { $rhs_bit eq "" } {
+                    continue
+                }
+                set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
+                if { $direct_source ne "" } {
+                    append_source_signal_candidate sources $direct_source driver $srcfile
+                    continue
+                }
+                if { !$include_expr } {
+                    continue
+                }
+                foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
+                    append_source_signal_candidate sources $source driver $srcfile
+                }
             }
         }
     }
@@ -2336,19 +2612,27 @@ proc module_port_high_conn_pairs { hdl signame role {srcfile_hint ""} } {
         }
     }
     if { !$cross } {
+        debug_step "module_port_high_skip role=$role signal=$signame inst=$inst_path port=$portname dir=$dir reason=direction"
         return {}
     }
 
     if { $port_hdl eq "" } {
+        debug_step "module_port_high_skip role=$role signal=$signame inst=$inst_path port=$portname dir=$dir reason=port_handle_empty"
         return {}
     }
 
     set pairs {}
+    set signame_select [signal_select_suffix $signame]
     set high_hdls [get_high_conn_sigs_for_port_hdl $inst_path $port_hdl]
+    debug_step "module_port_high_probe role=$role signal=$signame inst=$inst_path port=$portname dir=$dir high_count=[llength $high_hdls] select=$signame_select"
     foreach high_hdl $high_hdls {
         set high_name [hdl_to_name $high_hdl]
         if { $high_name eq "" } {
+            debug_step "module_port_high_skip role=$role signal=$signame inst=$inst_path port=$portname reason=high_name_empty"
             continue
+        }
+        if { $signame_select ne "" && [signal_select_suffix $high_name] eq "" } {
+            set high_name "${high_name}${signame_select}"
         }
         lappend pairs [list $high_hdl $high_name]
     }
@@ -2390,10 +2674,15 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
     upvar 1 $visited_var visited
 
     if { $net_depth <= 0 && $expr_depth <= 0 } {
+        debug_step "load_module_port_high_skip signal=$signame reason=depth_exhausted net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
         return
     }
 
-    foreach pair [module_port_high_conn_pairs $hdl $signame load $srcfile_hint] {
+    set pairs [module_port_high_conn_pairs $hdl $signame load $srcfile_hint]
+    if { [llength $pairs] == 0 } {
+        debug_step "load_module_port_high_empty signal=$signame net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
+    }
+    foreach pair $pairs {
         set high_hdl [lindex $pair 0]
         set high_sig [lindex $pair 1]
         append_unique_signal all_loads $high_sig
@@ -2640,7 +2929,10 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    set hdl_empty [expr {$hdl eq ""}]
+    debug_step "collect_source_load_fanouts_enter signal=$signame net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint hdl_empty=$hdl_empty"
     if { $net_depth <= 0 && $expr_depth <= 0 } {
+        debug_step "collect_source_load_fanouts_skip signal=$signame reason=depth_exhausted"
         return
     }
 
@@ -2695,11 +2987,14 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
 
     set signame [normalize_signal_name $signame]
     if { $signame eq "" || [is_const_literal_name $signame] } {
+        debug_step "collect_load_rec_skip signal=$signame reason=empty_or_const"
         return
     }
     if { [signal_seen_or_mark visited $signame] } {
+        debug_step "collect_load_rec_skip signal=$signame reason=visited"
         return
     }
+    debug_step "collect_load_rec_enter signal=$signame net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
 
     # A load trace can reach a plain parent-scope net through module-port
     # continuation. In large designs, NPI may stop at that net and not return

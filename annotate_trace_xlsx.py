@@ -1051,6 +1051,8 @@ def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tupl
             str(args.assign_trace_depth),
             "-assign-expr-trace-depth",
             str(args.assign_expr_trace_depth),
+            "-trace-debug",
+            str(args.trace_debug),
         ]
     )
 
@@ -1277,6 +1279,17 @@ def parse_args():
             "NPI stops at a continuous-assign expression endpoint such as "
             "assign A = {b0, b1} or assign B = {C, A, D}. "
             "Use 0 to disable expression continuation."
+        ),
+    )
+    parser.add_argument(
+        "-trace-debug",
+        "--trace-debug",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help=(
+            "when set to 1, print detailed NPI/source-fallback trace diagnostics "
+            "for module-port continuation and assign fanout debugging"
         ),
     )
     parser.add_argument(

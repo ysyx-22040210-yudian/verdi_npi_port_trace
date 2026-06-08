@@ -8,7 +8,7 @@
 #                         [--keyword-batch-size <n>] \
 #                         [-const-source-fallback 0|1] [-const-trace-depth <N>] \
 #                         [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
-#                         [-trace-debug 0|1]
+#                         [-trace-debug 0|1] [-log-file <run.log>]
 #
 # Example:
 #   ./trace_and_filter.sh -module ysyx_22050058_id \
@@ -21,6 +21,20 @@ FIND_INST_TCL="$SCRIPT_DIR/npi_find_instances.tcl"
 
 log_step() {
     echo "[trace_and_filter] $*" >&2
+}
+
+setup_log_file() {
+    if [ -z "$LOG_FILE" ]; then
+        return
+    fi
+    case "$LOG_FILE" in
+        /*) ;;
+        *) LOG_FILE="$PWD/$LOG_FILE" ;;
+    esac
+    mkdir -p "$(dirname "$LOG_FILE")"
+    : > "$LOG_FILE"
+    exec 2> >(tee -a "$LOG_FILE" >&2)
+    log_step "log_file=$LOG_FILE"
 }
 
 MODULE=""
@@ -39,6 +53,7 @@ CONST_TRACE_DEPTH="${NPI_CONST_TRACE_MAX_DEPTH:-16}"
 ASSIGN_TRACE_DEPTH="${NPI_ASSIGN_TRACE_MAX_DEPTH:-2}"
 ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
+LOG_FILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -58,12 +73,15 @@ while [ $# -gt 0 ]; do
         -assign-trace-depth|--assign-trace-depth) ASSIGN_TRACE_DEPTH="$2"; shift 2 ;;
         -assign-expr-trace-depth|--assign-expr-trace-depth) ASSIGN_EXPR_TRACE_DEPTH="$2"; shift 2 ;;
         -trace-debug|--trace-debug) TRACE_DEBUG="$2"; shift 2 ;;
+        -log-file|--log-file) LOG_FILE="$2"; shift 2 ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
     esac
 done
 
+setup_log_file
+
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-trace-debug 0|1]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
     exit 1
 fi
 case "$CONST_SOURCE_FALLBACK" in

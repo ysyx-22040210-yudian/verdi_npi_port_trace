@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "module": "",
     "keywords": "",
     "ports": "",
+    "log_file": "",
     "template": "",
     "xlsx_output": "",
     "sheet": "",
@@ -1058,6 +1059,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     const_depth = str(cfg.get("const_trace_depth", "16")).strip()
     assign_depth = str(cfg.get("assign_trace_depth", "2")).strip()
     assign_expr_depth = str(cfg.get("assign_expr_trace_depth", "1")).strip()
+    log_file = str(cfg.get("log_file", "")).strip()
 
     require({"lib": lib}, "lib", "KDB/elab directory")
 
@@ -1085,6 +1087,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
+        add_value(cmd, "-log-file", log_file)
         add_value(cmd, "--match-cache-size", cfg.get("match_cache_size", "200000"))
         add_value(cmd, "--keyword-batch-size", cfg.get("keyword_batch_size", "8"))
         add_bool(cmd, "--keyword-continue-on-error", as_bool(cfg.get("keyword_continue_on_error", False)))
@@ -1108,6 +1111,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
+        add_value(cmd, "-log-file", log_file)
         return cmd, None
 
     if mode == "raw":
@@ -1124,6 +1128,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
+        add_value(cmd, "-log-file", log_file)
         return cmd, str(cfg.get("raw_full_output", "")).strip()
 
     raise ValueError(f"unknown mode: {mode}")
@@ -1561,6 +1566,7 @@ class TraceGui:
         self._text_row(common, 1, "module", "module", self._load_module_list)
         self._text_row(common, 2, "keywords", "keywords", self._load_keyword_list)
         self._text_row(common, 3, "ports", "ports", self._load_ports_list)
+        self._path_row(common, 4, "log file", "log_file", "save_log")
 
         mode_card = RoundedSection(self.tk, self.ttk, outer, "", padding=10)
         mode_card.pack(fill="x", pady=(10, 0))
@@ -1753,6 +1759,8 @@ class TraceGui:
             path = self.filedialog.asksaveasfilename(initialdir=str(SCRIPT_DIR), defaultextension=".csv", filetypes=[("CSV", "*.csv"), ("All files", "*")])
         elif kind == "save_xlsx":
             path = self.filedialog.asksaveasfilename(initialdir=str(SCRIPT_DIR), defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx"), ("All files", "*")])
+        elif kind == "save_log":
+            path = self.filedialog.asksaveasfilename(initialdir=str(SCRIPT_DIR), defaultextension=".log", filetypes=[("Log", "*.log"), ("Text", "*.txt"), ("All files", "*")])
         else:
             path = self.filedialog.askopenfilename(initialdir=initial, filetypes=[("All files", "*")])
         if path:

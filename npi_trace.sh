@@ -6,7 +6,7 @@
 #                  [-module-out <module_connections.csv>]
 #                  [-const-source-fallback 0|1] [-const-trace-depth <N>]
 #                  [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
-#                  [-trace-debug 0|1]
+#                  [-trace-debug 0|1] [-log-file <run.log>]
 #
 # Note: -srcfile parameter is now optional (deprecated). Port direction is obtained via NPI API.
 #   ./npi_trace.sh -module ... > result.csv
@@ -19,10 +19,19 @@ log_step() {
     echo "[npi_trace] $*" >&2
 }
 
-if [ -z "$VERDI_HOME" ]; then
-    echo "[ERROR] VERDI_HOME is not set." >&2
-    exit 1
-fi
+setup_log_file() {
+    if [ -z "$LOG_FILE" ]; then
+        return
+    fi
+    case "$LOG_FILE" in
+        /*) ;;
+        *) LOG_FILE="$PWD/$LOG_FILE" ;;
+    esac
+    mkdir -p "$(dirname "$LOG_FILE")"
+    : > "$LOG_FILE"
+    exec 2> >(tee -a "$LOG_FILE" >&2)
+    log_step "log_file=$LOG_FILE"
+}
 
 FILELIST=""
 INCDIR=""
@@ -37,6 +46,7 @@ CONST_TRACE_DEPTH="${NPI_CONST_TRACE_MAX_DEPTH:-16}"
 ASSIGN_TRACE_DEPTH="${NPI_ASSIGN_TRACE_MAX_DEPTH:-2}"
 ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
+LOG_FILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -53,12 +63,20 @@ while [ $# -gt 0 ]; do
         -assign-trace-depth|--assign-trace-depth) ASSIGN_TRACE_DEPTH="$2"; shift 2 ;;
         -assign-expr-trace-depth|--assign-expr-trace-depth) ASSIGN_EXPR_TRACE_DEPTH="$2"; shift 2 ;;
         -trace-debug|--trace-debug) TRACE_DEBUG="$2"; shift 2 ;;
+        -log-file|--log-file) LOG_FILE="$2"; shift 2 ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
     esac
 done
 
+setup_log_file
+
+if [ -z "$VERDI_HOME" ]; then
+    echo "[ERROR] VERDI_HOME is not set." >&2
+    exit 1
+fi
+
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-module-out <csv>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-trace-debug 0|1]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-module-out <csv>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
     echo "  -srcfile is optional (deprecated, port direction is now obtained via NPI API)." >&2
     echo "  -module-out writes driver/load entries that stop at module boundaries." >&2
     exit 1

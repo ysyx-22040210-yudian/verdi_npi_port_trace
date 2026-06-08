@@ -19,6 +19,7 @@ simv.daidir/kdb.elab++
 - 支持 loader 方向的 fanout / slice / 拼接继续展开，例如 `assign B0 = A[10:0]`、`assign B = {C, A, D}`。
 - 支持 `-ports A[7]` 这种单 bit 端口追踪。
 - 支持 XLSX 反标、CSV 过滤、Raw Trace 三种命令行入口。
+- 支持 `-log-file` 将脚本步骤、Verdi/NPI 输出和 trace debug 日志保存到文件，Raw Trace 的 CSV stdout 保持独立。
 - 提供 Tkinter GUI，保留全部命令行能力。
 
 ## 文件说明
@@ -208,6 +209,8 @@ GUI 界面文字为英文。顶部是麒麟芯片品牌区，中间是参数区�
 | `keywords` 的 `Load List` | 写入 `keywords` | 无 | 可选 | 从文本文件读取 keywords module 列表。适合大项目中 keywords 很多的情况。 |
 | `ports` | `ports` | `-ports` | 可选 | 只检查这些端口。为空时检查目标 module 的全部端口。支持多个端口，也支持单 bit 写法，例如 `A[7]`。 |
 | `ports` 的 `Load List` | 写入 `ports` | 无 | 可选 | 从文本文件读取端口列表。适合端口很多或要复用端口集合的场景。 |
+| `log file` | `log_file` | `-log-file` | 可选 | 将本次运行的步骤日志、Verdi/NPI 子进程输出、`trace debug` 详细诊断写入指定文件。为空时只在终端或 GUI Run Log 中显示。Raw Trace 模式下此项只记录日志，不会影响 `full trace csv` 的 stdout CSV 内容。 |
+| `log file` 的 `Browse` | 写入 `log_file` | 无 | 可选 | 打开保存文件窗口，选择 `.log` 或 `.txt` 日志输出路径。 |
 
 list 文件读取规则：
 
@@ -339,6 +342,7 @@ CSV 模式常见输出：
 | `Export Config` | 将当前 GUI 全部参数保存成 JSON 配置文件。 |
 | `Load Config` | 从 JSON 配置文件恢复 GUI 参数。加载时会暂停逐项刷新，全部设置完成后统一刷新命令预览。 |
 | `Run Log` | 显示底层脚本 stdout/stderr、运行状态和退出码。Raw Trace 模式下，完整 trace stdout 写入 `full trace csv`，界面日志主要显示 stderr 和状态。 |
+| `log file` | 如果公共参数里填写了 `log file`，Run Log 中看到的脚本和 Verdi/NPI 日志也会同步写入该文件，便于大项目长时间运行后离线排查。 |
 
 ## GUI 结果查看器
 
@@ -368,6 +372,7 @@ CSV 模式常见输出：
 | `module` | `module` | string | 空 | 目标 module 定义名列表。 |
 | `keywords` | `keywords` | string | 空 | 过滤 module 定义名列表。Raw 模式不使用。 |
 | `ports` | `ports` | string | 空 | 端口列表，支持 `A[7]` 单 bit。为空时检查全部端口。 |
+| `log_file` | `log file` | string | 空 | 运行日志输出文件。CLI 等价参数是 `-log-file`，只保存日志，不改变 CSV/XLSX 主输出路径。 |
 | `template` | `template` | string | 空 | XLSX 模板路径。仅 XLSX 模式使用。 |
 | `xlsx_output` | `output xlsx` | string | 空 | XLSX 反标输出路径。仅 XLSX 模式使用。 |
 | `sheet` | `sheet` | string | 空 | worksheet 名。仅 XLSX 模式使用。 |
@@ -458,7 +463,8 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
-  -trace-debug 0
+  -trace-debug 0 \
+  -log-file annotate_run.log
 ```
 
 ### CSV 过滤
@@ -475,7 +481,8 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
-  -trace-debug 0
+  -trace-debug 0 \
+  -log-file filter_run.log
 ```
 
 ### Raw Trace
@@ -491,8 +498,11 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
   -trace-debug 1 \
+  -log-file raw_trace_run.log \
   > target_full.csv
 ```
+
+`-log-file` 只保存日志流。`npi_trace.sh` 的完整 CSV 仍然从 stdout 输出，所以 Raw Trace 仍然要用 `>` 指定 `target_full.csv`。
 
 ## 直接 Tcl 调试
 

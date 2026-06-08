@@ -59,6 +59,20 @@ PARAMETER_COL = 3
 PORT_START_COL = 4
 
 
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
 def path_has_contents(path: Path) -> bool:
     if path.is_file():
         return path.stat().st_size > 0
@@ -244,6 +258,20 @@ class InstanceMatcher:
 
 def log_step(message: str) -> None:
     print(f"[annotate_trace_xlsx] {message}", file=sys.stderr)
+
+
+def setup_log_file(log_file: str):
+    if not log_file or os.environ.get("ANNOTATE_TRACE_XLSX_LOG_TEE_ACTIVE") == "1":
+        return None
+    path = Path(log_file).expanduser()
+    if not path.is_absolute():
+        path = RUN_CWD / path
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", encoding="utf-8", buffering=1)
+    sys.stderr = TeeStream(sys.stderr, handle)
+    log_step(f"log_file={path}")
+    return handle
 
 
 def split_csv_arg(text: str) -> List[str]:
@@ -1293,6 +1321,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "-log-file",
+        "--log-file",
+        default="",
+        help=(
+            "write script and Verdi/NPI diagnostic logs to this file. "
+            "CSV data outputs are not redirected by this option."
+        ),
+    )
+    parser.add_argument(
         "--match-cache-size",
         type=int,
         default=200000,
@@ -1342,6 +1379,7 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
+    setup_log_file(args.log_file)
     template = Path(args.template).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
     lib = Path(args.lib).expanduser()

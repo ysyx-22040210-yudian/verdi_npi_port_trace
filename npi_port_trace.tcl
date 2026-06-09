@@ -1531,8 +1531,11 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
                     set candidate "${instname}.${port}${port_select}"
                 }
                 set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
-                if { $dir ne "output" && $dir ne "inout" } {
+                if { $dir ne "output" && $dir ne "inout" && $dir ne "unknown" } {
                     continue
+                }
+                if { $dir eq "unknown" } {
+                    debug_step "source_module_port_driver_unknown_direction_keep signal=$signame inst=$instname mod=$modname port=$port conn=$conn candidate=$candidate"
                 }
                 if { [source_module_port_candidate_exists $candidate] } {
                     append_unique_signal sources $candidate
@@ -1562,6 +1565,16 @@ proc source_candidate_port_direction { candidate srcfile modname portname } {
                 if { [dict exists $dir_map $portname] } {
                     return [dict get $dir_map $portname]
                 }
+            }
+        }
+    }
+
+    if { [regexp {^(.+)\.([A-Za-z_][A-Za-z0-9_$]*)$} $base -> inst_path _] } {
+        set scoped_srcfile [source_file_for_scope_module $inst_path $modname ""]
+        if { $scoped_srcfile ne "" } {
+            set dir_map [build_port_dir_map $scoped_srcfile $modname]
+            if { [dict exists $dir_map $portname] } {
+                return [dict get $dir_map $portname]
             }
         }
     }
@@ -1622,9 +1635,12 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
                     set candidate "${instname}.${port}${port_select}"
                 }
                 set dir [source_candidate_port_direction $candidate $srcfile $modname $port]
-                if { $dir ne "input" && $dir ne "inout" } {
+                if { $dir ne "input" && $dir ne "inout" && $dir ne "unknown" } {
                     debug_step "source_module_port_load_skip signal=$signame inst=$instname mod=$modname port=$port conn=$conn candidate=$candidate dir=$dir reason=direction"
                     continue
+                }
+                if { $dir eq "unknown" } {
+                    debug_step "source_module_port_load_unknown_direction_keep signal=$signame inst=$instname mod=$modname port=$port conn=$conn candidate=$candidate"
                 }
                 set exists [source_module_port_candidate_exists $candidate]
                 debug_step "source_module_port_load_match signal=$signame inst=$instname mod=$modname port=$port conn=$conn bit=$bit candidate=$candidate dir=$dir exists=$exists"

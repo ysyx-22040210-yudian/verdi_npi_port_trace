@@ -34,7 +34,7 @@ echo "[driver_lhs_concat] trace child input drivers through LHS concat and neste
   -module DriverLhsConcatChild \
   -lib "$(pwd)/driver_lhs_concat_trace_build/simv.daidir/kdb.elab++" \
   -keywords DriverLhsConcatKeyword \
-  -ports 'a,a[2],a_reg' \
+  -ports 'a,a[2],a_reg,a_precise,a_precise[7],a_precise[6]' \
   -output driver_lhs_concat.csv \
   -const-source-fallback 1 \
   -const-trace-depth 8 \
@@ -71,6 +71,9 @@ def filtered_signals(port):
 a_full = full_signals("a")
 a_bit_full = full_signals("a[2]")
 a_reg_full = full_signals("a_reg")
+a_precise_full = full_signals("a_precise")
+a_precise_bit_full = full_signals("a_precise[7]")
+a_precise_noise_bit_full = full_signals("a_precise[6]")
 
 for token in ["u_p1.e", "u_p1.h", "u_p1.u_key.out"]:
     if not any(token in sig for sig in a_full):
@@ -82,13 +85,29 @@ if not any("u_p1.u_key.out[2]" in sig for sig in a_bit_full):
 if not any("RegCombo" in sig or "/Always" in sig or "u_reg_src.out" in sig for sig in a_reg_full):
     raise SystemExit(f"a_reg full trace did not reach register endpoint; got {a_reg_full}")
 
-for port in ["a", "a[2]"]:
+if not any("u_key_precise.out" in sig for sig in a_precise_full):
+    raise SystemExit(f"a_precise whole-port trace did not include keyword bit source; got {a_precise_full}")
+
+if not any("c_precise" in sig or "u_key_precise.out[0]" in sig for sig in a_precise_bit_full):
+    raise SystemExit(f"a_precise[7] did not map to the C lane; got {a_precise_bit_full}")
+for bad in ["b_precise", "d_precise", "Const:7'b0000001", "Const:3'b101"]:
+    if any(bad in sig for sig in a_precise_bit_full):
+        raise SystemExit(f"a_precise[7] was polluted by adjacent concat lane {bad}; got {a_precise_bit_full}")
+
+if any("u_key_precise" in sig or "c_precise" in sig for sig in a_precise_noise_bit_full):
+    raise SystemExit(f"a_precise[6] falsely reached the C/keyword lane; got {a_precise_noise_bit_full}")
+
+for port in ["a", "a[2]", "a_precise", "a_precise[7]"]:
     hits = filtered_signals(port)
     if not any("u_p1.u_key.out" in sig for sig in hits):
-        raise SystemExit(f"filtered CSV missing keyword hit for {port}; got {hits}")
+        if port not in ["a_precise", "a_precise[7]"] or not any("u_key_precise.out" in sig for sig in hits):
+            raise SystemExit(f"filtered CSV missing keyword hit for {port}; got {hits}")
 
 if filtered_signals("a_reg"):
     raise SystemExit(f"a_reg should not match keyword-only filtering; got {filtered_signals('a_reg')}")
+
+if filtered_signals("a_precise[6]"):
+    raise SystemExit(f"a_precise[6] should not match keyword-only filtering; got {filtered_signals('a_precise[6]')}")
 
 print("[driver_lhs_concat] assertions passed")
 PY

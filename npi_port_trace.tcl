@@ -79,7 +79,7 @@ if { [info exists env(VERDI_HOME)] } {
 }
 
 # -----------------------------------------------------------------------
-# Required arguments — read from environment variables
+# Required arguments - read from environment variables
 # KDB mode is mandatory: NPI_LIB and NPI_MODULE are required.
 # NPI_SRCFILE is now optional (deprecated, kept for backward compatibility)
 # -----------------------------------------------------------------------
@@ -612,6 +612,20 @@ proc signal_scope_hint_after { signame {scope_hint ""} } {
         return $prefix
     }
     return $scope_hint
+}
+
+proc scoped_signal_for_query { signame {scope_hint ""} } {
+    set signame [normalize_signal_name $signame]
+    if { $scope_hint eq "" ||
+         $signame eq "" ||
+         [is_const_literal_name $signame] ||
+         [signal_scope_prefix $signame] ne "" } {
+        return $signame
+    }
+    if { [regexp {^[A-Za-z_][A-Za-z0-9_$]*(\[[0-9]+(:[0-9]+)?\])?$} $signame] } {
+        return "${scope_hint}.${signame}"
+    }
+    return $signame
 }
 
 proc source_module_port_candidate_exists { candidate } {
@@ -2207,6 +2221,50 @@ proc strip_signal_selects { signame } {
     return $signame
 }
 
+proc select_selected_bits { select } {
+    set select [string trim $select]
+    if { [regexp {^\[([0-9]+)\]$} $select -> bit] } {
+        return [list $bit]
+    }
+    if { [regexp {^\[([0-9]+):([0-9]+)\]$} $select -> hi lo] } {
+        set bits {}
+        if { $hi >= $lo } {
+            for {set bit $lo} {$bit <= $hi} {incr bit} {
+                lappend bits $bit
+            }
+        } else {
+            for {set bit $hi} {$bit <= $lo} {incr bit} {
+                lappend bits $bit
+            }
+        }
+        return $bits
+    }
+    return {}
+}
+
+proc bits_to_select_suffix { bits } {
+    if { [llength $bits] == 0 } {
+        return ""
+    }
+
+    set sorted [lsort -integer -unique $bits]
+    if { [llength $sorted] == 1 } {
+        return "\[[lindex $sorted 0]\]"
+    }
+
+    set prev [lindex $sorted 0]
+    foreach bit [lrange $sorted 1 end] {
+        if { $bit != $prev + 1 } {
+            return ""
+        }
+        set prev $bit
+    }
+
+    set lo [lindex $sorted 0]
+    set hi [lindex $sorted end]
+    return "\[$hi:$lo\]"
+}
+
 proc signal_matches_inst_port { signame inst_path portname } {
     set signame [strip_signal_selects [normalize_signal_name $signame]]
     if { [is_const_literal_name $signame] || $inst_path eq "" || $portname eq "" } {
@@ -2647,8 +2705,19 @@ proc module_port_high_conn_pairs { hdl signame role {srcfile_hint ""} } {
             debug_step "module_port_high_skip role=$role signal=$signame inst=$inst_path port=$portname reason=high_name_empty"
             continue
         }
-        if { $signame_select ne "" && [signal_select_suffix $high_name] eq "" } {
-            set high_name "${high_name}${signame_select}"
+        if { $signame_select ne "" } {
+            set high_name [apply_signal_select $high_name $signame_select]
+            if { $high_name eq "" } {
+                debug_step "module_port_high_skip role=$role signal=$signame inst=$inst_path port=$portname reason=select_mapping_empty"
+                continue
+            }
+        }
+        if { ![is_const_literal_name $high_name] &&
+             [signal_scope_prefix $high_name] eq "" } {
+            set parent_scope [parent_instance_path $inst_path]
+            if { $parent_scope ne "" } {
+                set high_name "${parent_scope}.${high_name}"
+            }
         }
         lappend pairs [list $high_hdl $high_name]
     }
@@ -2801,7 +2870,17 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
 
-    if { ($net_depth <= 0 && $expr_depth <= 0) || $srcfile_hint eq "" } {
+    if { $net_depth <= 0 && $expr_depth <= 0 } {
+        return
+    }
+    if { $srcfile_hint eq "" } {
+        set ctx [source_context_for_signal $signame "" $scope_hint]
+        set ctx_srcfile [lindex $ctx 0]
+        if { $ctx_srcfile ne "" } {
+            set srcfile_hint $ctx_srcfile
+        }
+    }
+    if { $srcfile_hint eq "" } {
         return
     }
 
@@ -2863,7 +2942,16 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
         return
     }
 
-    collect_driver_module_port_high_conns "" $signame all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
+    if { $srcfile_hint eq "" } {
+        set ctx [source_context_for_signal $signame "" $scope_hint]
+        set ctx_srcfile [lindex $ctx 0]
+        if { $ctx_srcfile ne "" } {
+            set srcfile_hint $ctx_srcfile
+        }
+    }
+
+    set module_port_query [scoped_signal_for_query $signame $scope_hint]
+    collect_driver_module_port_high_conns "" $module_port_query all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
 
     set driverList {}
     if { [catch { ::npi_L1::npi_nl_trace_driver $signame driverList 0 1 } err] } {
@@ -3145,7 +3233,27 @@ proc apply_signal_select { signame select } {
         }
     }
     if { [regexp {\[[0-9]+(:[0-9]+)?\]$} $signame] } {
-        return $signame
+        if { ![regexp {^(.+)(\[[0-9]+(:[0-9]+)?\])$} $signame -> base existing_select _] } {
+            return $signame
+        }
+
+        set mapped_bits {}
+        foreach bit [select_selected_bits $select] {
+            set mapped_bit [lhs_select_bit_from_rhs_offset $existing_select $bit]
+            if { $mapped_bit eq "" } {
+                debug_step "apply_signal_select_skip signame=$signame select=$select reason=outside_existing_select"
+                return ""
+            }
+            lappend mapped_bits $mapped_bit
+        }
+
+        set mapped_select [bits_to_select_suffix $mapped_bits]
+        if { $mapped_select eq "" } {
+            debug_step "apply_signal_select_skip signame=$signame select=$select reason=non_contiguous_mapping"
+            return ""
+        }
+        debug_step "apply_signal_select_combine signame=$signame select=$select mapped=${base}${mapped_select}"
+        return "${base}${mapped_select}"
     }
     return "${signame}${select}"
 }
@@ -3603,7 +3711,7 @@ set skipped_instances 0
 set seen_paths {}
 foreach ih $hdlList {
     # Get instance full path from npi_ut_get_hdl_info
-    # format: "npiNlHierInst, full.path, (null)" — but this returns empty for inst handles
+    # format: "npiNlHierInst, full.path, (null)" - but this returns empty for inst handles
     # Use npi_nl_ut_get_hdl_info instead
     set inst_path [get_instance_path $ih]
 

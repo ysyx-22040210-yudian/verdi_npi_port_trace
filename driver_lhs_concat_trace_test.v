@@ -15,17 +15,20 @@ endmodule
 
 module DriverLhsConcatChild(
   input [3:0] a,
-  input [3:0] a_reg
+  input [3:0] a_reg,
+  input [10:0] a_precise
 );
 endmodule
 
 module DriverLhsConcatParent0(
   input [3:0] c,
-  input [3:0] c_reg
+  input [3:0] c_reg,
+  input [10:0] a_precise_conn
 );
   DriverLhsConcatChild u_child(
     .a(c),
-    .a_reg(c_reg)
+    .a_reg(c_reg),
+    .a_precise(a_precise_conn[10:0])
   );
 endmodule
 
@@ -75,6 +78,11 @@ module DriverLhsConcatTop;
   wire [3:0] c_reg;
   wire [3:0] d_reg;
   wire [11:0] e_reg;
+  wire [10:0] a_precise_conn;
+  wire [6:0] b_precise;
+  wire c_precise;
+  wire [2:0] d_precise;
+  wire [3:0] c_precise_vec;
 
   initial clk = 1'b0;
   always #5 clk = ~clk;
@@ -87,9 +95,17 @@ module DriverLhsConcatTop;
 
   assign {b, c, d} = e;
   assign {b_reg, c_reg, d_reg} = e_reg;
+  assign b_precise = 7'b0000001;
+  assign d_precise = 3'b101;
+  assign c_precise = c_precise_vec[0];
+  DriverLhsConcatKeyword u_key_precise(
+    .out(c_precise_vec)
+  );
+  assign a_precise_conn[10:0] = {d_precise[2:0], c_precise, b_precise[6:0]};
 
   DriverLhsConcatParent0 u_p0(
     .c(c),
-    .c_reg(c_reg)
+    .c_reg(c_reg),
+    .a_precise_conn(a_precise_conn)
   );
 endmodule

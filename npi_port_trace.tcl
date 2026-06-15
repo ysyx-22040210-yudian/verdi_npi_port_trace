@@ -79,7 +79,7 @@ if { [info exists env(VERDI_HOME)] } {
 }
 
 # -----------------------------------------------------------------------
-# Required arguments - read from environment variables
+# Required arguments — read from environment variables
 # KDB mode is mandatory: NPI_LIB and NPI_MODULE are required.
 # NPI_SRCFILE is now optional (deprecated, kept for backward compatibility)
 # -----------------------------------------------------------------------
@@ -3711,7 +3711,7 @@ set skipped_instances 0
 set seen_paths {}
 foreach ih $hdlList {
     # Get instance full path from npi_ut_get_hdl_info
-    # format: "npiNlHierInst, full.path, (null)" - but this returns empty for inst handles
+    # format: "npiNlHierInst, full.path, (null)" — but this returns empty for inst handles
     # Use npi_nl_ut_get_hdl_info instead
     set inst_path [get_instance_path $ih]
 

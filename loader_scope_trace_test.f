@@ -1,0 +1,4 @@
+loader_scope_child0.v
+loader_scope_child1.v
+loader_scope_parent0.v
+loader_scope_top.v

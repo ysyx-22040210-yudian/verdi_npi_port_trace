@@ -561,6 +561,7 @@ grep -E "DEBUG collect_load_rec_enter|DEBUG collect_source_load_fanouts_enter|DE
 | 日志关键字 | 说明 | 如果缺失通常说明 |
 | --- | --- | --- |
 | `DEBUG collect_load_rec_enter signal=...` | loader 递归进入某个信号。 | 没有继续递归到该信号，可能已经被 visited、深度耗尽，或 NPI 没返回这个端点。 |
+| `DEBUG collect_load_rec_enter signal=net query=Top.u_parent.net ... scope_hint=Top.u_parent` | NPI/KDB 只返回局部信号名时，工具按当前 trace 所在 scope 生成限定查询名。 | 如果 `query` 仍然是裸 `net`，说明当前 trace 链路没有可用 scope，上游 module port high-side 或连接信号解析失败。 |
 | `DEBUG collect_source_load_fanouts_enter signal=...` | 开始对 loader 方向做源码 fallback fanout 搜索。 | `-assign-trace-depth` / `-assign-expr-trace-depth` 为 0，或信号上下文无法解析。 |
 | `DEBUG source_context signal=... resolved_src=... module=...` | 从 KDB 端点解析到源码文件和当前 module 上下文。 | KDB 没记录可访问源码路径，或源码路径在当前机器不存在。 |
 | `DEBUG module_port_high_probe role=load/driver ... high_count=...` | 尝试从 module port/pin 穿到父层 high-side connection。 | 当前端点不是可穿透的 module port/pin，或 NPI 没返回 port handle。 |
@@ -686,6 +687,33 @@ assign B = A;
 如果 NPI trace 停在 `B`，工具会按 `-assign-trace-depth <N>` 继续沿同方向追踪。普通 `assign B = A` 被视为信号连接，不视为组合逻辑或时序逻辑，因此 driver 方向会继续从 `B` 追到 `A`。即使 `-assign-expr-trace-depth 0`，这种普通透传仍然由 `-assign-trace-depth` 控制。
 
 module port/pin 也按结构连接处理：如果该端口属于 `-keywords` 对应实例，过滤阶段会直接命中 `yes`；如果不是 keywords 实例，trace 会继续跨过端口 high-side 连接向后追，直到遇到组合逻辑、时序逻辑、常数、悬空或达到 `-assign-trace-depth` 限制。
+
+### 局部信号名补全
+
+在部分超大规模 KDB 中，NPI 可能在跨层 loader/driver trace 中只返回局部名，例如只返回 `net` 或 `a`，而不是 `Top.u_parent.net`。如果直接按全设计搜索 `net`，会把其他层次的同名信号误连进来，结果不准确。
+
+工具现在只做“带 scope 的限定补全”：
+
+1. trace 链路已经知道当前所在 scope 时，才把局部名补成 `scope.net`。
+2. 补全后的候选必须通过 NPI 端口/信号存在性检查，或者能在同一 module 的源码上下文中解释。
+3. 不做全局 leaf-name 搜索。如果当前链路没有可靠 scope，工具会放弃该 fallback，并在 `-trace-debug 1` 日志中打印原因。
+
+因此对于下面这种场景：
+
+```verilog
+parent0 u_parent0(.out(net));
+Child0  u_child0(.a(net));
+Child1  u_child1(.b(net));  // b 在 Child1 内继续连到 keywords 或 RegCombo
+```
+
+即使 NPI 返回 `signal=net`，日志中也应看到类似：
+
+```text
+DEBUG collect_load_rec_enter signal=net query=Top.u_parent.net ...
+DEBUG source_module_port_load_match signal=net ... candidate=Top.u_parent.u_child1.b ... exists=1
+```
+
+这表示工具没有按裸名乱猜，而是在 `Top.u_parent` 这个限定 scope 内继续追踪。
 
 典型场景：
 

@@ -1,0 +1,16 @@
+loader_complex_scope_key_bit.v
+loader_complex_scope_key_vec.v
+loader_complex_scope_child0.v
+loader_complex_scope_child1.v
+loader_complex_scope_producer_parent.v
+loader_complex_scope_consumer_parent.v
+loader_complex_scope_alias_stage0.v
+loader_complex_scope_alias_stage1.v
+loader_complex_scope_decoy_consumer.v
+loader_complex_scope_subsystem.v
+loader_complex_scope_wrap0.v
+loader_complex_scope_wrap1.v
+loader_complex_scope_wrap2.v
+loader_complex_scope_wrap3.v
+loader_complex_scope_cluster.v
+loader_complex_scope_top.v

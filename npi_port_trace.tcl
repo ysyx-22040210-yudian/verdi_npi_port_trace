@@ -1862,6 +1862,112 @@ proc split_concat_items { text } {
     return $items
 }
 
+proc find_top_level_char { text target } {
+    set depth_paren 0
+    set depth_brace 0
+    set depth_bracket 0
+    set idx 0
+    foreach ch [split $text ""] {
+        if { $ch eq "(" } {
+            incr depth_paren
+        } elseif { $ch eq ")" } {
+            incr depth_paren -1
+        } elseif { $ch eq "\{" } {
+            incr depth_brace
+        } elseif { $ch eq "\}" } {
+            incr depth_brace -1
+        } elseif { $ch eq "\[" } {
+            incr depth_bracket
+        } elseif { $ch eq "\]" } {
+            incr depth_bracket -1
+        } elseif { $ch eq $target &&
+                   $depth_paren == 0 &&
+                   $depth_brace == 0 &&
+                   $depth_bracket == 0 } {
+            return $idx
+        }
+        incr idx
+    }
+    return -1
+}
+
+proc split_top_level_ternary { text } {
+    set text [strip_wrapping_parens [string trim $text]]
+    regsub -all {\s+} $text "" text
+
+    set qidx [find_top_level_char $text "?"]
+    if { $qidx < 0 } {
+        return {}
+    }
+
+    set depth_paren 0
+    set depth_brace 0
+    set depth_bracket 0
+    set nested_ternary 0
+    set idx 0
+    foreach ch [split $text ""] {
+        if { $idx <= $qidx } {
+            incr idx
+            continue
+        }
+
+        if { $ch eq "(" } {
+            incr depth_paren
+        } elseif { $ch eq ")" } {
+            incr depth_paren -1
+        } elseif { $ch eq "\{" } {
+            incr depth_brace
+        } elseif { $ch eq "\}" } {
+            incr depth_brace -1
+        } elseif { $ch eq "\[" } {
+            incr depth_bracket
+        } elseif { $ch eq "\]" } {
+            incr depth_bracket -1
+        } elseif { $depth_paren == 0 && $depth_brace == 0 && $depth_bracket == 0 } {
+            if { $ch eq "?" } {
+                incr nested_ternary
+            } elseif { $ch eq ":" } {
+                if { $nested_ternary == 0 } {
+                    set cond [string range $text 0 [expr {$qidx - 1}]]
+                    set true_expr [string range $text [expr {$qidx + 1}] [expr {$idx - 1}]]
+                    set false_expr [string range $text [expr {$idx + 1}] end]
+                    if { $cond ne "" && $true_expr ne "" && $false_expr ne "" } {
+                        return [list $cond $true_expr $false_expr]
+                    }
+                    return {}
+                }
+                incr nested_ternary -1
+            }
+        }
+        incr idx
+    }
+    return {}
+}
+
+proc rhs_driver_data_exprs { rhs } {
+    set rhs [strip_wrapping_parens [string trim $rhs]]
+    set ternary [split_top_level_ternary $rhs]
+    if { [llength $ternary] == 3 } {
+        set exprs {}
+        foreach branch [list [lindex $ternary 1] [lindex $ternary 2]] {
+            foreach expr [rhs_driver_data_exprs $branch] {
+                lappend exprs $expr
+            }
+        }
+        return $exprs
+    }
+    return [list $rhs]
+}
+
+proc rhs_has_ternary_expr { rhs } {
+    set rhs [strip_wrapping_parens [string trim $rhs]]
+    set ternary [split_top_level_ternary $rhs]
+    if { [llength $ternary] == 3 } {
+        return 1
+    }
+    return 0
+}
+
 proc const_literal_to_signal { item } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
@@ -1979,6 +2085,11 @@ proc rhs_driver_sources_for_bit { rhs bit prefix {width_map {}} } {
     set rhs [string trim $rhs]
     regsub -all {\s+} $rhs "" rhs_no_space
 
+    set ternary [split_top_level_ternary $rhs_no_space]
+    if { [llength $ternary] == 3 } {
+        return {}
+    }
+
     set direct_source [expr_item_source_signal_for_bit $rhs_no_space $bit $prefix $width_map]
     if { $direct_source ne "" } {
         return [list $direct_source]
@@ -2011,6 +2122,11 @@ proc rhs_driver_sources_for_bit { rhs bit prefix {width_map {}} } {
 proc rhs_driver_sources_for_whole { rhs prefix {width_map {}} } {
     set rhs [string trim $rhs]
     regsub -all {\s+} $rhs "" rhs_no_space
+
+    set ternary [split_top_level_ternary $rhs_no_space]
+    if { [llength $ternary] == 3 } {
+        return {}
+    }
 
     set direct_sources [expr_item_source_signals $rhs_no_space $prefix]
     if { [llength $direct_sources] > 0 } {
@@ -2134,6 +2250,183 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
     }
 
     return $sources
+}
+
+proc source_assign_driver_data_sources { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
+    set selected_bits [signal_selected_bits $signame]
+    set bit [signal_bit_index $signame]
+    set srcfile $srcfile_hint
+    if { $srcfile eq "" && $sig_hdl ne "" } {
+        set srcfile [get_handle_source_file $sig_hdl]
+    }
+    if { $srcfile eq "" } {
+        return {}
+    }
+
+    set leaf [signal_leaf_name $signame]
+    if { $leaf eq "" } {
+        return {}
+    }
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
+    set width_map [build_signal_width_map_for_module $srcfile $module]
+
+    set sources {}
+    set found_restrictive_assign 0
+    foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
+        set lhs_leaf [lindex $assign 0]
+        set lhs_select [lindex $assign 1]
+        set rhs [lindex $assign 2]
+        set lhs_expr [lindex $assign 3]
+        if { $lhs_leaf ne $leaf } {
+            continue
+        }
+
+        if { ![rhs_has_ternary_expr $rhs] } {
+            continue
+        }
+
+        set data_exprs [rhs_driver_data_exprs $rhs]
+        if { [llength $data_exprs] == 0 } {
+            continue
+        }
+
+        if { $lhs_expr ne "" } {
+            set rhs_offsets {}
+            if { [llength $selected_bits] == 0 } {
+                foreach rhs_bit [lhs_concat_rhs_offsets_for_signal_bit $lhs_expr $leaf "" $width_map] {
+                    if { [lsearch -exact $rhs_offsets $rhs_bit] < 0 } {
+                        lappend rhs_offsets $rhs_bit
+                    }
+                }
+            } else {
+                foreach target_bit $selected_bits {
+                    foreach rhs_bit [lhs_concat_rhs_offsets_for_signal_bit $lhs_expr $leaf $target_bit $width_map] {
+                        if { [lsearch -exact $rhs_offsets $rhs_bit] < 0 } {
+                            lappend rhs_offsets $rhs_bit
+                        }
+                    }
+                }
+            }
+
+            foreach rhs_bit $rhs_offsets {
+                foreach data_expr $data_exprs {
+                    foreach source [rhs_driver_sources_for_bit $data_expr $rhs_bit $prefix $width_map] {
+                        append_source_signal_candidate sources $source driver $srcfile
+                    }
+                }
+            }
+            set found_restrictive_assign 1
+            continue
+        }
+
+        if { [llength $selected_bits] == 0 } {
+            foreach data_expr $data_exprs {
+                foreach source [rhs_driver_sources_for_whole $data_expr $prefix $width_map] {
+                    append_source_signal_candidate sources $source driver $srcfile
+                }
+            }
+            set found_restrictive_assign 1
+        } else {
+            foreach target_bit $selected_bits {
+                set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $target_bit]
+                if { $rhs_bit eq "" } {
+                    continue
+                }
+                foreach data_expr $data_exprs {
+                    foreach source [rhs_driver_sources_for_bit $data_expr $rhs_bit $prefix $width_map] {
+                        append_source_signal_candidate sources $source driver $srcfile
+                    }
+                }
+            }
+            set found_restrictive_assign 1
+        }
+    }
+
+    if { !$found_restrictive_assign } {
+        return {}
+    }
+
+    if { [llength $sources] > 0 } {
+        log_step "source_assign_driver_data_sources signal=$signame source=$srcfile drivers=[join $sources ,]"
+    } else {
+        debug_step "source_assign_driver_data_sources_empty signal=$signame source=$srcfile module=$module"
+    }
+    return $sources
+}
+
+proc source_assign_driver_combo_stop_expr { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
+    set selected_bits [signal_selected_bits $signame]
+    set srcfile $srcfile_hint
+    if { $srcfile eq "" && $sig_hdl ne "" } {
+        set srcfile [get_handle_source_file $sig_hdl]
+    }
+    if { $srcfile eq "" } {
+        return ""
+    }
+
+    set leaf [signal_leaf_name $signame]
+    if { $leaf eq "" } {
+        return ""
+    }
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
+    set width_map [build_signal_width_map_for_module $srcfile $module]
+
+    foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
+        set lhs_leaf [lindex $assign 0]
+        set lhs_select [lindex $assign 1]
+        set rhs [lindex $assign 2]
+        set lhs_expr [lindex $assign 3]
+        if { $lhs_leaf ne $leaf || ![rhs_has_ternary_expr $rhs] } {
+            continue
+        }
+
+        set affected 0
+        if { $lhs_expr ne "" } {
+            if { [llength $selected_bits] == 0 } {
+                set affected [expr {[llength [lhs_concat_rhs_offsets_for_signal_bit $lhs_expr $leaf "" $width_map]] > 0}]
+            } else {
+                foreach target_bit $selected_bits {
+                    if { [llength [lhs_concat_rhs_offsets_for_signal_bit $lhs_expr $leaf $target_bit $width_map]] > 0 } {
+                        set affected 1
+                        break
+                    }
+                }
+            }
+        } elseif { [llength $selected_bits] == 0 } {
+            set affected 1
+        } else {
+            foreach target_bit $selected_bits {
+                if { [lhs_select_rhs_bit_for_target $lhs_select $target_bit] ne "" } {
+                    set affected 1
+                    break
+                }
+            }
+        }
+
+        if { $affected } {
+            log_step "driver_combo_stop signal=$signame source=$srcfile reason=ternary"
+            return "COMBO_EXPR:ternary"
+        }
+    }
+    return ""
 }
 
 proc source_assign_const_chain { signame srcfile depth visited_var {scope_hint ""} } {
@@ -2435,6 +2728,16 @@ proc hdl_to_name { hdl } {
         }
     }
 
+    # Netlist handles can report only a local nlName through the L1 helper in
+    # some large KDBs. Prefer the native npiNlFullName property when present so
+    # later fallback never has to guess the scope of a bare "net" or "port".
+    set signame ""
+    catch { set signame [npi_nl_get_str -property npiNlFullName -object $hdl] }
+    set signame [string trim $signame]
+    if { $signame ne "" } {
+        return [normalize_signal_name $signame]
+    }
+
     set info ""
     catch { set info [::npi_L1::npi_nl_ut_get_hdl_info $hdl] }
     set signame [string trim [lindex [split $info ","] 1]]
@@ -2454,6 +2757,11 @@ proc hdl_to_name { hdl } {
                 if { $value ne "" } {
                     return "Const:$value"
                 }
+            }
+            catch { set signame [npi_nl_get_str -property npiNlFullName -object $net_hdl] }
+            set signame [string trim $signame]
+            if { $signame ne "" } {
+                return [normalize_signal_name $signame]
             }
             catch { set info [::npi_L1::npi_nl_ut_get_hdl_info $net_hdl] }
             set signame [string trim [lindex [split $info ","] 1]]
@@ -2858,16 +3166,64 @@ proc signal_seen_or_mark { visited_var signame } {
     return 0
 }
 
-proc collect_drivers_by_name { signame all_drivers_var module_drivers_var {srcfile_hint ""} {scope_hint ""} } {
+proc collect_drivers_by_name { signame all_drivers_var module_drivers_var {srcfile_hint ""} {scope_hint ""} {data_source_restrict {}} } {
     global assign_trace_max_depth assign_expr_trace_max_depth
     upvar 1 $all_drivers_var all_drivers
     upvar 1 $module_drivers_var module_drivers
 
     set visited {}
-    collect_drivers_by_name_rec $signame all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth visited $srcfile_hint $scope_hint
+    collect_drivers_by_name_rec $signame all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth visited $srcfile_hint $scope_hint $data_source_restrict
 }
 
-proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module_drivers_var net_depth expr_depth visited_var {scope_hint ""} } {
+proc trace_allowed_by_data_sources { sig data_sources } {
+    if { [llength $data_sources] == 0 } {
+        return 1
+    }
+    set sig_norm [normalize_signal_name $sig]
+    if { $sig_norm eq "" } {
+        return 1
+    }
+    if { [is_const_literal_name $sig_norm] } {
+        foreach src $data_sources {
+            if { [normalize_signal_name $src] eq $sig_norm } {
+                return 1
+            }
+        }
+        return 0
+    }
+    set sig_norm [strip_signal_selects $sig_norm]
+    foreach src $data_sources {
+        set src_norm [normalize_signal_name $src]
+        if { [is_const_literal_name $src_norm] } {
+            continue
+        }
+        set src_norm [strip_signal_selects $src_norm]
+        if { $src_norm eq "" } {
+            continue
+        }
+        if { $sig_norm eq $src_norm ||
+             [string first "${src_norm}." $sig_norm] == 0 ||
+             [string first "${sig_norm}." $src_norm] == 0 } {
+            return 1
+        }
+    }
+    return 0
+}
+
+proc filter_by_data_sources { values data_sources } {
+    if { [llength $data_sources] == 0 } {
+        return $values
+    }
+    set filtered {}
+    foreach sig $values {
+        if { [trace_allowed_by_data_sources $sig $data_sources] } {
+            append_unique_signal filtered $sig
+        }
+    }
+    return $filtered
+}
+
+proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module_drivers_var net_depth expr_depth visited_var {scope_hint ""} {data_source_restrict {}} } {
     upvar 1 $all_drivers_var all_drivers
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
@@ -2886,20 +3242,34 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         return
     }
 
+    set combo_stop [source_assign_driver_combo_stop_expr "" $signame $srcfile_hint $scope_hint]
+    if { $combo_stop ne "" } {
+        append_unique_signal all_drivers $combo_stop
+        return
+    }
+
     foreach port_sig [source_module_port_driver_sources $srcfile_hint $signame $scope_hint] {
+        if { ![trace_allowed_by_data_sources $port_sig $data_source_restrict] } {
+            debug_step "driver_data_source_skip signal=$signame candidate=$port_sig reason=not_data_branch"
+            continue
+        }
         append_unique_signal all_drivers $port_sig
         append_unique_signal module_drivers $port_sig
         collect_driver_module_port_high_conns "" $port_sig all_drivers module_drivers $net_depth $expr_depth visited $srcfile_hint
         if { $net_depth > 0 && ![is_const_literal_name $port_sig] } {
             log_step "driver_module_port_continue from=$signame via=$port_sig remaining_net_depth=$net_depth"
             set next_scope_hint [signal_scope_hint_after $port_sig $scope_hint]
-            collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint
+            collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint {}
         }
     }
 
     set direct_sources {}
     if { $net_depth > 0 } {
         foreach source_sig [source_assign_direct_driver_sources "" $signame $srcfile_hint $scope_hint] {
+            if { ![trace_allowed_by_data_sources $source_sig $data_source_restrict] } {
+                debug_step "driver_data_source_skip signal=$signame candidate=$source_sig reason=not_data_branch"
+                continue
+            }
             append_unique_signal direct_sources $source_sig
             append_unique_signal all_drivers $source_sig
             if { [is_module_boundary_signal $source_sig] } {
@@ -2907,7 +3277,7 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
             }
             if { ![is_const_literal_name $source_sig] } {
                 set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
-                collect_drivers_by_name_rec $source_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint
+                collect_drivers_by_name_rec $source_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint {}
             }
         }
     }
@@ -2917,6 +3287,10 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
     }
 
     foreach source_sig [source_assign_driver_sources "" $signame $srcfile_hint $scope_hint] {
+        if { ![trace_allowed_by_data_sources $source_sig $data_source_restrict] } {
+            debug_step "driver_data_source_skip signal=$signame candidate=$source_sig reason=not_data_branch"
+            continue
+        }
         if { [lsearch -exact $direct_sources $source_sig] >= 0 } {
             continue
         }
@@ -2926,12 +3300,12 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         }
         if { ![is_const_literal_name $source_sig] } {
             set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
-            collect_drivers_by_name_rec $source_sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] visited $srcfile_hint $next_scope_hint
+            collect_drivers_by_name_rec $source_sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] visited $srcfile_hint $next_scope_hint {}
         }
     }
 }
 
-proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var net_depth expr_depth visited_var {srcfile_hint ""} {scope_hint ""} } {
+proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var net_depth expr_depth visited_var {srcfile_hint ""} {scope_hint ""} {data_source_restrict {}} } {
     upvar 1 $all_drivers_var all_drivers
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
@@ -2952,6 +3326,12 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
         }
     }
 
+    set combo_stop [source_assign_driver_combo_stop_expr "" $signame $srcfile_hint $scope_hint]
+    if { $combo_stop ne "" } {
+        append_unique_signal all_drivers $combo_stop
+        return
+    }
+
     set module_port_query [scoped_signal_for_query $signame $scope_hint]
     collect_driver_module_port_high_conns "" $module_port_query all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
 
@@ -2966,18 +3346,22 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
         if { $sig eq "" } {
             continue
         }
+        if { ![trace_allowed_by_data_sources $sig $data_source_restrict] } {
+            debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
+            continue
+        }
         append_unique_signal all_drivers $sig
         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
         if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
             log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
             set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
-            collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
+            collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint {}
         } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
             set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
-            collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
+            collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint {}
         }
     }
 
@@ -2989,6 +3373,10 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     foreach hdl $moduleDriverList {
         set sig [hdl_to_name $hdl]
         if { [is_module_boundary_signal $sig] } {
+            if { ![trace_allowed_by_data_sources $sig $data_source_restrict] } {
+                debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
+                continue
+            }
             append_unique_signal module_drivers $sig
             append_unique_signal all_drivers $sig
             collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
@@ -2996,29 +3384,37 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
                 log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
                 set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
-                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
+                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint {}
             } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
                 log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
                 set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
-                collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
+                collect_drivers_by_name_rec $sig all_drivers module_drivers $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint {}
             }
         }
     }
 
     set conn_driver_count_before [llength $all_drivers]
     collect_conn_module_ports_by_name $signame driver all_drivers module_drivers
+    if { [llength $data_source_restrict] > 0 } {
+        set all_drivers [filter_by_data_sources $all_drivers $data_source_restrict]
+        set module_drivers [filter_by_data_sources $module_drivers $data_source_restrict]
+    }
     if { $net_depth > 0 } {
         foreach sig [lrange $all_drivers $conn_driver_count_before end] {
+            if { ![trace_allowed_by_data_sources $sig $data_source_restrict] } {
+                debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
+                continue
+            }
             if { [is_module_boundary_signal $sig] && ![is_const_literal_name $sig] } {
                 collect_driver_module_port_high_conns "" $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
                 log_step "driver_conn_module_port_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
-                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint $next_scope_hint
+                collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $srcfile_hint $next_scope_hint {}
             }
         }
     }
-    collect_source_driver_sources $signame $srcfile_hint all_drivers module_drivers $net_depth $expr_depth $visited_var $scope_hint
+    collect_source_driver_sources $signame $srcfile_hint all_drivers module_drivers $net_depth $expr_depth $visited_var $scope_hint $data_source_restrict
 }
 
 proc collect_loads_by_name { signame all_loads_var module_loads_var {srcfile_hint ""} {scope_hint ""} } {
@@ -3089,6 +3485,101 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     }
 }
 
+proc append_load_hdl_endpoint { hdl from_sig all_loads_var module_loads_var net_depth expr_depth visited_var {srcfile_hint ""} {scope_hint ""} {remaining_net_adjust 0} } {
+    upvar 1 $all_loads_var all_loads
+    upvar 1 $module_loads_var module_loads
+    upvar 1 $visited_var visited
+
+    set sig [hdl_to_name $hdl]
+    if { $sig eq "" } {
+        return
+    }
+    append_unique_signal all_loads $sig
+    if { [is_module_boundary_signal $sig] } {
+        append_unique_signal module_loads $sig
+    }
+
+    set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
+    set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
+    collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
+
+    set next_net_depth [expr {$net_depth - $remaining_net_adjust}]
+    if { $next_net_depth < 0 } {
+        set next_net_depth 0
+    }
+
+    if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+        log_step "load_assign_continue from=$from_sig via=$sig remaining_net_depth=$net_depth"
+        collect_loads_by_name_rec $sig all_loads module_loads $next_net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
+    } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+        log_step "load_assign_expr_continue from=$from_sig via=$sig remaining_expr_depth=$expr_depth"
+        collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited $next_srcfile_hint $next_scope_hint
+    }
+
+    collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
+}
+
+proc collect_loads_by_hdl_fallback { hdl signame all_loads_var module_loads_var net_depth expr_depth visited_var {srcfile_hint ""} {scope_hint ""} } {
+    upvar 1 $all_loads_var all_loads
+    upvar 1 $module_loads_var module_loads
+    upvar 1 $visited_var visited
+
+    if { $hdl eq "" || $hdl == 0 } {
+        return
+    }
+    set visit_key "hdl_load:$hdl"
+    if { [lsearch -exact $visited $visit_key] >= 0 } {
+        return
+    }
+    lappend visited $visit_key
+
+    set loadList {}
+    set used_api ""
+    if { [info commands ::npi_L1::npi_nl_trace_load_by_hdl2] ne "" &&
+         ![catch { ::npi_L1::npi_nl_trace_load_by_hdl2 $hdl loadList }] } {
+        set used_api "npi_nl_trace_load_by_hdl2"
+    } elseif { ![catch { ::npi_L1::npi_nl_trace_load_by_hdl $hdl loadList }] } {
+        set used_api "npi_nl_trace_load_by_hdl"
+    }
+    if { [llength $loadList] > 0 } {
+        debug_step "load_hdl_trace signal=$signame api=$used_api count=[llength $loadList]"
+    }
+    foreach load_hdl $loadList {
+        append_load_hdl_endpoint $load_hdl $signame all_loads module_loads $net_depth $expr_depth visited $srcfile_hint $scope_hint 1
+    }
+
+    set net_hdl $hdl
+    set net_name [hdl_to_name $net_hdl]
+    if { ![is_module_boundary_signal $net_name] } {
+        set net_hdl ""
+        catch { set net_hdl [::npi_L1::npi_nl_port_instport_2_net $hdl] }
+    }
+    if { $net_hdl eq "" || $net_hdl == 0 } {
+        return
+    }
+
+    set portList {}
+    if { [catch { ::npi_L1::npi_nl_net_2_port_instport $net_hdl portList } err] } {
+        debug_step "load_net_port_trace_error signal=$signame error=$err"
+        return
+    }
+    if { [llength $portList] > 0 } {
+        debug_step "load_net_port_trace signal=$signame count=[llength $portList]"
+    }
+    foreach port_hdl $portList {
+        set port_sig [hdl_to_name $port_hdl]
+        if { $port_sig eq "" } {
+            continue
+        }
+        set dir [module_boundary_port_direction $port_hdl $port_sig]
+        if { $dir ne "input" && $dir ne "inout" && $dir ne "unknown" } {
+            debug_step "load_net_port_skip signal=$signame candidate=$port_sig dir=$dir reason=direction"
+            continue
+        }
+        append_load_hdl_endpoint $port_hdl $signame all_loads module_loads $net_depth $expr_depth visited $srcfile_hint $scope_hint 1
+    }
+}
+
 proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_depth expr_depth visited_var {srcfile_hint ""} {scope_hint ""} } {
     upvar 1 $all_loads_var all_loads
     upvar 1 $module_loads_var module_loads
@@ -3120,6 +3611,12 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
     collect_load_module_port_high_conns "" $query_signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint $scope_hint
     collect_source_load_fanouts "" $signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint $scope_hint
 
+    set query_hdl ""
+    catch { set query_hdl [::npi_L1::npi_nl_ut_get_hdl_by_actual_name $query_signame npiNlUndefined] }
+    if { $query_hdl ne "" && $query_hdl != 0 } {
+        collect_loads_by_hdl_fallback $query_hdl $query_signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint $scope_hint
+    }
+
     set loadList {}
     if { [catch { ::npi_L1::npi_nl_trace_load $query_signame loadList 1 1 } err] } {
         log_step "load_assign_trace_error passMod=1 signal=$query_signame error=$err"
@@ -3142,6 +3639,7 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
             log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
             collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
         }
+        collect_loads_by_hdl_fallback $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
         collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
     }
 
@@ -3165,6 +3663,7 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
                 log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
             }
+            collect_loads_by_hdl_fallback $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
             collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
         }
     }
@@ -3193,6 +3692,7 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
                 log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
             }
+            collect_loads_by_hdl_fallback $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
             collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
         }
     }
@@ -3478,11 +3978,25 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set driver_count_before [llength $all_drivers]
             set module_driver_count_before [llength $module_drivers]
             set driver_srcfile_hint [get_handle_source_file $sig_hdl]
-            collect_drivers_by_name $signame all_drivers module_drivers $driver_srcfile_hint $driver_scope_hint
-            if { [llength $all_drivers] == $driver_count_before } {
+            set driver_combo_stop [source_assign_driver_combo_stop_expr $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
+            if { $driver_combo_stop ne "" } {
+                append_unique_signal all_drivers $driver_combo_stop
+                set driver_data_sources {}
+            } else {
+                set driver_data_sources [source_assign_driver_data_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
+                if { [llength $driver_data_sources] > 0 } {
+                    log_step "driver_data_source_restrict signal=$signame allowed=[join $driver_data_sources ,]"
+                }
+                collect_drivers_by_name $signame all_drivers module_drivers $driver_srcfile_hint $driver_scope_hint $driver_data_sources
+            }
+            if { $driver_combo_stop eq "" && [llength $all_drivers] == $driver_count_before } {
                 set direct_sources {}
                 if { $assign_trace_max_depth > 0 } {
                     foreach source_sig [source_assign_direct_driver_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
+                        if { ![trace_allowed_by_data_sources $source_sig $driver_data_sources] } {
+                            debug_step "driver_data_source_skip signal=$signame candidate=$source_sig reason=not_data_branch"
+                            continue
+                        }
                         append_unique_signal direct_sources $source_sig
                         append_unique_signal all_drivers $source_sig
                         if { $module_outfh ne "" && [is_module_boundary_signal $source_sig] } {
@@ -3495,6 +4009,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                     }
                 }
                 foreach source_sig [source_assign_driver_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
+                    if { ![trace_allowed_by_data_sources $source_sig $driver_data_sources] } {
+                        debug_step "driver_data_source_skip signal=$signame candidate=$source_sig reason=not_data_branch"
+                        continue
+                    }
                     if { [lsearch -exact $direct_sources $source_sig] >= 0 } {
                         continue
                     }
@@ -3511,13 +4029,17 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             # If name-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.
-            if { [llength $all_drivers] == $driver_count_before } {
+            if { $driver_combo_stop eq "" && [llength $all_drivers] == $driver_count_before } {
                 # Note: return value can be 1 (success) or 2 (success with some condition)
                 set driverList {}
                 catch { ::npi_L1::npi_nl_trace_driver_by_hdl $sig_hdl driverList 0 1 }
                 foreach hdl $driverList {
                     set sig [hdl_to_name $hdl]
                     if { $sig ne "" } {
+                        if { ![trace_allowed_by_data_sources $sig $driver_data_sources] } {
+                            debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
+                            continue
+                        }
                         append_unique_signal all_drivers $sig
                         set fallback_driver_visited {}
                         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_driver_visited $driver_srcfile_hint
@@ -3539,12 +4061,17 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             # If module-boundary name tracing also returns no endpoint, keep
             # the old handle-based fallback for the direct connection only.
             if { $module_outfh ne "" && !$const_driver_for_connection &&
+                 $driver_combo_stop eq "" &&
                  [llength $module_drivers] == $module_driver_count_before } {
                 set moduleDriverList {}
                 catch { ::npi_L1::npi_nl_trace_driver_by_hdl $sig_hdl moduleDriverList 0 0 }
                 foreach hdl $moduleDriverList {
                     set sig [hdl_to_name $hdl]
                     if { [is_module_boundary_signal $sig] } {
+                        if { ![trace_allowed_by_data_sources $sig $driver_data_sources] } {
+                            debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
+                            continue
+                        }
                         append_unique_signal module_drivers $sig
                         append_unique_signal all_drivers $sig
                         set fallback_module_driver_visited {}
@@ -3592,6 +4119,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             }
 
             set load_srcfile_hint [get_handle_source_file $sig_hdl]
+            set load_hdl_visited {}
+            collect_loads_by_hdl_fallback $sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth load_hdl_visited $load_srcfile_hint $load_scope_hint
             collect_loads_by_name $signame all_loads module_loads $load_srcfile_hint $load_scope_hint
 
             # If string-based tracing returns no endpoint, keep the old

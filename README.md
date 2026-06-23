@@ -732,6 +732,22 @@ assign A = {b0, b1};
 
 如果 NPI 把该连续赋值表达式作为 driver endpoint，工具会继续追 `b0`、`b1`。如果后续又遇到同类表达式，会按 `-assign-expr-trace-depth <N>` 控制继续展开次数。
 
+driver 方向三目表达式：
+
+```verilog
+u_child(.a(A));
+assign A = B ? C : 1'b1;
+```
+
+这里属于组合逻辑 mux，不再按普通连线穿透。工具会把该 driver 记录为 `COMBO_EXPR:ternary` 并停止追踪，不继续追 `B`、`C` 或 `1'b1`。因此即使 `B` 或 `C` 后面连接到寄存器、RegCombo 或 `-keywords` 实例，也不会因为三目表达式内部操作数把 `u_child.a` 判成 `yes`。
+
+日志中可用下面两个关键字确认三目约束是否生效：
+
+```text
+driver_combo_stop signal=... source=... reason=ternary
+COMBO_EXPR:ternary
+```
+
 loader 方向 fanout / slice / 拼接：
 
 ```verilog
@@ -794,6 +810,8 @@ bash run_keyword_assign_driver_trace_test.sh
 bash run_module_port_passthrough_trace_test.sh
 bash run_assign_loader_slice_trace_test.sh
 bash run_assign_passthrough_trace_test.sh
+bash run_ternary_driver_trace_test.sh
+bash run_compact_features_trace_test.sh
 bash run_full_coverage_trace_test.sh
 ```
 

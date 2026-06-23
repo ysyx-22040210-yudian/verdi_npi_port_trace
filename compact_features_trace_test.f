@@ -1,0 +1,12 @@
+compact_features_key_src.v
+compact_features_key_sink.v
+compact_features_pass.v
+compact_features_noise.v
+compact_features_reg.v
+compact_features_nonkey_sink.v
+compact_features_target.v
+compact_features_shell0.v
+compact_features_shell1.v
+compact_features_aux.v
+compact_features_subsystem.v
+compact_features_top.v

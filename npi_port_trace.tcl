@@ -457,6 +457,21 @@ proc const_value_from_rhs { rhs const_map } {
     return ""
 }
 
+proc const_map_keys_for_lhs { name select } {
+    if { $select eq "" } {
+        return [list $name]
+    }
+
+    set keys {}
+    foreach bit [select_selected_bits $select] {
+        lappend keys "${name}\[$bit\]"
+    }
+    if { [llength $keys] == 0 } {
+        lappend keys "${name}${select}"
+    }
+    return $keys
+}
+
 proc last_identifier_before_equal { text } {
     set idx [string first "=" $text]
     if { $idx < 0 } {
@@ -508,10 +523,10 @@ proc build_const_assign_map { srcfile } {
         }
 
         if { [regexp {^assign\s+([A-Za-z_][A-Za-z0-9_$]*)(\[[^\]]+\])?\s*=\s*(.+)$} $stmt -> name bit rhs] } {
-            if { $bit eq "" } {
-                set value [const_value_from_rhs $rhs $const_map]
-                if { $value ne "" } {
-                    dict set const_map $name $value
+            set value [const_value_from_rhs $rhs $const_map]
+            if { $value ne "" } {
+                foreach key [const_map_keys_for_lhs $name $bit] {
+                    dict set const_map $key $value
                 }
             }
             continue
@@ -537,6 +552,21 @@ proc build_const_assign_map { srcfile } {
 
     set const_assign_map_cache($srcfile) $const_map
     return $const_map
+}
+
+proc const_driver_from_assign_map { const_map signame leaf } {
+    set signame [normalize_signal_name $signame]
+    set leaf_key $leaf
+    set select [signal_select_suffix $signame]
+    if { $leaf ne "" && $select ne "" } {
+        set leaf_key "${leaf}${select}"
+    }
+    foreach key [list $signame [signal_base_without_select $signame] $leaf_key $leaf] {
+        if { $key ne "" && [dict exists $const_map $key] } {
+            return [dict get $const_map $key]
+        }
+    }
+    return ""
 }
 
 proc signal_leaf_name { signame } {
@@ -596,6 +626,52 @@ proc signal_scope_prefix { signame } {
         return $prefix
     }
     return ""
+}
+
+proc signal_base_without_select { signame } {
+    set signame [normalize_signal_name $signame]
+    regsub {#\[[^\]]+\]$} $signame "" signame
+    regsub {\[[^\]]+\]$} $signame "" signame
+    return $signame
+}
+
+proc select_bits_from_signal { signame } {
+    set signame [normalize_signal_name $signame]
+    if { [regexp {#\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] ||
+         [regexp {\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] } {
+        set bits {}
+        if { $hi >= $lo } {
+            for {set bit $lo} {$bit <= $hi} {incr bit} {
+                lappend bits $bit
+            }
+        } else {
+            for {set bit $hi} {$bit <= $lo} {incr bit} {
+                lappend bits $bit
+            }
+        }
+        return $bits
+    }
+    if { [regexp {#\[([0-9]+)\]$} $signame -> bit] ||
+         [regexp {\[([0-9]+)\]$} $signame -> bit] } {
+        return [list $bit]
+    }
+    return {}
+}
+
+proc signal_selects_overlap { lhs rhs } {
+    set lhs_bits [select_bits_from_signal $lhs]
+    set rhs_bits [select_bits_from_signal $rhs]
+
+    if { [llength $lhs_bits] == 0 || [llength $rhs_bits] == 0 } {
+        return 1
+    }
+
+    foreach bit $lhs_bits {
+        if { [lsearch -exact $rhs_bits $bit] >= 0 } {
+            return 1
+        }
+    }
+    return 0
 }
 
 proc signal_effective_scope_prefix { signame {scope_hint ""} } {
@@ -2683,8 +2759,8 @@ proc const_driver_from_connected_signal { sig_hdl signame } {
     }
 
     set const_map [build_const_assign_map $srcfile]
-    if { [dict exists $const_map $leaf] } {
-        set value [dict get $const_map $leaf]
+    set value [const_driver_from_assign_map $const_map $signame $leaf]
+    if { $value ne "" } {
         log_step "const_driver_from_parent_signal signal=$signame source=$srcfile value=$value"
         return $value
     }
@@ -3191,19 +3267,22 @@ proc trace_allowed_by_data_sources { sig data_sources } {
         }
         return 0
     }
-    set sig_norm [strip_signal_selects $sig_norm]
+    set sig_base [signal_base_without_select $sig_norm]
     foreach src $data_sources {
         set src_norm [normalize_signal_name $src]
         if { [is_const_literal_name $src_norm] } {
             continue
         }
-        set src_norm [strip_signal_selects $src_norm]
-        if { $src_norm eq "" } {
+        set src_base [signal_base_without_select $src_norm]
+        if { $src_base eq "" } {
             continue
         }
-        if { $sig_norm eq $src_norm ||
-             [string first "${src_norm}." $sig_norm] == 0 ||
-             [string first "${sig_norm}." $src_norm] == 0 } {
+        if { $sig_base eq $src_base ||
+             [string first "${src_base}." $sig_base] == 0 ||
+             [string first "${sig_base}." $src_base] == 0 } {
+            if { ![signal_selects_overlap $sig_norm $src_norm] } {
+                continue
+            }
             return 1
         }
     }
@@ -3330,6 +3409,18 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     if { $combo_stop ne "" } {
         append_unique_signal all_drivers $combo_stop
         return
+    }
+
+    # NPI string tracing can lose the bit-select on wide nets in some KDBs and
+    # then return endpoints for sibling bits. For A[7]-style queries, prefer
+    # the source/KDB-backed bit mapping when it can resolve at least one source.
+    if { [llength [signal_selected_bits $signame]] > 0 } {
+        set source_count_before [llength $all_drivers]
+        collect_source_driver_sources $signame $srcfile_hint all_drivers module_drivers $net_depth $expr_depth $visited_var $scope_hint $data_source_restrict
+        if { [llength $all_drivers] > $source_count_before } {
+            log_step "bit_driver_source_restrict signal=$signame source=$srcfile_hint drivers=[join [lrange $all_drivers $source_count_before end] ,]"
+            return
+        }
     }
 
     set module_port_query [scoped_signal_for_query $signame $scope_hint]

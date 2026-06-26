@@ -811,6 +811,7 @@ bash run_module_port_passthrough_trace_test.sh
 bash run_assign_loader_slice_trace_test.sh
 bash run_assign_passthrough_trace_test.sh
 bash run_ternary_driver_trace_test.sh
+bash run_bit_select_precision_trace_test.sh
 bash run_compact_features_trace_test.sh
 bash run_full_coverage_trace_test.sh
 ```

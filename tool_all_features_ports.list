@@ -6,11 +6,13 @@ drv_plain
 drv_assign_chain
 drv_cross_concat
 drv_module_port
+drv_wide_bit
 drv_const_direct
 drv_const_parent
 drv_const_source
 drv_noise
 drv_reg_endpoint
+drv_ternary_stop
 drv_float
 load_bus[7]
 load_bus[15]

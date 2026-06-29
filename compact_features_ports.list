@@ -3,6 +3,7 @@ drv_bits[1]
 drv_bits[2]
 drv_chain
 drv_port
+drv_wide_bit
 drv_ternary_stop
 drv_const
 drv_reg

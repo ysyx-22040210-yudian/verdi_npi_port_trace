@@ -423,10 +423,138 @@ proc is_const_literal_name { name } {
 }
 
 proc normalize_signal_name { name } {
+    set name [string trim $name]
+    if { [regexp {^(.+)#\[([0-9]+)\]$} $name -> base bit] } {
+        regsub {\[[0-9]+:[0-9]+\]$} $base "" base
+        return "${base}\[$bit\]"
+    }
     if { [is_const_literal_name $name] && ![string match "Const:*" $name] } {
         return "Const:$name"
     }
     return $name
+}
+
+proc const_literal_raw { value } {
+    set value [string trim $value]
+    if { [string match "Const:*" $value] } {
+        return [string range $value 6 end]
+    }
+    return $value
+}
+
+proc const_bit_from_based_literal { width base digits bit } {
+    set digits [string trim $digits]
+    regsub -all {_} $digits "" digits
+    if { $digits eq "" || $bit eq "" || ![string is integer -strict $bit] || $bit < 0 } {
+        return ""
+    }
+    if { $width ne "" && [string is integer -strict $width] && $bit >= $width } {
+        return ""
+    }
+
+    set base [string tolower $base]
+    if { $base eq "b" } {
+        set bits [split $digits ""]
+    } elseif { $base eq "h" } {
+        set bits {}
+        foreach ch [split $digits ""] {
+            switch -regexp -- $ch {
+                {[xX?]} { set nibble {x x x x} }
+                {[zZ]} { set nibble {z z z z} }
+                default {
+                    scan $ch %x val
+                    set nibble [list [expr {($val >> 3) & 1}] [expr {($val >> 2) & 1}] [expr {($val >> 1) & 1}] [expr {$val & 1}]]
+                }
+            }
+            set bits [concat $bits $nibble]
+        }
+    } elseif { $base eq "o" } {
+        set bits {}
+        foreach ch [split $digits ""] {
+            switch -regexp -- $ch {
+                {[xX?]} { set triad {x x x} }
+                {[zZ]} { set triad {z z z} }
+                default {
+                    scan $ch %o val
+                    set triad [list [expr {($val >> 2) & 1}] [expr {($val >> 1) & 1}] [expr {$val & 1}]]
+                }
+            }
+            set bits [concat $bits $triad]
+        }
+    } elseif { $base eq "d" } {
+        if { ![regexp {^[0-9]+$} $digits] } {
+            return ""
+        }
+        return [expr {($digits >> $bit) & 1}]
+    } else {
+        return ""
+    }
+
+    set pad "0"
+    if { [llength $bits] > 0 } {
+        set msb [lindex $bits 0]
+        if { $msb eq "x" || $msb eq "X" || $msb eq "?" } {
+            set pad "x"
+        } elseif { $msb eq "z" || $msb eq "Z" } {
+            set pad "z"
+        }
+    }
+    set idx [expr {[llength $bits] - 1 - $bit}]
+    if { $idx < 0 } {
+        return $pad
+    }
+    return [string tolower [lindex $bits $idx]]
+}
+
+proc project_const_literal_to_bit { value bit } {
+    set raw [const_literal_raw $value]
+    regsub -all {\s+} $raw "" raw
+    if { $bit eq "" } {
+        return [normalize_signal_name $value]
+    }
+
+    set bit_val ""
+    if { [regexp {^'([01xXzZ?])$} $raw -> fill] } {
+        set bit_val [string tolower $fill]
+    } elseif { [regexp {^([0-9]+)'[sS]?([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$} $raw -> width base digits] } {
+        set bit_val [const_bit_from_based_literal $width $base $digits $bit]
+    } elseif { [regexp {^'[sS]?([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$} $raw -> base digits] } {
+        set bit_val [const_bit_from_based_literal "" $base $digits $bit]
+    } elseif { [regexp {^-?[0-9]+$} $raw] } {
+        if { $raw < 0 } {
+            return ""
+        }
+        set bit_val [expr {($raw >> $bit) & 1}]
+    }
+
+    if { $bit_val eq "" } {
+        return ""
+    }
+    if { $bit_val eq "?" } {
+        set bit_val "x"
+    }
+    return "Const:1'b$bit_val"
+}
+
+proc project_const_literal_to_select { value select } {
+    set bits [select_selected_bits $select]
+    if { [llength $bits] == 0 } {
+        return [normalize_signal_name $value]
+    }
+    if { [llength $bits] == 1 } {
+        return [project_const_literal_to_bit $value [lindex $bits 0]]
+    }
+
+    set out_bits {}
+    foreach bit [lreverse [lsort -integer -unique $bits]] {
+        set projected [project_const_literal_to_bit $value $bit]
+        if { ![regexp {^Const:1'b([01xz])$} $projected -> b] } {
+            return ""
+        }
+        lappend out_bits $b
+    }
+    set bit_string [join $out_bits ""]
+    return "Const:[llength $out_bits]'b$bit_string"
 }
 
 proc strip_wrapping_parens { text } {
@@ -563,7 +691,14 @@ proc const_driver_from_assign_map { const_map signame leaf } {
     }
     foreach key [list $signame [signal_base_without_select $signame] $leaf_key $leaf] {
         if { $key ne "" && [dict exists $const_map $key] } {
-            return [dict get $const_map $key]
+            set value [dict get $const_map $key]
+            if { $select ne "" && $key ne $signame && $key ne $leaf_key } {
+                set projected [project_const_literal_to_select $value $select]
+                if { $projected ne "" } {
+                    return $projected
+                }
+            }
+            return $value
         }
     }
     return ""
@@ -2104,6 +2239,12 @@ proc expr_item_source_signal_for_bit { item bit prefix {width_map {}} } {
 
     set const_sig [const_literal_to_signal $item]
     if { $const_sig ne "" } {
+        if { $bit ne "" } {
+            set projected [project_const_literal_to_bit $const_sig $bit]
+            if { $projected ne "" } {
+                return $projected
+            }
+        }
         return $const_sig
     }
 
@@ -2716,7 +2857,7 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
         }
 
         foreach high_hdl $high_sigs {
-            set high_name [hdl_to_name $high_hdl]
+            set high_name [hdl_to_selected_name $high_hdl [signal_select_suffix $current_name]]
             if { [is_const_literal_name $high_name] } {
                 log_step "const_driver_from_parent_port_chain signal=$current_name inst=$current_inst value=$high_name depth=$depth"
                 return $high_name
@@ -2727,8 +2868,9 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
             return ""
         }
 
-        set current_hdl [lindex $high_sigs 0]
-        set current_name [hdl_to_name $current_hdl]
+        set current_select [signal_select_suffix $current_name]
+        set current_hdl [select_hdl_for_signal_select [lindex $high_sigs 0] $current_select]
+        set current_name [hdl_to_selected_name [lindex $high_sigs 0] $current_select]
         set current_inst [parent_instance_path $current_inst]
         incr depth
     }
@@ -2793,13 +2935,19 @@ proc is_self_port_signal { signame inst_path portname } {
     return 0
 }
 
-proc hdl_to_name { hdl } {
+proc hdl_to_name { hdl {literal_select ""} } {
     set is_literal 0
     catch { set is_literal [::npi_L1::npi_nl_ut_get_actual_is_literal $hdl] }
     if { $is_literal == 1 } {
         set value ""
         catch { set value [::npi_L1::npi_nl_ut_get_actual_value $hdl] }
         if { $value ne "" } {
+            if { $literal_select ne "" } {
+                set projected [project_const_literal_to_select "Const:$value" $literal_select]
+                if { $projected ne "" } {
+                    return $projected
+                }
+            }
             return "Const:$value"
         }
     }
@@ -2831,6 +2979,12 @@ proc hdl_to_name { hdl } {
                 set value ""
                 catch { set value [::npi_L1::npi_nl_ut_get_actual_value $net_hdl] }
                 if { $value ne "" } {
+                    if { $literal_select ne "" } {
+                        set projected [project_const_literal_to_select "Const:$value" $literal_select]
+                        if { $projected ne "" } {
+                            return $projected
+                        }
+                    }
                     return "Const:$value"
                 }
             }
@@ -2846,6 +3000,55 @@ proc hdl_to_name { hdl } {
                 set signame [string trim [lindex [split $info ","] 1]]
             }
         }
+    }
+    return [normalize_signal_name $signame]
+}
+
+proc select_hdl_for_signal_select { hdl select } {
+    if { $hdl eq "" || $hdl == 0 || $select eq "" } {
+        return $hdl
+    }
+
+    set bits [select_selected_bits $select]
+    if { [llength $bits] != 1 } {
+        return $hdl
+    }
+
+    set bit [lindex $bits 0]
+    set bit_hdl ""
+    if { ![catch { set bit_hdl [npi_nl_handle_by_index -index $bit -object $hdl] } err] &&
+         $bit_hdl ne "" && $bit_hdl != 0 } {
+        debug_step "select_hdl_by_index select=$select bit=$bit"
+        return $bit_hdl
+    }
+    debug_step "select_hdl_by_index_skip select=$select bit=$bit error=$err"
+    return $hdl
+}
+
+proc hdl_to_selected_name { hdl select } {
+    set selected_hdl [select_hdl_for_signal_select $hdl $select]
+    set selected_by_hdl [expr {$selected_hdl ne $hdl}]
+
+    if { $selected_by_hdl } {
+        set signame [hdl_to_name $selected_hdl]
+    } else {
+        set signame [hdl_to_name $hdl $select]
+    }
+
+    if { $signame eq "" } {
+        return ""
+    }
+    if { [is_const_literal_name $signame] } {
+        if { $select ne "" && !$selected_by_hdl } {
+            set projected [project_const_literal_to_select $signame $select]
+            if { $projected ne "" } {
+                return $projected
+            }
+        }
+        return $signame
+    }
+    if { $select ne "" && !$selected_by_hdl } {
+        return [apply_signal_select $signame $select]
     }
     return [normalize_signal_name $signame]
 }
@@ -4019,7 +4222,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_drivers {}
         set module_drivers {}
         foreach sig_hdl $driver_sigs {
-            set signame [apply_signal_select [hdl_to_name $sig_hdl] $trace_select]
+            set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
+            set signame [hdl_to_selected_name $sig_hdl $trace_select]
             if { $signame eq "" } {
                 continue
             }
@@ -4048,7 +4252,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 set const_driver_for_connection 1
             }
 
-            set parent_const_driver [const_driver_from_connected_signal $sig_hdl $signame]
+            set parent_const_driver [const_driver_from_connected_signal $trace_sig_hdl $signame]
             if { $parent_const_driver ne "" } {
                 lappend all_drivers $parent_const_driver
                 set const_driver_for_connection 1
@@ -4057,7 +4261,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 }
             }
 
-            set parent_port_const_driver [const_driver_from_parent_ports $sig_hdl $signame $parent_path $const_trace_max_depth]
+            set parent_port_const_driver [const_driver_from_parent_ports $trace_sig_hdl $signame $parent_path $const_trace_max_depth]
             if { $parent_port_const_driver ne "" } {
                 lappend all_drivers $parent_port_const_driver
                 set const_driver_for_connection 1
@@ -4068,13 +4272,16 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             set driver_count_before [llength $all_drivers]
             set module_driver_count_before [llength $module_drivers]
-            set driver_srcfile_hint [get_handle_source_file $sig_hdl]
-            set driver_combo_stop [source_assign_driver_combo_stop_expr $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
+            set driver_srcfile_hint [get_handle_source_file $trace_sig_hdl]
+            if { $driver_srcfile_hint eq "" } {
+                set driver_srcfile_hint [get_handle_source_file $sig_hdl]
+            }
+            set driver_combo_stop [source_assign_driver_combo_stop_expr $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
             if { $driver_combo_stop ne "" } {
                 append_unique_signal all_drivers $driver_combo_stop
                 set driver_data_sources {}
             } else {
-                set driver_data_sources [source_assign_driver_data_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
+                set driver_data_sources [source_assign_driver_data_sources $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
                 if { [llength $driver_data_sources] > 0 } {
                     log_step "driver_data_source_restrict signal=$signame allowed=[join $driver_data_sources ,]"
                 }
@@ -4083,7 +4290,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             if { $driver_combo_stop eq "" && [llength $all_drivers] == $driver_count_before } {
                 set direct_sources {}
                 if { $assign_trace_max_depth > 0 } {
-                    foreach source_sig [source_assign_direct_driver_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
+                    foreach source_sig [source_assign_direct_driver_sources $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
                         if { ![trace_allowed_by_data_sources $source_sig $driver_data_sources] } {
                             debug_step "driver_data_source_skip signal=$signame candidate=$source_sig reason=not_data_branch"
                             continue
@@ -4099,7 +4306,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         }
                     }
                 }
-                foreach source_sig [source_assign_driver_sources $sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
+                foreach source_sig [source_assign_driver_sources $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint] {
                     if { ![trace_allowed_by_data_sources $source_sig $driver_data_sources] } {
                         debug_step "driver_data_source_skip signal=$signame candidate=$source_sig reason=not_data_branch"
                         continue
@@ -4123,7 +4330,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             if { $driver_combo_stop eq "" && [llength $all_drivers] == $driver_count_before } {
                 # Note: return value can be 1 (success) or 2 (success with some condition)
                 set driverList {}
-                catch { ::npi_L1::npi_nl_trace_driver_by_hdl $sig_hdl driverList 0 1 }
+                catch { ::npi_L1::npi_nl_trace_driver_by_hdl $trace_sig_hdl driverList 0 1 }
                 foreach hdl $driverList {
                     set sig [hdl_to_name $hdl]
                     if { $sig ne "" } {
@@ -4155,7 +4362,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                  $driver_combo_stop eq "" &&
                  [llength $module_drivers] == $module_driver_count_before } {
                 set moduleDriverList {}
-                catch { ::npi_L1::npi_nl_trace_driver_by_hdl $sig_hdl moduleDriverList 0 0 }
+                catch { ::npi_L1::npi_nl_trace_driver_by_hdl $trace_sig_hdl moduleDriverList 0 0 }
                 foreach hdl $moduleDriverList {
                     set sig [hdl_to_name $hdl]
                     if { [is_module_boundary_signal $sig] } {
@@ -4187,7 +4394,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_loads {}
         set module_loads {}
         foreach sig_hdl $load_sigs {
-            set signame [apply_signal_select [hdl_to_name $sig_hdl] $trace_select]
+            set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
+            set signame [hdl_to_selected_name $sig_hdl $trace_select]
             if { $signame eq "" } {
                 continue
             }
@@ -4209,16 +4417,19 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 }
             }
 
-            set load_srcfile_hint [get_handle_source_file $sig_hdl]
+            set load_srcfile_hint [get_handle_source_file $trace_sig_hdl]
+            if { $load_srcfile_hint eq "" } {
+                set load_srcfile_hint [get_handle_source_file $sig_hdl]
+            }
             set load_hdl_visited {}
-            collect_loads_by_hdl_fallback $sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth load_hdl_visited $load_srcfile_hint $load_scope_hint
+            collect_loads_by_hdl_fallback $trace_sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth load_hdl_visited $load_srcfile_hint $load_scope_hint
             collect_loads_by_name $signame all_loads module_loads $load_srcfile_hint $load_scope_hint
 
             # If string-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.
             if { [llength $all_loads] == 0 } {
                 set loadList {}
-                catch { ::npi_L1::npi_nl_trace_load_by_hdl $sig_hdl loadList }
+                catch { ::npi_L1::npi_nl_trace_load_by_hdl $trace_sig_hdl loadList }
                 foreach hdl $loadList {
                     set sig [hdl_to_name $hdl]
                     append_unique_signal all_loads $sig
@@ -4299,7 +4510,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             # This handles cases where trace APIs cannot follow the signal further
             if { [llength $driver_sigs] > 0 } {
                 foreach sig_hdl $driver_sigs {
-                    set signame [apply_signal_select [hdl_to_name $sig_hdl] $trace_select]
+                    set signame [hdl_to_selected_name $sig_hdl $trace_select]
                     if { $signame ne "" } {
                         if { [is_self_port_signal $signame $inst_path $portname] } {
                             continue
@@ -4325,7 +4536,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             # This is valid when a signal is connected but not actually used
             if { [llength $load_sigs] > 0 } {
                 foreach sig_hdl $load_sigs {
-                    set signame [apply_signal_select [hdl_to_name $sig_hdl] $trace_select]
+                    set signame [hdl_to_selected_name $sig_hdl $trace_select]
                     if { $signame ne "" } {
                         set formatted_sig [format_signal_name $signame $inst_path]
                         write_trace_row $outfh $inst_path $portname $dir load $formatted_sig

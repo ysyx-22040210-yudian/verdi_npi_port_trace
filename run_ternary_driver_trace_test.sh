@@ -68,22 +68,16 @@ def filtered_signals(port, role):
 bad_drivers = signals("bad_a", "driver")
 good_drivers = signals("good_a", "driver")
 
-if any("u_cond_reg.out" in sig or "RegCombo" in sig for sig in bad_drivers):
-    raise SystemExit(f"bad_a incorrectly kept ternary condition driver: {bad_drivers}")
-if any("u_cond_reg" in sig for sig in filtered_signals("bad_a", "driver")):
-    raise SystemExit(f"bad_a incorrectly matched keyword through ternary condition: {filtered_signals('bad_a', 'driver')}")
-if filtered_signals("bad_a", "driver"):
-    raise SystemExit(f"bad_a should not be keyword matched, got: {filtered_signals('bad_a', 'driver')}")
-
-if not any("u_data_reg.out" in sig or "RegCombo" in sig for sig in good_drivers):
-    raise SystemExit(f"good_a did not trace ternary data branch reg source: {good_drivers}")
-if not filtered_signals("good_a", "driver"):
-    raise SystemExit("good_a should match keyword through ternary data branch")
+for port, drivers in [("bad_a", bad_drivers), ("good_a", good_drivers)]:
+    if not any(sig == "COMBO_EXPR:ternary" for sig in drivers):
+        raise SystemExit(f"{port} should stop at ternary combo expression: {drivers}")
+    if any("u_cond_reg" in sig or "u_data_reg" in sig or "RegCombo" in sig or "Const:" in sig for sig in drivers):
+        raise SystemExit(f"{port} should not continue through ternary data/condition branches: {drivers}")
+    if filtered_signals(port, "driver"):
+        raise SystemExit(f"{port} should not be keyword matched through ternary combo logic: {filtered_signals(port, 'driver')}")
 
 for token in [
-    "driver_data_source_restrict",
-    "driver_data_source_skip",
-    "source_assign_driver_data_sources",
+    "driver_combo_stop",
 ]:
     if token not in log_text:
         raise SystemExit(f"debug log missing {token}")

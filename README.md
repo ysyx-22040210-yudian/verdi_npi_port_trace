@@ -44,11 +44,16 @@ simv.daidir/kdb.elab++
 | `all_features_modules.list` / `all_features_keywords.list` / `all_features_ports.list` | 全特性回归使用的 module、keywords、ports 列表文件。 |
 | `all_features_gui_xlsx.json` | 全特性 GUI XLSX 模式配置，可用于 `trace_gui.py --build-command` 或 GUI 加载。 |
 | `run_all_features_trace_test.sh` | 构建 KDB 并执行 GUI 命令生成、CSV 过滤、XLSX 反标、子系统拆分和结果断言的全特性回归。 |
+| `compact_features_*.v` | 多文件、一文件一 module 的稳定全特性测试 RTL，覆盖多层 shell、两个子系统、多 module、多 keywords、parameter、常数/悬空、Reg endpoint、assign 透传、module port 透传、loader slice/fanout、宽向量单 bit 精度、三目组合逻辑停止。 |
+| `compact_features_modules.list` / `compact_features_keywords.list` / `compact_features_ports.list` | `compact_features` 回归使用的 module、keywords、ports 列表文件。 |
+| `compact_features_gui_xlsx.json` | `compact_features` GUI XLSX 模式配置，可直接用于 `trace_gui.py --build-command` 或 GUI 加载。 |
+| `run_compact_features_trace_test.sh` | 推荐的稳定全特性回归入口，会构建 KDB、生成 XLSX 模板、检查 GUI 命令、运行 Raw Trace/CSV Filter/XLSX 反标，并用 Python 断言结果。 |
 | `run_full_coverage_trace_test.sh` | 覆盖常数、assign、单 bit、多 module、多 keywords、XLSX 反标的回归测试。 |
 | `run_keyword_assign_driver_trace_test.sh` | 专门覆盖 `KeyMod u_key(.out(c)); assign b = c; u_child(.a(b));` 这种 input driver 经普通 assign 透传命中 keyword 输出的场景。 |
 | `run_module_port_passthrough_trace_test.sh` | 专门覆盖非 keywords module port/pin 不停止，继续穿过普通端口透传后命中 keywords 的 driver/load 场景。 |
 | `run_assign_passthrough_trace_test.sh` | 专门覆盖 `u_child(.a(b)); assign b = c;` 这类普通 assign 透传 driver 追踪。 |
 | `run_assign_loader_slice_trace_test.sh` | 专门覆盖 loader 方向 `assign B=A[10:0]`、`assign C=A[20:11]` 这类切片 fanout 追踪。 |
+| `run_bit_precision_stress_trace_test.sh` | 专门覆盖单 bit trace、宽向量 bit driver、常数按 bit 投影、三目组合逻辑停止、loader slice fanout 和多 keywords 过滤的压测回归。 |
 | `WORKFLOW_GUIDE_FOR_LLMS.md` | 面向其他大模型的工具工作流程说明。 |
 | `workflow_diagram.svg` | 工具流程图。 |
 
@@ -782,6 +787,24 @@ assign A[10:0] = {D[2:0], C, B[6:0]};
 
 如果只检查 `A[7]`，工具会按 bit 对应关系只继续追 `C`，不会把 `D[2:0]` 和 `B[6:0]` 全部混入该 bit 的结果。
 
+对常数也按当前 bit 投影。例如：
+
+```verilog
+u_child(.a(A));
+assign A = B[7];
+assign B = 32'h0000_0080;
+```
+
+如果 `u_child.a` 是 1bit，最终只允许出现 `Const:1'b1` 或该 bit 对应的真实 endpoint，不会把整根 `B` 的 `32'h...` 常数返回到 `a` 上。类似地，检查 `-ports A[7]` 时，只判断第 7 bit；如果第 7 bit 连到 `-keywords` 实例，而其它 bit tie 到常数，结果不能同时出现 keyword `yes` 和兄弟 bit 的 `Const:1'b1`。
+
+实现上会优先尝试 Verdi NPI 的 bit pseudo handle：
+
+```tcl
+npi_nl_handle_by_index -index <bit> -object <hdl>
+```
+
+部分 KDB 对 high/low connection handle 不能返回 bit pseudo handle 时，工具会回退到带 bit-select 的 signal name 和源码/KDB fallback，但仍会对常数做 bit 投影，避免整条 bus 的常数污染单 bit 结果。
+
 ## VM 回归测试命令
 
 在 VM 工具目录运行，生成文件都留在当前目录：
@@ -812,9 +835,29 @@ bash run_assign_loader_slice_trace_test.sh
 bash run_assign_passthrough_trace_test.sh
 bash run_ternary_driver_trace_test.sh
 bash run_bit_select_precision_trace_test.sh
+bash run_bit_precision_stress_trace_test.sh
 bash run_compact_features_trace_test.sh
 bash run_full_coverage_trace_test.sh
 ```
+
+其中推荐优先跑：
+
+```bash
+bash run_compact_features_trace_test.sh
+```
+
+该场景是当前稳定的总回归，RTL 分散在多个 `compact_features_*.v` 文件中，并且每个文件只有一个 module。它覆盖：
+
+- 多 module：`CFTarget,CFAuxTarget`。
+- 多 keywords：`CFKeySrc,CFKeySink`。
+- 多子系统拆分：`CFTop.subsys0` 和 `CFTop.subsys1` 会生成独立反标文件。
+- parameter 反标：`CFTarget.ID/DW`、`CFAuxTarget.MODE`。
+- driver 命中 keywords：普通端口、assign chain、module port 透传、宽向量 bit 选择。
+- driver 常数/悬空/寄存器终点：`drv_const`、`drv_float`、`drv_reg`。
+- 单 bit 精度：`drv_bits[1]` 只返回对应 bit 的常数，`drv_wide_bit` 只追 `wide_alias1[7]`，不会把 32bit 总线其它 bit 的常数污染进结果。
+- 三目组合逻辑停止：`drv_ternary_stop` 会反标 `no`，并显示 `COMBO_EXPR:ternary`，不会继续追三目表达式里的 keyword 或常数分支。
+- loader slice/fanout：`load_bus[2]`、`load_bus[6]`、`load_port`、`load_reg` 会追到 `CFKeySink`。
+- 非 keyword loader：`load_no` 会反标 `no` 并带 `loader_actual=` 实际 loader 信息。
 
 也可以只测试 GUI 命令生成：
 
@@ -879,6 +922,13 @@ assign_loader_slice_trace_test.v
 assign_loader_slice_trace_test.f
 run_assign_loader_slice_trace_test.sh
 run_assign_passthrough_trace_test.sh
+compact_features_*.v
+compact_features_modules.list
+compact_features_keywords.list
+compact_features_ports.list
+compact_features_gui_xlsx.json
+run_compact_features_trace_test.sh
+run_bit_precision_stress_trace_test.sh
 run_full_coverage_trace_test.sh
 multi_module_trace_template.xlsx
 README.md

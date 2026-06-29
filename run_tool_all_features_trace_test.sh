@@ -98,6 +98,8 @@ grep -q "annotate_trace_xlsx.sh" tool_all_features_gui_command.log
 grep -q "TAFTarget,TAFAuxTarget,TAFLeaf" tool_all_features_gui_command.log
 grep -q "TAFKeySrc,TAFKeySink" tool_all_features_gui_command.log
 grep -q "drv_precise_bus\\[7\\]" tool_all_features_gui_command.log
+grep -q "drv_wide_bit" tool_all_features_gui_command.log
+grep -q "drv_ternary_stop" tool_all_features_gui_command.log
 grep -q -- "--stream" tool_all_features_gui_command.log
 grep -q -- "-regcombo-as-keyword 1" tool_all_features_gui_command.log
 grep -q -- "-trace-debug 0" tool_all_features_gui_command.log
@@ -123,7 +125,7 @@ echo "[tool_all_features] run raw NPI trace with debug log"
 ./npi_trace.sh \
   -module TAFTarget \
   -lib "$(pwd)/tool_all_features_trace_build/simv.daidir/kdb.elab++" \
-  -ports "drv_precise_bus[7],drv_cross_concat,drv_module_port,load_plain,load_module_port" \
+  -ports "drv_wide_bit,drv_ternary_stop" \
   -module-out tool_all_features_raw_module.csv \
   -const-source-fallback 1 \
   -const-trace-depth 12 \
@@ -223,6 +225,7 @@ for port, token in [
     ("drv_assign_chain", "u_parent_key.u_key_nested.out"),
     ("drv_cross_concat", "u_local_deep_provider.u_key_deep_h.out"),
     ("drv_module_port", "u_kw_module.out"),
+    ("drv_wide_bit", "u_kw_wide_bit.out"),
 ]:
     require_full(port, "driver", token)
     require_filtered(port, "driver", token)
@@ -232,6 +235,19 @@ reject_full("drv_precise_bus[7]", "driver", "precise_b[")
 reject_full("drv_precise_bus[7]", "driver", "precise_d[")
 reject_full("drv_precise_bus[7]", "driver", "Const:7'b0101010")
 reject_full("drv_precise_bus[7]", "driver", "Const:3'b101")
+
+reject_full("drv_wide_bit", "driver", "Const:32")
+reject_full("drv_wide_bit", "driver", "32'h")
+reject_full("drv_wide_bit", "driver", "Const:1'b1")
+reject_full("drv_wide_bit", "driver", "Const:1'b0")
+reject_full("drv_wide_bit", "driver", "24'h5aa55a")
+reject_full("drv_wide_bit", "driver", "7'b1010101")
+
+require_full("drv_ternary_stop", "driver", "COMBO_EXPR:ternary")
+reject_full("drv_ternary_stop", "driver", "u_kw_ternary_data")
+reject_full("drv_ternary_stop", "driver", "Const:1'b1")
+reject_full("drv_ternary_stop", "driver", "RegCombo")
+reject_filtered_port("drv_ternary_stop", "driver")
 
 require_full("drv_precise_bus[6]", "driver", "Const:7'b0101010")
 reject_full("drv_precise_bus[6]", "driver", "u_key_precise")
@@ -320,6 +336,7 @@ for book in xlsx_books:
                 "drv_assign_chain",
                 "drv_cross_concat",
                 "drv_module_port",
+                "drv_wide_bit",
                 "load_bus[7]",
                 "load_bus[15]",
                 "load_plain",
@@ -342,6 +359,9 @@ for book in xlsx_books:
                 raise SystemExit(f"{book}: drv_noise missing actual driver: {data.get('drv_noise')}")
             if "driver_actual=" not in str(data.get("drv_reg_endpoint", "")):
                 raise SystemExit(f"{book}: drv_reg_endpoint missing actual register driver: {data.get('drv_reg_endpoint')}")
+            ternary_cell = str(data.get("drv_ternary_stop", ""))
+            if not ternary_cell.startswith("no") or "COMBO_EXPR:ternary" not in ternary_cell:
+                raise SystemExit(f"{book}: drv_ternary_stop should be no with combo detail: {ternary_cell}")
             if "loader_actual=" not in str(data.get("load_unconnected", "")):
                 raise SystemExit(f"{book}: load_unconnected missing actual loader detail: {data.get('load_unconnected')}")
             params = str(data.get("parameters", ""))

@@ -11,6 +11,11 @@ module CFSubsystem #(
   wire chain_mid1;
   wire key_port_src;
   wire port_mid;
+  wire wide_key;
+  wire [31:0] wide_mix;
+  wire [31:0] wide_alias0;
+  wire [31:0] wide_alias1;
+  wire wide_bit;
   wire ternary_cond;
   wire ternary_noise;
   wire ternary_net;
@@ -44,6 +49,12 @@ module CFSubsystem #(
   CFKeySrc #(.W(1), .VALUE(32'h1)) u_key_port(.out(key_port_src));
   CFPass #(.W(1)) u_driver_pass(.i(key_port_src), .o(port_mid));
 
+  CFKeySrc #(.W(1), .VALUE(32'h1)) u_key_wide(.out(wide_key));
+  assign wide_mix = {24'hA55A5A, wide_key, 7'b0101010};
+  assign wide_alias0 = wide_mix;
+  assign wide_alias1 = wide_alias0;
+  assign wide_bit = wide_alias1[7];
+
   CFKeySrc #(.W(1), .VALUE(32'h1)) u_key_ternary_cond(.out(ternary_cond));
   CFNoise u_ternary_noise(.n(ternary_noise));
   assign ternary_net = ternary_cond ? ternary_noise : 1'b1;
@@ -56,6 +67,7 @@ module CFSubsystem #(
     .drv_bits(drv_bits),
     .drv_chain(chain_mid1),
     .drv_port(port_mid),
+    .drv_wide_bit(wide_bit),
     .drv_ternary_stop(ternary_net),
     .drv_const(tie_parent),
     .drv_reg(reg_q),

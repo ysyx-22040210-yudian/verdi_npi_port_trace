@@ -22,6 +22,13 @@ module TAFSubsystem #(parameter SID = 0) (
   wire module_kw_src;
   wire module_pass_l0;
   wire module_pass_l1;
+  wire wide_bit_key;
+  wire [31:0] wide_bit_mix;
+  wire [31:0] wide_bit_alias0;
+  wire [31:0] wide_bit_alias1;
+  wire wide_bit_net;
+  wire ternary_data_key;
+  wire ternary_stop_net;
   wire const_source_net;
   wire noise_n;
   wire [6:0] noise_b_unused;
@@ -89,6 +96,15 @@ module TAFSubsystem #(parameter SID = 0) (
   TAFPass #(.W(1)) u_driver_pass(.i(module_kw_src), .o(module_pass_l0));
   assign module_pass_l1 = module_pass_l0;
 
+  TAFKeySrc #(.W(1), .VALUE(1'b1)) u_kw_wide_bit(.out(wide_bit_key));
+  assign wide_bit_mix = {24'h5aa55a, wide_bit_key, 7'b1010101};
+  assign wide_bit_alias0 = wide_bit_mix;
+  assign wide_bit_alias1 = wide_bit_alias0;
+  assign wide_bit_net = wide_bit_alias1[7];
+
+  TAFKeySrc #(.W(1), .VALUE(1'b1)) u_kw_ternary_data(.out(ternary_data_key));
+  assign ternary_stop_net = noise_n ? ternary_data_key : 1'b1;
+
   assign const_source_net = 1'b0;
   TAFNoiseSrc u_noise(.b(noise_b_unused), .d(noise_d_unused), .n(noise_n));
   TAFRegSource #(.W(8)) u_reg_source(.clk(clk), .out(reg_q));
@@ -112,11 +128,13 @@ module TAFSubsystem #(parameter SID = 0) (
     .drv_assign_chain(assign_chain_b),
     .drv_cross_concat(cross_h_bit),
     .drv_module_port(module_pass_l1),
+    .drv_wide_bit(wide_bit_net),
     .drv_const_direct(1'b0),
     .drv_const_parent(tie_parent),
     .drv_const_source(const_source_net),
     .drv_noise(noise_n),
     .drv_reg_endpoint(reg_q[7:0]),
+    .drv_ternary_stop(ternary_stop_net),
     .drv_float(),
     .load_bus(load_bus),
     .load_plain(load_plain),

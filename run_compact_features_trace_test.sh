@@ -33,6 +33,7 @@ PY
 echo "[compact_features] clean previous outputs for this test only"
 rm -rf compact_features_trace_build
 rm -f compact_features_trace_vcs.log compact_features_trace_template.xlsx
+rm -f compact_features_gui_command.log compact_features_gui_xlsx.log
 rm -f compact_features_filtered.csv compact_features_filtered_boundary.csv compact_features_filtered_full_owner.csv
 rm -f compact_features_filtered__*.csv compact_features_filter.log
 rm -f compact_features_raw_full.csv compact_features_raw_module.csv compact_features_raw.log
@@ -70,6 +71,17 @@ ws.freeze_panes = "A2"
 wb.save("compact_features_trace_template.xlsx")
 PY
 
+echo "[compact_features] verify GUI command builder"
+python3 trace_gui.py --build-command compact_features_gui_xlsx.json | tee compact_features_gui_command.log
+grep -q "annotate_trace_xlsx.sh" compact_features_gui_command.log
+grep -q "CFTarget,CFAuxTarget" compact_features_gui_command.log
+grep -q "CFKeySrc,CFKeySink" compact_features_gui_command.log
+grep -q "drv_wide_bit" compact_features_gui_command.log
+grep -q "drv_ternary_stop" compact_features_gui_command.log
+grep -q -- "--stream" compact_features_gui_command.log
+grep -q -- "-regcombo-as-keyword 1" compact_features_gui_command.log
+grep -q -- "-log-file compact_features_gui_xlsx.log" compact_features_gui_command.log
+
 echo "[compact_features] build KDB"
 mkdir -p compact_features_trace_build
 set +e
@@ -90,7 +102,7 @@ echo "[compact_features] run focused raw trace for ternary stop evidence"
 ./npi_trace.sh \
   -module CFTarget \
   -lib "$(pwd)/compact_features_trace_build/simv.daidir/kdb.elab++" \
-  -ports drv_ternary_stop,drv_bits[1],drv_bits[2],load_bus[2],load_port \
+  -ports drv_wide_bit,drv_ternary_stop,drv_bits[1],drv_bits[2],load_bus[2],load_port \
   -module-out compact_features_raw_module.csv \
   -const-source-fallback 1 \
   -const-trace-depth 8 \
@@ -184,6 +196,14 @@ require_full("drv_chain", "driver", "u_key_chain.out")
 require_filtered("drv_chain", "driver", "u_key_chain.out")
 require_full("drv_port", "driver", "u_key_port.out")
 require_filtered("drv_port", "driver", "u_key_port.out")
+require_full("drv_wide_bit", "driver", "u_key_wide.out")
+reject_full("drv_wide_bit", "driver", "Const:32")
+reject_full("drv_wide_bit", "driver", "32'h")
+reject_full("drv_wide_bit", "driver", "Const:1'b0")
+reject_full("drv_wide_bit", "driver", "Const:1'b1")
+reject_full("drv_wide_bit", "driver", "24'hA55A5A")
+reject_full("drv_wide_bit", "driver", "7'b0101010")
+require_filtered("drv_wide_bit", "driver", "u_key_wide.out")
 
 require_full("drv_ternary_stop", "driver", "Combo")
 reject_full("drv_ternary_stop", "driver", "u_key_ternary_cond")
@@ -227,7 +247,7 @@ for book in books:
         row = dict(zip(headers, values))
         if row.get("module") == "CFTarget":
             target_rows += 1
-            for port in ["drv_bits[0]", "drv_bits[2]", "drv_chain", "drv_port", "load_bus[2]", "load_bus[6]", "load_port", "load_reg"]:
+            for port in ["drv_bits[0]", "drv_bits[2]", "drv_chain", "drv_port", "drv_wide_bit", "load_bus[2]", "load_bus[6]", "load_port", "load_reg"]:
                 if not str(row.get(port, "")).startswith("yes"):
                     raise SystemExit(f"{book}: {port} not yes: {row.get(port)}")
             for port in ["drv_bits[1]", "drv_const"]:

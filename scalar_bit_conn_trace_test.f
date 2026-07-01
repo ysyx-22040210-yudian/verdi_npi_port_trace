@@ -1,0 +1,4 @@
+scalar_bit_conn_key_src.v
+scalar_bit_conn_child.v
+scalar_bit_conn_mid.v
+scalar_bit_conn_top.v

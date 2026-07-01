@@ -1672,6 +1672,169 @@ proc build_instantiation_stmt_list_for_module { srcfile module } {
     return $insts
 }
 
+proc inst_conn_expr_for_port { conn_text portname } {
+    set idx 0
+    set len [string length $conn_text]
+    while { $idx < $len } {
+        set dot [string first "." $conn_text $idx]
+        if { $dot < 0 } {
+            return ""
+        }
+        set pos [expr {$dot + 1}]
+        while { $pos < $len && [regexp {\s} [string index $conn_text $pos]] } {
+            incr pos
+        }
+        set rest [string range $conn_text $pos end]
+        if { ![regexp -indices {^[A-Za-z_][A-Za-z0-9_$]*} $rest match_idx] } {
+            set idx [expr {$dot + 1}]
+            continue
+        }
+        set name_start [expr {$pos + [lindex $match_idx 0]}]
+        set name_end [expr {$pos + [lindex $match_idx 1]}]
+        set name [string range $conn_text $name_start $name_end]
+        set pos [expr {$name_end + 1}]
+        while { $pos < $len && [regexp {\s} [string index $conn_text $pos]] } {
+            incr pos
+        }
+        if { $pos >= $len || [string index $conn_text $pos] ne "(" } {
+            set idx $pos
+            continue
+        }
+        incr pos
+        set expr_start $pos
+        set depth 1
+        while { $pos < $len && $depth > 0 } {
+            set ch [string index $conn_text $pos]
+            if { $ch eq "(" } {
+                incr depth
+            } elseif { $ch eq ")" } {
+                incr depth -1
+                if { $depth == 0 } {
+                    set expr [string trim [string range $conn_text $expr_start [expr {$pos - 1}]]]
+                    if { $name eq $portname } {
+                        return $expr
+                    }
+                    break
+                }
+            }
+            incr pos
+        }
+        set idx [expr {$pos + 1}]
+    }
+    return ""
+}
+
+proc source_parent_module_for_child_inst { parent_scope parent_srcfile child_instname } {
+    set parent_module [source_scope_module_name $parent_scope $parent_srcfile]
+    if { $parent_module ne "" } {
+        return $parent_module
+    }
+
+    set modules [source_module_names_in_file $parent_srcfile]
+    if { [llength $modules] == 1 } {
+        return [lindex $modules 0]
+    }
+
+    set matches {}
+    foreach module $modules {
+        foreach inst [build_instantiation_stmt_list_for_module $parent_srcfile $module] {
+            if { [lindex $inst 1] eq $child_instname } {
+                lappend matches $module
+                break
+            }
+        }
+    }
+    if { [llength $matches] == 1 } {
+        return [lindex $matches 0]
+    }
+    return ""
+}
+
+proc source_port_connection_driver_starts { inst_path parent_path instname portname trace_select port_width parent_srcfile_hint } {
+    set target_bits [select_selected_bits $trace_select]
+    set scalar_port_whole [expr {[llength $target_bits] == 0 && $port_width ne "" && $port_width == 1}]
+    if { [llength $target_bits] == 0 } {
+        if { $port_width ne "" && $port_width == 1 } {
+            set target_bits [list 0]
+        } else {
+            return {}
+        }
+    }
+
+    set parent_scope $parent_path
+    if { $parent_scope eq "" } {
+        set parent_scope [parent_instance_path $inst_path]
+    }
+    if { $parent_scope eq "" } {
+        return {}
+    }
+
+    set parent_srcfile [source_file_for_scope_instance $parent_scope $parent_srcfile_hint]
+    if { $parent_srcfile eq "" } {
+        set parent_srcfile $parent_srcfile_hint
+    }
+    if { $parent_srcfile eq "" || ![file exists $parent_srcfile] } {
+        debug_step "source_port_conn_driver_skip inst=$inst_path port=$portname reason=parent_srcfile_empty hint=$parent_srcfile_hint"
+        return {}
+    }
+
+    set parent_module [source_parent_module_for_child_inst $parent_scope $parent_srcfile $instname]
+    if { $parent_module eq "" } {
+        debug_step "source_port_conn_driver_skip inst=$inst_path port=$portname parent=$parent_scope src=$parent_srcfile reason=parent_module_empty"
+        return {}
+    }
+
+    set conn_expr ""
+    foreach inst [build_instantiation_stmt_list_for_module $parent_srcfile $parent_module] {
+        if { [lindex $inst 1] ne $instname } {
+            continue
+        }
+        set conn_expr [inst_conn_expr_for_port [lindex $inst 2] $portname]
+        if { $conn_expr ne "" } {
+            break
+        }
+    }
+    if { $conn_expr eq "" } {
+        debug_step "source_port_conn_driver_skip inst=$inst_path port=$portname parent=$parent_scope module=$parent_module reason=conn_expr_empty"
+        return {}
+    }
+
+    set width_map [build_signal_width_map_for_module $parent_srcfile $parent_module]
+    set starts {}
+    foreach bit $target_bits {
+        if { [rhs_has_ternary_expr $conn_expr] } {
+            append_unique_signal starts "COMBO_EXPR:port_connection"
+            continue
+        }
+        if { $scalar_port_whole &&
+             $bit == 0 &&
+             [regexp {^\s*([A-Za-z_][A-Za-z0-9_$]*)\s*$} $conn_expr -> bare_name] &&
+             ![dict exists $width_map $bare_name] } {
+            append_unique_signal starts "${parent_scope}.${bare_name}"
+            continue
+        }
+        set bit_sources [rhs_driver_sources_for_bit $conn_expr $bit $parent_scope $width_map]
+        if { [llength $bit_sources] == 0 } {
+            set direct_source [expr_item_source_signal_for_bit $conn_expr $bit $parent_scope $width_map]
+            if { $direct_source ne "" } {
+                set bit_sources [list $direct_source]
+            }
+        }
+        if { [llength $bit_sources] == 0 } {
+            debug_step "source_port_conn_driver_unresolved inst=$inst_path port=$portname bit=$bit conn=$conn_expr"
+            continue
+        }
+        foreach source_sig $bit_sources {
+            append_unique_signal starts $source_sig
+        }
+    }
+
+    if { [llength $starts] > 0 } {
+        log_step "source_port_conn_driver_start inst=$inst_path port=$portname select=$trace_select width=$port_width conn=$conn_expr starts=[join $starts ,]"
+    }
+    return $starts
+}
+
 proc source_scope_module_name { scope srcfile } {
     global source_scope_module_cache
 
@@ -4099,6 +4262,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
     # Build port name -> direction map from IO handles
     set port_dir_map {}
     set src_port_dir_map {}
+    set src_port_width_map {}
+    set module_srcfile ""
     foreach io_hdl $io_hdl_list {
         set portname [get_port_name $io_hdl]
         if { $portname ne "" } {
@@ -4119,7 +4284,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set module_srcfile [get_handle_source_file [lindex $port_hdl_list 0]]
         if { $module_srcfile ne "" } {
             set src_port_dir_map [build_port_dir_map $module_srcfile $target_mod]
-            log_step "source_port_direction_file=$module_srcfile parsed_ports=[dict size $src_port_dir_map] instance=$inst_path"
+            set src_port_width_map [build_signal_width_map_for_module $module_srcfile $target_mod]
+            log_step "source_port_direction_file=$module_srcfile parsed_ports=[dict size $src_port_dir_map] parsed_widths=[dict size $src_port_width_map] instance=$inst_path"
         }
     }
 
@@ -4185,6 +4351,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         log_step "trace_port instance=$inst_path port=$portname dir=$dir high_conn_count=[llength $high_sigs] low_conn_count=[llength $low_sigs]"
 
         set base_portname $portname
+        set base_port_width ""
+        if { [dict exists $src_port_width_map $base_portname] } {
+            set base_port_width [dict get $src_port_width_map $base_portname]
+        }
         foreach trace_portname [selected_port_names $base_portname] {
             set parsed_trace_port [split_port_filter_spec $trace_portname]
             set trace_select [lindex $parsed_trace_port 1]
@@ -4245,6 +4415,50 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 }
             }
 
+            set driver_srcfile_hint [get_handle_source_file $trace_sig_hdl]
+            if { $driver_srcfile_hint eq "" } {
+                set driver_srcfile_hint [get_handle_source_file $sig_hdl]
+            }
+
+            if { $dir eq "input" && [lsearch -exact $high_sigs $sig_hdl] >= 0 } {
+                set precise_driver_starts [source_port_connection_driver_starts $inst_path $parent_path $instname $base_portname $trace_select $base_port_width $driver_srcfile_hint]
+                if { [llength $precise_driver_starts] > 0 } {
+                    set precise_count_before [llength $all_drivers]
+                    foreach start_sig $precise_driver_starts {
+                        set start_sig [normalize_signal_name $start_sig]
+                        if { $start_sig eq "" } {
+                            continue
+                        }
+                        if { [is_const_literal_name $start_sig] ||
+                             [string first "COMBO_EXPR:" $start_sig] == 0 } {
+                            append_unique_signal all_drivers $start_sig
+                            if { $module_outfh ne "" && [is_const_literal_name $start_sig] } {
+                                append_unique_signal module_drivers $start_sig
+                            }
+                            continue
+                        }
+
+                        set start_scope_hint [signal_scope_prefix $start_sig]
+                        if { $start_scope_hint eq "" } {
+                            set start_scope_hint $driver_scope_hint
+                        }
+                        log_step "driver_precise_start_continue port=$portname from=$signame via=$start_sig"
+                        collect_drivers_by_name $start_sig all_drivers module_drivers $driver_srcfile_hint $start_scope_hint {}
+                    }
+                    if { [llength $all_drivers] == $precise_count_before } {
+                        foreach start_sig $precise_driver_starts {
+                            if { ![is_self_port_signal $start_sig $inst_path $portname] } {
+                                append_unique_signal all_drivers $start_sig
+                                if { $module_outfh ne "" && [is_module_boundary_signal $start_sig] } {
+                                    append_unique_signal module_drivers $start_sig
+                                }
+                            }
+                        }
+                    }
+                    continue
+                }
+            }
+
             set const_driver_for_connection 0
 
             if { $module_outfh ne "" && [is_const_literal_name $signame] } {
@@ -4272,10 +4486,6 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             set driver_count_before [llength $all_drivers]
             set module_driver_count_before [llength $module_drivers]
-            set driver_srcfile_hint [get_handle_source_file $trace_sig_hdl]
-            if { $driver_srcfile_hint eq "" } {
-                set driver_srcfile_hint [get_handle_source_file $sig_hdl]
-            }
             set driver_combo_stop [source_assign_driver_combo_stop_expr $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
             if { $driver_combo_stop ne "" } {
                 append_unique_signal all_drivers $driver_combo_stop

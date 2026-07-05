@@ -70,19 +70,25 @@ for name, drivers, filtered in [
 ]:
     if not has(drivers, "u_key7.out"):
         raise SystemExit(f"{name} missing keyword driver through bus[7]: {drivers}")
+    if has(drivers, "u_key8.out"):
+        raise SystemExit(f"{name} leaked sibling bus[8] keyword driver: {drivers}")
     if has(drivers, "Const:"):
         raise SystemExit(f"{name} leaked sibling bus constants: {drivers}")
     if not filtered:
         raise SystemExit(f"{name} should be keyword-filtered: {filtered}")
+    if has(filtered, "u_key8.out"):
+        raise SystemExit(f"{name} filtered output leaked sibling keyword: {filtered}")
     if has(filtered, "Const:"):
         raise SystemExit(f"{name} filtered output leaked const: {filtered}")
 
 if has(m1_drivers, "u_key7.out"):
     raise SystemExit(f"m1 incorrectly includes bus[7] keyword driver: {m1_drivers}")
-if not has(m1_drivers, "Const:1'b"):
-    raise SystemExit(f"m1 should report projected constant from bus[8]: {m1_drivers}")
-if m1_filtered:
-    raise SystemExit(f"m1 should not be keyword-filtered: {m1_filtered}")
+if not has(m1_drivers, "u_key8.out"):
+    raise SystemExit(f"m1 should report bus[8] keyword driver: {m1_drivers}")
+if has(m1_drivers, "Const:"):
+    raise SystemExit(f"m1 leaked sibling constants while tracing bus[8]: {m1_drivers}")
+if not m1_filtered:
+    raise SystemExit(f"m1 should be keyword-filtered through bus[8]: {m1_filtered}")
 
 log_text = Path("scalar_bit_conn_trace.log").read_text(errors="replace")
 for token in [

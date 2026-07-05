@@ -81,10 +81,13 @@ UI_FONT_CANDIDATES = [
     "Aptos",
     "Segoe UI",
     "Inter",
+    "DejaVu Sans",
+    "Noto Sans",
+    "Liberation Sans",
+    "Nimbus Sans",
+    "Arial",
     "Helvetica Neue",
     "Helvetica",
-    "Arial",
-    "DejaVu Sans",
 ]
 
 MONO_FONT_CANDIDATES = [
@@ -95,6 +98,14 @@ MONO_FONT_CANDIDATES = [
     "DejaVu Sans Mono",
     "Courier New",
 ]
+
+GUI_TK_SCALING = 1.0
+UI_FONT_SIZE = -12
+UI_FONT_SIZE_SMALL = -11
+UI_FONT_SIZE_TITLE = -14
+UI_FONT_SIZE_HERO = -16
+UI_FONT_SIZE_LOGO = -24
+UI_FONT_SIZE_MONO = -12
 
 
 def split_list_text(text: str) -> List[str]:
@@ -133,22 +144,30 @@ def _preferred_font_family(root, candidates: List[str], fallback_name: str = "Tk
         return candidates[-1]
 
 
+def configure_gui_pixel_scaling(root) -> None:
+    try:
+        root.tk.call("tk", "scaling", GUI_TK_SCALING)
+    except Exception:
+        pass
+
+
 def configure_commercial_theme(root, ttk) -> Tuple[str, str]:
     from tkinter import font as tkfont
 
+    configure_gui_pixel_scaling(root)
     ui_family = _preferred_font_family(root, UI_FONT_CANDIDATES)
     mono_family = _preferred_font_family(root, MONO_FONT_CANDIDATES, "TkFixedFont")
 
     font_specs = {
-        "TkDefaultFont": (ui_family, 10, "normal"),
-        "TkTextFont": (ui_family, 10, "normal"),
-        "TkMenuFont": (ui_family, 10, "normal"),
-        "TkHeadingFont": (ui_family, 10, "bold"),
-        "TkCaptionFont": (ui_family, 10, "normal"),
-        "TkSmallCaptionFont": (ui_family, 9, "normal"),
-        "TkIconFont": (ui_family, 10, "normal"),
-        "TkTooltipFont": (ui_family, 9, "normal"),
-        "TkFixedFont": (mono_family, 10, "normal"),
+        "TkDefaultFont": (ui_family, UI_FONT_SIZE, "normal"),
+        "TkTextFont": (ui_family, UI_FONT_SIZE, "normal"),
+        "TkMenuFont": (ui_family, UI_FONT_SIZE, "normal"),
+        "TkHeadingFont": (ui_family, UI_FONT_SIZE, "bold"),
+        "TkCaptionFont": (ui_family, UI_FONT_SIZE, "normal"),
+        "TkSmallCaptionFont": (ui_family, UI_FONT_SIZE_SMALL, "normal"),
+        "TkIconFont": (ui_family, UI_FONT_SIZE, "normal"),
+        "TkTooltipFont": (ui_family, UI_FONT_SIZE_SMALL, "normal"),
+        "TkFixedFont": (mono_family, UI_FONT_SIZE_MONO, "normal"),
     }
     for font_name, (family, size, weight) in font_specs.items():
         try:
@@ -163,22 +182,22 @@ def configure_commercial_theme(root, ttk) -> Tuple[str, str]:
     except Exception:
         pass
 
-    style.configure(".", font=(ui_family, 10), foreground=THEME["text"])
+    style.configure(".", font=(ui_family, UI_FONT_SIZE), foreground=THEME["text"])
     style.configure("App.TFrame", background=THEME["app_bg"])
     style.configure("Card.TFrame", background=THEME["card_bg"])
     style.configure("TFrame", background=THEME["app_bg"])
     style.configure("TLabel", background=THEME["app_bg"], foreground=THEME["text"])
     style.configure("App.TLabel", background=THEME["app_bg"], foreground=THEME["text"])
-    style.configure("Field.TLabel", background=THEME["card_bg"], foreground=THEME["text"])
-    style.configure("Muted.TLabel", background=THEME["app_bg"], foreground=THEME["muted"], font=(ui_family, 9))
-    style.configure("Hero.TLabel", background=THEME["app_bg"], foreground=THEME["text"], font=(ui_family, 18, "bold"))
-    style.configure("Brand.TLabel", background=THEME["app_bg"], foreground=THEME["accent_hover"], font=(ui_family, 9, "bold"))
-    style.configure("SectionTitle.TLabel", background=THEME["card_bg"], foreground=THEME["text"], font=(ui_family, 11, "bold"))
+    style.configure("Field.TLabel", background=THEME["card_bg"], foreground=THEME["muted"], font=(ui_family, UI_FONT_SIZE_SMALL, "bold"))
+    style.configure("Muted.TLabel", background=THEME["app_bg"], foreground=THEME["muted"], font=(ui_family, UI_FONT_SIZE_SMALL))
+    style.configure("Hero.TLabel", background=THEME["app_bg"], foreground=THEME["text"], font=(ui_family, UI_FONT_SIZE_TITLE, "bold"))
+    style.configure("Brand.TLabel", background=THEME["app_bg"], foreground=THEME["accent_hover"], font=(ui_family, UI_FONT_SIZE_SMALL, "bold"))
+    style.configure("SectionTitle.TLabel", background=THEME["card_bg"], foreground=THEME["text"], font=(ui_family, UI_FONT_SIZE, "bold"))
     style.configure(
         "Pill.TLabel",
         background=THEME["accent_soft"],
         foreground=THEME["accent_hover"],
-        font=(ui_family, 9, "bold"),
+        font=(ui_family, UI_FONT_SIZE_SMALL, "bold"),
         padding=(10, 4),
     )
     style.configure(
@@ -194,7 +213,7 @@ def configure_commercial_theme(root, ttk) -> Tuple[str, str]:
         "Section.TLabelframe.Label",
         background=THEME["app_bg"],
         foreground=THEME["text"],
-        font=(ui_family, 10, "bold"),
+        font=(ui_family, UI_FONT_SIZE, "bold"),
     )
     style.configure(
         "TEntry",
@@ -230,7 +249,7 @@ def configure_commercial_theme(root, ttk) -> Tuple[str, str]:
         lightcolor=THEME["border"],
         darkcolor=THEME["border"],
         padding=(12, 7),
-        font=(ui_family, 10, "bold"),
+        font=(ui_family, UI_FONT_SIZE, "bold"),
     )
     style.map(
         "TButton",
@@ -264,7 +283,7 @@ def configure_commercial_theme(root, ttk) -> Tuple[str, str]:
         background=[("active", THEME["danger_hover"]), ("pressed", THEME["danger_hover"]), ("disabled", "#d8c5b7")],
         foreground=[("disabled", "#fff8f2")],
     )
-    style.configure("Field.TCheckbutton", background=THEME["card_bg"], foreground=THEME["text"])
+    style.configure("Field.TCheckbutton", background=THEME["card_bg"], foreground=THEME["text"], font=(ui_family, UI_FONT_SIZE))
     style.map(
         "Field.TCheckbutton",
         background=[("active", THEME["card_bg"])],
@@ -276,7 +295,7 @@ def configure_commercial_theme(root, ttk) -> Tuple[str, str]:
         background=THEME["app_bg"],
         foreground=THEME["muted"],
         padding=(16, 9),
-        font=(ui_family, 10, "bold"),
+        font=(ui_family, UI_FONT_SIZE, "bold"),
     )
     style.map(
         "TNotebook.Tab",
@@ -312,7 +331,7 @@ def configure_text_widget(widget, kind: str, mono_family: str, ui_family: str) -
             borderwidth=0,
             padx=10,
             pady=8,
-            font=(mono_family, 10),
+            font=(mono_family, UI_FONT_SIZE_MONO),
         )
         return
     if kind == "code":
@@ -326,7 +345,7 @@ def configure_text_widget(widget, kind: str, mono_family: str, ui_family: str) -
             borderwidth=0,
             padx=10,
             pady=8,
-            font=(mono_family, 10),
+            font=(mono_family, UI_FONT_SIZE_MONO),
         )
         return
     widget.configure(
@@ -339,7 +358,7 @@ def configure_text_widget(widget, kind: str, mono_family: str, ui_family: str) -
         borderwidth=0,
         padx=10,
         pady=8,
-        font=(ui_family, 10),
+        font=(ui_family, UI_FONT_SIZE),
     )
 
 
@@ -800,7 +819,7 @@ class RoundedToggle:
             text=self.text,
             anchor="w",
             fill=THEME["text"] if is_on else THEME["muted"],
-            font=(self.ui_family, 9, "bold" if is_on else "normal"),
+            font=(self.ui_family, UI_FONT_SIZE_SMALL, "bold" if is_on else "normal"),
         )
 
     def _enter(self, _event) -> None:
@@ -1323,7 +1342,7 @@ class ResultViewer:
                 justify="left",
                 background=THEME["card_bg"],
                 foreground=THEME["muted"],
-                font=(self.ui_family, 10),
+                font=(self.ui_family, UI_FONT_SIZE),
             ).grid(row=0, column=0, sticky="nsew")
             self._finish_text()
             self.status.set(f"{title}  rows: 0")
@@ -1368,8 +1387,8 @@ class ResultViewer:
         try:
             from tkinter import font as tkfont
 
-            body_font = tkfont.Font(family=self.ui_family, size=9)
-            header_font = tkfont.Font(family=self.ui_family, size=9, weight="bold")
+            body_font = tkfont.Font(family=self.ui_family, size=UI_FONT_SIZE_SMALL)
+            header_font = tkfont.Font(family=self.ui_family, size=UI_FONT_SIZE_SMALL, weight="bold")
             body_char_px = max(body_font.measure("0"), 7)
             header_char_px = max(header_font.measure("0"), body_char_px)
         except Exception:
@@ -1416,7 +1435,7 @@ class ResultViewer:
             background=THEME["table_header"] if is_header else (THEME["table_alt"] if alt_row else THEME["table_row"]),
             foreground=THEME["text"],
             highlightbackground=THEME["border"],
-            font=(self.ui_family, 9, "bold") if is_header else (self.ui_family, 9),
+            font=(self.ui_family, UI_FONT_SIZE_SMALL, "bold") if is_header else (self.ui_family, UI_FONT_SIZE_SMALL),
             width=text_chars,
             wraplength=max(80, column_width - 18),
         )
@@ -1505,6 +1524,15 @@ class TraceGui:
         self.root.title("Verdi NPI Port Trace GUI")
         self.root.geometry("1180x780")
         self.ui_family, self.mono_family = configure_commercial_theme(self.root, self.ttk)
+        try:
+            scaling = self.root.tk.call("tk", "scaling")
+        except Exception:
+            scaling = "unknown"
+        print(
+            f"[trace_gui] ui_font={self.ui_family} mono_font={self.mono_family} tk_scaling={scaling} "
+            f"ui_size={UI_FONT_SIZE} small_size={UI_FONT_SIZE_SMALL}",
+            file=sys.stderr,
+        )
         self.proc: Optional[subprocess.Popen] = None
         self.worker: Optional[threading.Thread] = None
         self.log_queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()

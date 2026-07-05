@@ -138,6 +138,7 @@ class PortSummary:
     actual_details: List[str] = field(default_factory=list)
     actual_seen: Set[str] = field(default_factory=set)
     actual_blocked_roles: Set[str] = field(default_factory=set)
+    matched_roles: Set[str] = field(default_factory=set)
 
     def observe(self, role: str, signal: str, matcher: "InstanceMatcher") -> None:
         self.seen = True
@@ -149,17 +150,22 @@ class PortSummary:
             matched = True
         if matched and relevant_endpoint:
             self.matched = True
+            self.mark_matched(role_text)
 
         if not self.port_dir:
             self.port_dir = "unknown"
 
         if signal_text.startswith("Const:") and relevant_endpoint:
+            if role_text in self.matched_roles:
+                return
             self.block_actual(role_text)
             self.add_detail(f"{role_text}={signal_text}")
         elif (
             signal_text in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"}
             or signal_text.startswith("ERROR:")
         ) and relevant_endpoint:
+            if role_text in self.matched_roles:
+                return
             self.block_actual(role_text)
             self.add_detail(f"{role_text}={signal_text}")
         elif not matched:
@@ -197,6 +203,22 @@ class PortSummary:
         self.actual_details = [
             detail for detail in self.actual_details
             if not detail.startswith(prefix)
+        ]
+        self.actual_seen = set(self.actual_details)
+
+    def mark_matched(self, role: str) -> None:
+        self.matched_roles.add(role)
+        prefixes = [f"{role}="]
+        label = "driver_actual" if role == "driver" else "loader_actual" if role == "load" else f"{role}_actual"
+        prefixes.append(f"{label}=")
+        self.details = [
+            detail for detail in self.details
+            if not any(detail.startswith(prefix) for prefix in prefixes)
+        ]
+        self.detail_seen = set(self.details)
+        self.actual_details = [
+            detail for detail in self.actual_details
+            if not any(detail.startswith(prefix) for prefix in prefixes)
         ]
         self.actual_seen = set(self.actual_details)
 

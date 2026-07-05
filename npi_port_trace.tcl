@@ -746,6 +746,18 @@ proc signal_selected_bits { signame } {
     return {}
 }
 
+proc effective_selected_bits_for_lhs { selected_bits leaf width_map } {
+    if { [llength $selected_bits] > 0 } {
+        return $selected_bits
+    }
+    if { $leaf ne "" &&
+         [dict exists $width_map $leaf] &&
+         [dict get $width_map $leaf] == 1 } {
+        return [list 0]
+    }
+    return {}
+}
+
 proc signal_select_suffix { signame } {
     set signame [normalize_signal_name $signame]
     if { [regexp {(\[[0-9]+(:[0-9]+)?\])$} $signame -> select] } {
@@ -1893,8 +1905,11 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
     if { $module eq "" } {
         set module [source_scope_module_name $prefix $srcfile]
     }
+    set width_map [build_signal_width_map_for_module $srcfile $module]
+    set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set sources {}
+    debug_step "source_module_port_driver_probe signal=$signame leaf=$leaf selected_bits=[join $selected_bits ,] prefix=$prefix srcfile=$srcfile module=$module"
     foreach inst [build_instantiation_stmt_list_for_module $srcfile $module] {
         set modname [lindex $inst 0]
         set instname [lindex $inst 1]
@@ -1994,6 +2009,8 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
     if { $module eq "" } {
         set module [source_scope_module_name $prefix $srcfile]
     }
+    set width_map [build_signal_width_map_for_module $srcfile $module]
+    set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set fanouts {}
     set inst_list [build_instantiation_stmt_list_for_module $srcfile $module]
@@ -2084,6 +2101,7 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set selected_bits [effective_selected_bits_for_lhs [signal_selected_bits $signame] $leaf $width_map]
 
     set fanouts {}
     set assign_list [build_assign_stmt_list_for_module $srcfile $module]
@@ -2112,7 +2130,7 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
         incr match_count
         debug_step "source_assign_load_match signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs simple=$is_simple concat=$is_concat"
 
-        if { $bit eq "" } {
+        if { $bit eq "" && [llength $selected_bits] == 0 } {
             if { $prefix ne "" } {
                 set candidate "${prefix}.${lhs_leaf}"
             } else {
@@ -2129,19 +2147,17 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
             continue
         }
 
-        set lhs_bits [rhs_lhs_bits_for_signal_bit $rhs $leaf $bit $width_map]
-        if { $prefix ne "" } {
-            set candidate "${prefix}.${lhs_leaf}"
+        set lhs_bits {}
+        if { [llength $selected_bits] > 0 } {
+            foreach target_bit $selected_bits {
+                foreach lhs_bit [rhs_lhs_bits_for_signal_bit $rhs $leaf $target_bit $width_map] {
+                    if { [lsearch -exact $lhs_bits $lhs_bit] < 0 } {
+                        lappend lhs_bits $lhs_bit
+                    }
+                }
+            }
         } else {
-            set candidate $lhs_leaf
-        }
-        incr candidate_count
-        set exists [source_signal_candidate_exists $candidate strict $srcfile]
-        debug_step "source_assign_load_candidate signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs candidate=$candidate exists=$exists lhs_bits=[join $lhs_bits ,]"
-        if { $exists } {
-            append_unique_signal fanouts $candidate
-        } else {
-            incr rejected_count
+            set lhs_bits [rhs_lhs_bits_for_signal_bit $rhs $leaf $bit $width_map]
         }
         if { [llength $lhs_bits] == 0 } {
             continue
@@ -2152,7 +2168,11 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
                 continue
             }
             set select ""
-            if { $lhs_bit ne "" } {
+            set lhs_width ""
+            if { [dict exists $width_map $lhs_leaf] } {
+                set lhs_width [dict get $width_map $lhs_leaf]
+            }
+            if { $lhs_bit ne "" && !($lhs_width ne "" && $lhs_width == 1 && $lhs_bit == 0) } {
                 set select "\[$lhs_bit\]"
             }
             if { $prefix ne "" } {
@@ -2552,6 +2572,7 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set sources {}
     foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
@@ -2658,6 +2679,7 @@ proc source_assign_driver_data_sources { sig_hdl signame {srcfile_hint ""} {scop
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set sources {}
     set found_restrictive_assign 0
@@ -2768,6 +2790,7 @@ proc source_assign_driver_combo_stop_expr { sig_hdl signame {srcfile_hint ""} {s
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     foreach assign [build_assign_stmt_list_for_module $srcfile $module] {
         set lhs_leaf [lindex $assign 0]
@@ -3202,7 +3225,7 @@ proc hdl_to_selected_name { hdl select } {
         return ""
     }
     if { [is_const_literal_name $signame] } {
-        if { $select ne "" && !$selected_by_hdl } {
+        if { $select ne "" } {
             set projected [project_const_literal_to_select $signame $select]
             if { $projected ne "" } {
                 return $projected
@@ -3210,7 +3233,10 @@ proc hdl_to_selected_name { hdl select } {
         }
         return $signame
     }
-    if { $select ne "" && !$selected_by_hdl } {
+    if { $select ne "" } {
+        if { $selected_by_hdl && [llength [signal_selected_bits $signame]] > 0 } {
+            return [normalize_signal_name $signame]
+        }
         return [apply_signal_select $signame $select]
     }
     return [normalize_signal_name $signame]
@@ -3317,6 +3343,13 @@ proc collect_conn_module_ports_by_name { signame role all_var module_var } {
 
     set base [strip_signal_selects [normalize_signal_name $signame]]
     if { $base ne $signame } {
+        # Do not query the whole vector for an explicit bit-select. That can
+        # pull in module ports connected to sibling bits and contaminate a
+        # 1-bit trace with unrelated Const/keyword endpoints.
+        if { [llength [signal_selected_bits $signame]] > 0 } {
+            debug_step "module_conn_base_query_skip signal=$signame base=$base role=$role reason=bit_select"
+            return
+        }
         collect_conn_module_ports_for_query $base $role all_values module_values
     }
 }

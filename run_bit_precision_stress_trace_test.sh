@@ -33,7 +33,7 @@ echo "[bit_precision_stress] run raw NPI trace"
 ./npi_trace.sh \
   -module BPStressChild \
   -lib "$(pwd)/bit_precision_stress_trace_build/simv.daidir/kdb.elab++" \
-  -ports 'A[7],A[6],one_bit_from_bus,ternary_stop,Y' \
+  -ports 'A[7],A[6],one_bit_from_bus,ternary_stop,Y,Y[7],Y[13]' \
   -module-out BPStressChild_module_connections.csv \
   -const-source-fallback 1 \
   -const-trace-depth 10 \
@@ -50,7 +50,7 @@ echo "[bit_precision_stress] run trace/filter"
   -module BPStressChild \
   -lib "$(pwd)/bit_precision_stress_trace_build/simv.daidir/kdb.elab++" \
   -keywords BPStressKeySrc,BPStressKeySink,BPStressRegSink \
-  -ports 'A[7],A[6],one_bit_from_bus,ternary_stop,Y' \
+  -ports 'A[7],A[6],one_bit_from_bus,ternary_stop,Y,Y[7],Y[13]' \
   -output bit_precision_stress_filtered.csv \
   --keyword-batch-size 1 \
   -const-source-fallback 1 \
@@ -79,12 +79,16 @@ a6_drivers = signals(full_rows, "A[6]", "driver")
 one_bit_drivers = signals(full_rows, "one_bit_from_bus", "driver")
 ternary_drivers = signals(full_rows, "ternary_stop", "driver")
 y_loads = signals(full_rows, "Y", "load")
+y7_loads = signals(full_rows, "Y[7]", "load")
+y13_loads = signals(full_rows, "Y[13]", "load")
 
 a7_filtered = signals(filtered_rows, "A[7]", "driver")
 a6_filtered = signals(filtered_rows, "A[6]", "driver")
 one_bit_filtered = signals(filtered_rows, "one_bit_from_bus", "driver")
 ternary_filtered = signals(filtered_rows, "ternary_stop", "driver")
 y_filtered_loads = signals(filtered_rows, "Y", "load")
+y7_filtered_loads = signals(filtered_rows, "Y[7]", "load")
+y13_filtered_loads = signals(filtered_rows, "Y[13]", "load")
 
 if not has(a7_drivers, "u_key7.out"):
     raise SystemExit(f"A[7] missing keyword driver: {a7_drivers}")
@@ -120,6 +124,20 @@ if not (has(y_loads, "u_sink_low.in") or has(y_loads, "u_reg_high.in")):
     raise SystemExit(f"Y loads missing sliced fanout endpoints: {y_loads}")
 if not y_filtered_loads:
     raise SystemExit(f"Y should have keyword/reg loader matches: {y_filtered_loads}")
+
+if not has(y7_loads, "u_sink_low.in"):
+    raise SystemExit(f"Y[7] missing low-slice loader: {y7_loads}")
+if has(y7_loads, "u_reg_high.in"):
+    raise SystemExit(f"Y[7] leaked sibling high-slice loader: {y7_loads}")
+if not y7_filtered_loads or has(y7_filtered_loads, "u_reg_high.in"):
+    raise SystemExit(f"Y[7] filtered loader should only match low-slice keyword: {y7_filtered_loads}")
+
+if not has(y13_loads, "u_reg_high.in"):
+    raise SystemExit(f"Y[13] missing high-slice reg loader: {y13_loads}")
+if has(y13_loads, "u_sink_low.in"):
+    raise SystemExit(f"Y[13] leaked sibling low-slice loader: {y13_loads}")
+if not y13_filtered_loads or has(y13_filtered_loads, "u_sink_low.in"):
+    raise SystemExit(f"Y[13] filtered loader should only match high-slice reg keyword: {y13_filtered_loads}")
 
 log_text = Path("bit_precision_stress_trace.log").read_text(errors="replace")
 required_log_tokens = [

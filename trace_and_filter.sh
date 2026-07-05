@@ -54,6 +54,7 @@ ASSIGN_TRACE_DEPTH="${NPI_ASSIGN_TRACE_MAX_DEPTH:-2}"
 ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
 LOG_FILE=""
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -165,6 +166,7 @@ log_step "const_trace_depth=$CONST_TRACE_DEPTH"
 log_step "assign_trace_depth=$ASSIGN_TRACE_DEPTH"
 log_step "assign_expr_trace_depth=$ASSIGN_EXPR_TRACE_DEPTH"
 log_step "trace_debug=$TRACE_DEBUG"
+log_step "python_bin=$PYTHON_BIN"
 log_step "boundary_filtered=$BOUNDARY_FILTERED"
 log_step "full_owner_filtered=$FULL_FILTERED"
 log_step "final_output=$OUTPUT"
@@ -201,7 +203,7 @@ MODULE_LINES=$(wc -l < "$MODULE_TRACE")
 log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$MODULE_LINES"
 
 log_step "step 2/5: find instances of filter module"
-FIND_CMD=(python3 "$SCRIPT_DIR/find_instances_batched.py"
+FIND_CMD=("$PYTHON_BIN" "$SCRIPT_DIR/find_instances_batched.py"
     -lib "$LIB"
     -keywords "$KEYWORDS"
     -output "$INSTANCE_LIST"
@@ -225,16 +227,16 @@ fi
 INSTANCE_COUNT=$(wc -l < "$INSTANCE_LIST")
 log_step "found_filter_instances=$INSTANCE_COUNT"
 log_step "step 3/5: filter module-boundary rows by filter-module ownership"
-log_step "command: python3 $SCRIPT_DIR/filter_trace.py $MODULE_TRACE $BOUNDARY_FILTERED --instances $INSTANCE_LIST --normalize-signal-column"
-python3 "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column
+log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py $MODULE_TRACE $BOUNDARY_FILTERED --instances $INSTANCE_LIST --normalize-signal-column"
+"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column
 
 log_step "step 4/5: filter full-trace rows by filter-module ownership"
-log_step "command: python3 $SCRIPT_DIR/filter_trace.py $FULL_TRACE $FULL_FILTERED --instances $INSTANCE_LIST"
-python3 "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$FULL_FILTERED" --instances "$INSTANCE_LIST"
+log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py $FULL_TRACE $FULL_FILTERED --instances $INSTANCE_LIST"
+"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$FULL_FILTERED" --instances "$INSTANCE_LIST"
 
 log_step "step 5/5: merge filtered outputs and split by traced target instance when needed"
-log_step "command: python3 $SCRIPT_DIR/filter_trace.py - $OUTPUT --merge $BOUNDARY_FILTERED $FULL_FILTERED --split-by-trace-instance"
-python3 "$SCRIPT_DIR/filter_trace.py" - "$OUTPUT" --merge "$BOUNDARY_FILTERED" "$FULL_FILTERED" --split-by-trace-instance
+log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py - $OUTPUT --merge $BOUNDARY_FILTERED $FULL_FILTERED --split-by-trace-instance"
+"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" - "$OUTPUT" --merge "$BOUNDARY_FILTERED" "$FULL_FILTERED" --split-by-trace-instance
 
 FINAL_LINES=$(wc -l < "$OUTPUT")
 log_step "done final_output=$OUTPUT final_lines=$FINAL_LINES"

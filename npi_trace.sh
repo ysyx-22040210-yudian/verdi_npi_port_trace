@@ -6,6 +6,9 @@
 #                  [-module-out <module_connections.csv>]
 #                  [-const-source-fallback 0|1] [-const-trace-depth <N>]
 #                  [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
+#                  [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>]
+#                  [-load-trace-api-list-limit <N>]
+#                  [-verdi-timeout-sec <N>]
 #                  [-trace-debug 0|1] [-log-file <run.log>]
 #
 # Note: -srcfile parameter is now optional (deprecated). Port direction is obtained via NPI API.
@@ -45,6 +48,10 @@ CONST_SOURCE_FALLBACK="${NPI_CONST_SOURCE_FALLBACK:-1}"
 CONST_TRACE_DEPTH="${NPI_CONST_TRACE_MAX_DEPTH:-16}"
 ASSIGN_TRACE_DEPTH="${NPI_ASSIGN_TRACE_MAX_DEPTH:-2}"
 ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
+LOAD_TRACE_NODE_LIMIT="${NPI_LOAD_TRACE_NODE_LIMIT:-20000}"
+LOAD_TRACE_EDGE_LIMIT="${NPI_LOAD_TRACE_EDGE_LIMIT:-100000}"
+LOAD_TRACE_API_LIST_LIMIT="${NPI_LOAD_TRACE_API_LIST_LIMIT:-20000}"
+VERDI_TIMEOUT_SEC="${NPI_VERDI_TIMEOUT_SEC:-0}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
 LOG_FILE=""
 
@@ -62,6 +69,10 @@ while [ $# -gt 0 ]; do
         -const-trace-depth|--const-trace-depth) CONST_TRACE_DEPTH="$2"; shift 2 ;;
         -assign-trace-depth|--assign-trace-depth) ASSIGN_TRACE_DEPTH="$2"; shift 2 ;;
         -assign-expr-trace-depth|--assign-expr-trace-depth) ASSIGN_EXPR_TRACE_DEPTH="$2"; shift 2 ;;
+        -load-trace-node-limit|--load-trace-node-limit) LOAD_TRACE_NODE_LIMIT="$2"; shift 2 ;;
+        -load-trace-edge-limit|--load-trace-edge-limit) LOAD_TRACE_EDGE_LIMIT="$2"; shift 2 ;;
+        -load-trace-api-list-limit|--load-trace-api-list-limit) LOAD_TRACE_API_LIST_LIMIT="$2"; shift 2 ;;
+        -verdi-timeout-sec|--verdi-timeout-sec) VERDI_TIMEOUT_SEC="$2"; shift 2 ;;
         -trace-debug|--trace-debug) TRACE_DEBUG="$2"; shift 2 ;;
         -log-file|--log-file) LOG_FILE="$2"; shift 2 ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
@@ -76,7 +87,7 @@ if [ -z "$VERDI_HOME" ]; then
 fi
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-module-out <csv>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-module-out <csv>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>] [-load-trace-api-list-limit <N>] [-verdi-timeout-sec <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
     echo "  -srcfile is optional (deprecated, port direction is now obtained via NPI API)." >&2
     echo "  -module-out writes driver/load entries that stop at module boundaries." >&2
     exit 1
@@ -93,6 +104,18 @@ case "$ASSIGN_TRACE_DEPTH" in
 esac
 case "$ASSIGN_EXPR_TRACE_DEPTH" in
     ''|*[!0-9]*) echo "[ERROR] -assign-expr-trace-depth must be 0 or a positive integer, got: $ASSIGN_EXPR_TRACE_DEPTH" >&2; exit 1 ;;
+esac
+case "$LOAD_TRACE_NODE_LIMIT" in
+    ''|*[!0-9]*) echo "[ERROR] -load-trace-node-limit must be 0 or a positive integer, got: $LOAD_TRACE_NODE_LIMIT" >&2; exit 1 ;;
+esac
+case "$LOAD_TRACE_EDGE_LIMIT" in
+    ''|*[!0-9]*) echo "[ERROR] -load-trace-edge-limit must be 0 or a positive integer, got: $LOAD_TRACE_EDGE_LIMIT" >&2; exit 1 ;;
+esac
+case "$LOAD_TRACE_API_LIST_LIMIT" in
+    ''|*[!0-9]*) echo "[ERROR] -load-trace-api-list-limit must be 0 or a positive integer, got: $LOAD_TRACE_API_LIST_LIMIT" >&2; exit 1 ;;
+esac
+case "$VERDI_TIMEOUT_SEC" in
+    ''|*[!0-9]*) echo "[ERROR] -verdi-timeout-sec must be 0 or a positive integer, got: $VERDI_TIMEOUT_SEC" >&2; exit 1 ;;
 esac
 case "$TRACE_DEBUG" in
     0|1) ;;
@@ -139,6 +162,10 @@ log_step "const_source_fallback=$CONST_SOURCE_FALLBACK"
 log_step "const_trace_depth=$CONST_TRACE_DEPTH"
 log_step "assign_trace_depth=$ASSIGN_TRACE_DEPTH"
 log_step "assign_expr_trace_depth=$ASSIGN_EXPR_TRACE_DEPTH"
+log_step "load_trace_node_limit=$LOAD_TRACE_NODE_LIMIT"
+log_step "load_trace_edge_limit=$LOAD_TRACE_EDGE_LIMIT"
+log_step "load_trace_api_list_limit=$LOAD_TRACE_API_LIST_LIMIT"
+log_step "verdi_timeout_sec=$VERDI_TIMEOUT_SEC"
 log_step "trace_debug=$TRACE_DEBUG"
 
 export NPI_MODULE="$MODULE"
@@ -151,10 +178,31 @@ export NPI_CONST_SOURCE_FALLBACK="$CONST_SOURCE_FALLBACK"
 export NPI_CONST_TRACE_MAX_DEPTH="$CONST_TRACE_DEPTH"
 export NPI_ASSIGN_TRACE_MAX_DEPTH="$ASSIGN_TRACE_DEPTH"
 export NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH="$ASSIGN_EXPR_TRACE_DEPTH"
+export NPI_LOAD_TRACE_NODE_LIMIT="$LOAD_TRACE_NODE_LIMIT"
+export NPI_LOAD_TRACE_EDGE_LIMIT="$LOAD_TRACE_EDGE_LIMIT"
+export NPI_LOAD_TRACE_API_LIST_LIMIT="$LOAD_TRACE_API_LIST_LIMIT"
 export NPI_TRACE_DEBUG="$TRACE_DEBUG"
 
 log_step "running Verdi batch trace"
-verdi -batch -nologo -play "$TCL" 1>&2
+if [ "$VERDI_TIMEOUT_SEC" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
+    log_step "command: timeout ${VERDI_TIMEOUT_SEC}s verdi -batch -nologo -play $TCL"
+    timeout "${VERDI_TIMEOUT_SEC}s" verdi -batch -nologo -play "$TCL" 1>&2
+    verdi_rc=$?
+elif [ "$VERDI_TIMEOUT_SEC" -gt 0 ]; then
+    log_step "WARN: timeout command not found; running Verdi without wall-clock timeout"
+    verdi -batch -nologo -play "$TCL" 1>&2
+    verdi_rc=$?
+else
+    log_step "command: verdi -batch -nologo -play $TCL"
+    verdi -batch -nologo -play "$TCL" 1>&2
+    verdi_rc=$?
+fi
+log_step "verdi_exit_code=$verdi_rc"
+if [ "$VERDI_TIMEOUT_SEC" -gt 0 ] && { [ "$verdi_rc" -eq 124 ] || [ "$verdi_rc" -eq 137 ]; }; then
+    echo "[ERROR] Verdi trace timed out after ${VERDI_TIMEOUT_SEC}s" >&2
+    rm -f "$TMPOUT"
+    exit "$verdi_rc"
+fi
 
 if [ ! -s "$TMPOUT" ]; then
     echo "[ERROR] no output generated" >&2

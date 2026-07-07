@@ -261,6 +261,10 @@ A[7]
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 module port 回溯常数 tie 的最大深度。用于 `Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0` 这类场景。`0` 表示关闭递归回溯。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 当 NPI trace 停在普通透传 net 时继续沿同方向追踪的最大深度，例如 driver 方向 `assign B = A`，loader 方向 `assign B0 = A[10:0]`、`assign B1 = A[20:11]`。这类单信号/切片连接不视为组合逻辑，`0` 表示关闭。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 当 driver / loader 方向遇到允许展开的连续赋值表达式 endpoint 时继续展开的次数，例如 driver 方向 `assign A = {b0, b1}`，loader 方向 `assign B = {C, A, D}`。用于限制拼接表达式递归扩散，`0` 表示关闭。 |
+| `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个目标端口 loader 递归最多访问多少个信号节点。超过后停止该端口 loader 追踪，并在 CSV/XLSX 中写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
+| `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个目标端口 loader 递归最多展开多少条连接边。用于限制超宽 fanout 或跨层 alias 环导致的指数级扩散。超过后写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
+| `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表最多消费多少个 handle。大 fanout net 返回过大列表时会截断并写入 `TRACE_LIMIT_REACHED:*`，避免单次 API 结果拖垮脚本。`0` 表示关闭该保护。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 `verdi -batch -nologo -play npi_port_trace.tcl` 的墙钟超时秒数。`0` 表示不启用超时；大项目建议设置成可接受的上限，例如 `7200`。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开后，NPI/source fallback 会打印更详细的递归、module port high-side、源码上下文、assign fanout 匹配和 skip 原因。用于定位 `a -> b -> c -> assign B/C -> keywords/RegCombo` 这类 trace 断点；大项目常规运行建议关闭。 |
 | `stream` | `stream` | `--stream` | `true` | 启用流式聚合反标。Python 端边读 CSV 边聚合，配合匹配缓存降低大项目运行内存压力。大项目建议打开。 |
 | `no params` | `no_params` | `--no-params` | `false` | 跳过 module parameter 采集。打开后 parameter 列通常显示 `PARAM_SKIPPED`，端口反标仍继续。若大项目 parameter 采集阶段不稳定，可先打开此项。 |
@@ -289,6 +293,10 @@ A[7]
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 的继续追踪深度，例如 `assign B=A`、`assign B0=A[10:0]`。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | driver/load 方向拼接表达式 endpoint 的继续展开次数，例如 `assign A={b0,b1}`、`assign B={C,A,D}`。 |
+| `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个端口 loader 递归节点上限，超过后结果中出现 `TRACE_LIMIT_REACHED:*`。 |
+| `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个端口 loader 连接展开上限，用于限制大 fanout 或环路扩散。 |
+| `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表消费上限，防止一个超宽 net 一次返回过多 handle。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次底层 Verdi trace 进程超时秒数，`0` 表示不限制。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 NPI/source fallback 详细诊断日志。常规运行关闭，定位 trace 断点时打开。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 | `keyword continue on error` | `keyword_continue_on_error` | `--keyword-continue-on-error` | `false` | 单个 keyword 实例搜索失败时是否继续。 |
@@ -332,6 +340,10 @@ CSV 模式常见输出：
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 继续追踪深度。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 拼接表达式 assign endpoint 继续展开次数。 |
+| `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个端口 loader 递归节点上限。 |
+| `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个端口 loader 连接展开上限。 |
+| `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表消费上限。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 Verdi trace 进程超时秒数。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 Raw Trace 的详细诊断日志，用于定位 module port 跨层、源码上下文和 assign fanout 是否成功。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 
@@ -396,6 +408,10 @@ CSV 模式常见输出：
 | `const_trace_depth` | `const trace depth` | string/integer | `16` | 多层父 port 常数回溯深度。 |
 | `assign_trace_depth` | `assign trace depth` | string/integer | `2` | 普通透传/单信号切片 assign 继续追踪深度。 |
 | `assign_expr_trace_depth` | `assign expr depth` | string/integer | `1` | 拼接表达式 assign endpoint 继续展开次数。 |
+| `load_trace_node_limit` | `load node limit` | string/integer | `20000` | 单个端口 loader 递归节点上限，`0` 表示关闭。 |
+| `load_trace_edge_limit` | `load edge limit` | string/integer | `100000` | 单个端口 loader 连接展开上限，`0` 表示关闭。 |
+| `load_trace_api_list_limit` | `load api list limit` | string/integer | `20000` | 单次 NPI loader API 返回列表消费上限，`0` 表示关闭。 |
+| `verdi_timeout_sec` | `Verdi timeout sec` | string/integer | `0` | 单次 Verdi trace 进程超时秒数，`0` 表示不启用。 |
 | `trace_debug` | `trace debug` | boolean | `false` | 是否打开 trace 详细诊断日志。打开后日志会包含 `DEBUG collect_load_rec_enter`、`DEBUG source_module_port_load_probe`、`DEBUG source_assign_load_probe`、`DEBUG source_assign_load_empty` 等信息。 |
 | `csv_output` | `output csv` | string | 空 | CSV Filter 输出路径。仅 CSV 模式使用。 |
 | `raw_full_output` | `full trace csv` | string | 空 | Raw Trace 完整 CSV 输出路径。仅 Raw 模式使用。 |
@@ -434,6 +450,10 @@ Load Config -> trace_gui_demo_xlsx.json -> Generate Command -> Run
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
+  -load-trace-node-limit 5000 \
+  -load-trace-edge-limit 20000 \
+  -load-trace-api-list-limit 5000 \
+  -verdi-timeout-sec 7200 \
   --match-cache-size 200000 \
   --keyword-batch-size 1
 ```
@@ -468,6 +488,10 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
+  -load-trace-node-limit 5000 \
+  -load-trace-edge-limit 20000 \
+  -load-trace-api-list-limit 5000 \
+  -verdi-timeout-sec 7200 \
   -trace-debug 0 \
   -log-file annotate_run.log
 ```
@@ -486,6 +510,10 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
+  -load-trace-node-limit 5000 \
+  -load-trace-edge-limit 20000 \
+  -load-trace-api-list-limit 5000 \
+  -verdi-timeout-sec 7200 \
   -trace-debug 0 \
   -log-file filter_run.log
 ```
@@ -502,6 +530,10 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
   -assign-expr-trace-depth 1 \
+  -load-trace-node-limit 5000 \
+  -load-trace-edge-limit 20000 \
+  -load-trace-api-list-limit 5000 \
+  -verdi-timeout-sec 7200 \
   -trace-debug 1 \
   -log-file raw_trace_run.log \
   > target_full.csv
@@ -523,6 +555,10 @@ export NPI_CONST_SOURCE_FALLBACK=0
 export NPI_CONST_TRACE_MAX_DEPTH=4
 export NPI_ASSIGN_TRACE_MAX_DEPTH=2
 export NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH=1
+export NPI_LOAD_TRACE_NODE_LIMIT=5000
+export NPI_LOAD_TRACE_EDGE_LIMIT=20000
+export NPI_LOAD_TRACE_API_LIST_LIMIT=5000
+export NPI_VERDI_TIMEOUT_SEC=7200
 export NPI_TRACE_DEBUG=1
 
 verdi -batch -nologo -play ./npi_port_trace.tcl 2>&1 | tee npi_port_trace_debug.log
@@ -542,6 +578,10 @@ verdi -batch -nologo -play ./npi_port_trace.tcl 2>&1 | tee npi_port_trace_debug.
   -const-trace-depth 8 \
   -assign-trace-depth 30 \
   -assign-expr-trace-depth 10 \
+  -load-trace-node-limit 50000 \
+  -load-trace-edge-limit 200000 \
+  -load-trace-api-list-limit 50000 \
+  -verdi-timeout-sec 7200 \
   -trace-debug 1 \
   > debug_child_full.csv \
   2> debug_child_trace.log
@@ -630,7 +670,11 @@ verdi -batch -nologo -play ./npi_find_module_params.tcl 2>&1 | tee npi_find_para
   -const-source-fallback 0 \
   -const-trace-depth 4 \
   -assign-trace-depth 2 \
-  -assign-expr-trace-depth 1
+  -assign-expr-trace-depth 1 \
+  -load-trace-node-limit 5000 \
+  -load-trace-edge-limit 20000 \
+  -load-trace-api-list-limit 5000 \
+  -verdi-timeout-sec 7200
 ```
 
 建议：
@@ -641,7 +685,38 @@ verdi -batch -nologo -play ./npi_find_module_params.tcl 2>&1 | tee npi_find_para
 - `-const-source-fallback 0` 可避免读取和解析大量源码文件。
 - `-const-trace-depth 4` 先小深度验证流程，再按需要增大。
 - `-assign-trace-depth 2` 和 `-assign-expr-trace-depth 1` 先保守开启，避免复杂 assign 网络无限扩散。
+- `-load-trace-node-limit 5000`、`-load-trace-edge-limit 20000` 和 `-load-trace-api-list-limit 5000` 用来限制单个端口 loader 追踪的递归节点数、展开边数和单次 NPI 返回列表大小。超大工程先用较小值保命；如果结果中出现 `TRACE_LIMIT_REACHED:*`，再针对目标端口逐步调大。
+- `-verdi-timeout-sec 7200` 是 Verdi 进程级保险。超时会报错退出，不会把半截 CSV 当成完整结果。
 - 若 parameter 采集阶段不稳定，可先开 `--no-params` 确认端口反标流程。
+
+### Loader trace 跑不完怎么办
+
+loader 方向最容易在超大项目里跑成几天不结束，常见原因是：
+
+- 某个 output 端口连到父层大 fanout net，NPI 一次返回成千上万个 load handle。
+- 普通 assign、module port high-side 和源码 fallback 交替展开，遇到跨层 alias 环。
+- `-assign-trace-depth` 或 `-assign-expr-trace-depth` 设得过大，loader fanout 呈指数级扩散。
+
+工具默认已经启用三层保护：`load node limit=20000`、`load edge limit=100000`、`load api list limit=20000`。触发保护时不会继续死跑，会在日志中打印：
+
+```text
+TRACE_LIMIT_REACHED role=load reason=...
+```
+
+并在 full CSV、过滤 CSV 或 XLSX 单元格中写入类似：
+
+```text
+TRACE_LIMIT_REACHED:node_limit_5000
+TRACE_LIMIT_REACHED:edge_limit_20000
+TRACE_LIMIT_REACHED:api_list_limit_npi_nl_trace_load_passMod1_5000
+```
+
+过滤 CSV 会保留 `TRACE_LIMIT_REACHED:*` 行，即使该行不属于任何 `-keywords` 实例；这样最终结果不会把“未追完”误显示成“没有命中”。这表示该端口的 loader 结果被保护机制截断，不能当作完整 `no` 结论。定位时建议：
+
+1. 保持 `-trace-debug 0`，先用小限制跑完全局。
+2. 找到出现 `TRACE_LIMIT_REACHED:*` 的 module/port。
+3. 只对该 module/port 单独 Raw Trace，打开 `-trace-debug 1` 和 `-log-file`。
+4. 根据日志里的 `reason` 调整对应限制，或者降低 `-assign-trace-depth` / `-assign-expr-trace-depth`。
 
 ## 常数 driver 检测
 

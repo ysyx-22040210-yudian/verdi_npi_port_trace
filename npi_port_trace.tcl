@@ -188,6 +188,35 @@ if { [info exists env(NPI_TRACE_DEBUG)] && $env(NPI_TRACE_DEBUG) ne "" } {
 }
 log_step "trace_debug=$trace_debug_enabled"
 
+set load_trace_node_limit 20000
+if { [info exists env(NPI_LOAD_TRACE_NODE_LIMIT)] && $env(NPI_LOAD_TRACE_NODE_LIMIT) ne "" } {
+    if { [string is integer -strict $env(NPI_LOAD_TRACE_NODE_LIMIT)] && $env(NPI_LOAD_TRACE_NODE_LIMIT) >= 0 } {
+        set load_trace_node_limit $env(NPI_LOAD_TRACE_NODE_LIMIT)
+    }
+}
+log_step "load_trace_node_limit=$load_trace_node_limit"
+
+set load_trace_edge_limit 100000
+if { [info exists env(NPI_LOAD_TRACE_EDGE_LIMIT)] && $env(NPI_LOAD_TRACE_EDGE_LIMIT) ne "" } {
+    if { [string is integer -strict $env(NPI_LOAD_TRACE_EDGE_LIMIT)] && $env(NPI_LOAD_TRACE_EDGE_LIMIT) >= 0 } {
+        set load_trace_edge_limit $env(NPI_LOAD_TRACE_EDGE_LIMIT)
+    }
+}
+log_step "load_trace_edge_limit=$load_trace_edge_limit"
+
+set load_trace_api_list_limit 20000
+if { [info exists env(NPI_LOAD_TRACE_API_LIST_LIMIT)] && $env(NPI_LOAD_TRACE_API_LIST_LIMIT) ne "" } {
+    if { [string is integer -strict $env(NPI_LOAD_TRACE_API_LIST_LIMIT)] && $env(NPI_LOAD_TRACE_API_LIST_LIMIT) >= 0 } {
+        set load_trace_api_list_limit $env(NPI_LOAD_TRACE_API_LIST_LIMIT)
+    }
+}
+log_step "load_trace_api_list_limit=$load_trace_api_list_limit"
+
+set load_trace_node_count 0
+set load_trace_edge_count 0
+set load_trace_limit_hit 0
+set load_trace_limit_reason ""
+
 # Output file (written by shell via NPI_OUTFILE env var)
 if { [info exists env(NPI_OUTFILE)] && $env(NPI_OUTFILE) ne "" } {
     set outfh [open $env(NPI_OUTFILE) w]
@@ -3541,6 +3570,9 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    if { [load_trace_limited] } {
+        return
+    }
     if { $net_depth <= 0 && $expr_depth <= 0 } {
         debug_step "load_module_port_high_skip signal=$signame reason=depth_exhausted net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
         return
@@ -3552,8 +3584,14 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
         debug_step "load_module_port_high_empty signal=$signame query=$query_signame scope_hint=$scope_hint net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
     }
     foreach pair $pairs {
+        if { [load_trace_limited] } {
+            break
+        }
         set high_hdl [lindex $pair 0]
         set high_sig [lindex $pair 1]
+        if { ![load_trace_budget_mark_edge $signame $high_sig "module_port_high"] } {
+            break
+        }
         append_unique_signal all_loads $high_sig
         if { [is_module_boundary_signal $high_sig] } {
             append_unique_signal module_loads $high_sig
@@ -3639,6 +3677,88 @@ proc signal_seen_or_mark { visited_var signame } {
     }
     lappend visited $signame
     return 0
+}
+
+proc reset_load_trace_budget {} {
+    global load_trace_node_count load_trace_edge_count load_trace_limit_hit load_trace_limit_reason
+    set load_trace_node_count 0
+    set load_trace_edge_count 0
+    set load_trace_limit_hit 0
+    set load_trace_limit_reason ""
+}
+
+proc mark_load_trace_limit { reason } {
+    global load_trace_limit_hit load_trace_limit_reason
+    if { !$load_trace_limit_hit } {
+        set load_trace_limit_hit 1
+        set load_trace_limit_reason $reason
+        log_step "TRACE_LIMIT_REACHED role=load reason=$reason"
+    }
+    return 1
+}
+
+proc load_trace_limited {} {
+    global load_trace_limit_hit
+    return $load_trace_limit_hit
+}
+
+proc load_trace_limit_marker {} {
+    global load_trace_limit_hit load_trace_limit_reason
+    if { !$load_trace_limit_hit } {
+        return ""
+    }
+    if { $load_trace_limit_reason eq "" } {
+        return "TRACE_LIMIT_REACHED:load"
+    }
+    set reason $load_trace_limit_reason
+    regsub -all {[^A-Za-z0-9_./:=+-]} $reason "_" reason
+    return "TRACE_LIMIT_REACHED:$reason"
+}
+
+proc load_trace_budget_mark_node { signame } {
+    global load_trace_node_limit load_trace_node_count
+    if { [load_trace_limited] } {
+        return 0
+    }
+    if { $load_trace_node_limit > 0 && $load_trace_node_count >= $load_trace_node_limit } {
+        mark_load_trace_limit "node_limit_$load_trace_node_limit"
+        return 0
+    }
+    incr load_trace_node_count
+    if { $load_trace_node_count > 0 && $load_trace_node_count % 5000 == 0 } {
+        log_step "load_trace_progress nodes=$load_trace_node_count last=$signame"
+    }
+    return 1
+}
+
+proc load_trace_budget_mark_edge { from_sig to_sig source } {
+    global load_trace_edge_limit load_trace_edge_count
+    if { [load_trace_limited] } {
+        return 0
+    }
+    if { $load_trace_edge_limit > 0 && $load_trace_edge_count >= $load_trace_edge_limit } {
+        mark_load_trace_limit "edge_limit_$load_trace_edge_limit"
+        return 0
+    }
+    incr load_trace_edge_count
+    if { $load_trace_edge_count > 0 && $load_trace_edge_count % 20000 == 0 } {
+        log_step "load_trace_progress edges=$load_trace_edge_count source=$source from=$from_sig to=$to_sig"
+    }
+    return 1
+}
+
+proc load_trace_limited_list { values api signame } {
+    global load_trace_api_list_limit
+    if { $load_trace_api_list_limit <= 0 } {
+        return $values
+    }
+    set count [llength $values]
+    if { $count <= $load_trace_api_list_limit } {
+        return $values
+    }
+    mark_load_trace_limit "api_list_limit_${api}_${load_trace_api_list_limit}"
+    log_step "load_trace_api_list_truncated api=$api signal=$signame count=$count limit=$load_trace_api_list_limit"
+    return [lrange $values 0 [expr {$load_trace_api_list_limit - 1}]]
 }
 
 proc collect_drivers_by_name { signame all_drivers_var module_drivers_var {srcfile_hint ""} {scope_hint ""} {data_source_restrict {}} } {
@@ -3921,6 +4041,9 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    if { [load_trace_limited] } {
+        return
+    }
     set hdl_empty [expr {$hdl eq ""}]
     debug_step "collect_source_load_fanouts_enter signal=$signame net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint scope_hint=$scope_hint hdl_empty=$hdl_empty"
     if { $net_depth <= 0 && $expr_depth <= 0 } {
@@ -3931,6 +4054,9 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     set direct_fanouts {}
     if { $net_depth > 0 } {
         foreach port_sig [source_module_port_load_fanouts $srcfile_hint $signame $scope_hint] {
+            if { ![load_trace_budget_mark_edge $signame $port_sig "source_module_port_load"] } {
+                break
+            }
             append_unique_signal direct_fanouts $port_sig
             append_unique_signal all_loads $port_sig
             append_unique_signal module_loads $port_sig
@@ -3944,6 +4070,9 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
             collect_loads_by_name_rec $port_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint $next_scope_hint
         }
         foreach fanout_sig [source_assign_direct_load_fanouts $hdl $signame $srcfile_hint $scope_hint] {
+            if { ![load_trace_budget_mark_edge $signame $fanout_sig "source_assign_direct_load"] } {
+                break
+            }
             append_unique_signal direct_fanouts $fanout_sig
             append_unique_signal all_loads $fanout_sig
             set next_scope_hint [signal_scope_hint_after $fanout_sig $scope_hint]
@@ -3961,8 +4090,14 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     }
 
     foreach fanout_sig [source_assign_load_fanouts $hdl $signame $srcfile_hint $scope_hint] {
+        if { [load_trace_limited] } {
+            break
+        }
         if { [lsearch -exact $direct_fanouts $fanout_sig] >= 0 } {
             continue
+        }
+        if { ![load_trace_budget_mark_edge $signame $fanout_sig "source_assign_expr_load"] } {
+            break
         }
         append_unique_signal all_loads $fanout_sig
         set next_scope_hint [signal_scope_hint_after $fanout_sig $scope_hint]
@@ -3980,8 +4115,14 @@ proc append_load_hdl_endpoint { hdl from_sig all_loads_var module_loads_var net_
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    if { [load_trace_limited] } {
+        return
+    }
     set sig [hdl_to_name $hdl]
     if { $sig eq "" } {
+        return
+    }
+    if { ![load_trace_budget_mark_edge $from_sig $sig "hdl_endpoint"] } {
         return
     }
     append_unique_signal all_loads $sig
@@ -4000,10 +4141,14 @@ proc append_load_hdl_endpoint { hdl from_sig all_loads_var module_loads_var net_
 
     if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
         log_step "load_assign_continue from=$from_sig via=$sig remaining_net_depth=$net_depth"
-        collect_loads_by_name_rec $sig all_loads module_loads $next_net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
+        if { [load_trace_budget_mark_edge $sig $sig "hdl_assign_continue"] } {
+            collect_loads_by_name_rec $sig all_loads module_loads $next_net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
+        }
     } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
         log_step "load_assign_expr_continue from=$from_sig via=$sig remaining_expr_depth=$expr_depth"
-        collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited $next_srcfile_hint $next_scope_hint
+        if { [load_trace_budget_mark_edge $sig $sig "hdl_assign_expr_continue"] } {
+            collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] visited $next_srcfile_hint $next_scope_hint
+        }
     }
 
     collect_source_load_fanouts $hdl $sig all_loads module_loads $net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
@@ -4014,6 +4159,9 @@ proc collect_loads_by_hdl_fallback { hdl signame all_loads_var module_loads_var 
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    if { [load_trace_limited] } {
+        return
+    }
     if { $hdl eq "" || $hdl == 0 } {
         return
     }
@@ -4034,7 +4182,11 @@ proc collect_loads_by_hdl_fallback { hdl signame all_loads_var module_loads_var 
     if { [llength $loadList] > 0 } {
         debug_step "load_hdl_trace signal=$signame api=$used_api count=[llength $loadList]"
     }
+    set loadList [load_trace_limited_list $loadList $used_api $signame]
     foreach load_hdl $loadList {
+        if { [load_trace_limited] } {
+            break
+        }
         append_load_hdl_endpoint $load_hdl $signame all_loads module_loads $net_depth $expr_depth visited $srcfile_hint $scope_hint 1
     }
 
@@ -4056,7 +4208,11 @@ proc collect_loads_by_hdl_fallback { hdl signame all_loads_var module_loads_var 
     if { [llength $portList] > 0 } {
         debug_step "load_net_port_trace signal=$signame count=[llength $portList]"
     }
+    set portList [load_trace_limited_list $portList "npi_nl_net_2_port_instport" $signame]
     foreach port_hdl $portList {
+        if { [load_trace_limited] } {
+            break
+        }
         set port_sig [hdl_to_name $port_hdl]
         if { $port_sig eq "" } {
             continue
@@ -4075,6 +4231,9 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
     upvar 1 $module_loads_var module_loads
     upvar 1 $visited_var visited
 
+    if { [load_trace_limited] } {
+        return
+    }
     set signame [normalize_signal_name $signame]
     if { $signame eq "" || [is_const_literal_name $signame] } {
         debug_step "collect_load_rec_skip signal=$signame reason=empty_or_const"
@@ -4083,6 +4242,9 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
     set query_signame [scoped_signal_for_query $signame $scope_hint]
     if { [signal_seen_or_mark visited $query_signame] } {
         debug_step "collect_load_rec_skip signal=$signame reason=visited"
+        return
+    }
+    if { ![load_trace_budget_mark_node $query_signame] } {
         return
     }
     if { $srcfile_hint eq "" } {
@@ -4112,11 +4274,18 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
         log_step "load_assign_trace_error passMod=1 signal=$query_signame error=$err"
         set loadList {}
     }
+    set loadList [load_trace_limited_list $loadList "npi_nl_trace_load_passMod1" $query_signame]
 
     foreach hdl $loadList {
+        if { [load_trace_limited] } {
+            break
+        }
         set sig [hdl_to_name $hdl]
         if { $sig eq "" } {
             continue
+        }
+        if { ![load_trace_budget_mark_edge $query_signame $sig "npi_trace_load_passMod1"] } {
+            break
         }
         append_unique_signal all_loads $sig
         set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
@@ -4138,9 +4307,16 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
         log_step "load_assign_trace_error passMod=0 signal=$query_signame error=$err"
         set moduleLoadList {}
     }
+    set moduleLoadList [load_trace_limited_list $moduleLoadList "npi_nl_trace_load_passMod0" $query_signame]
     foreach hdl $moduleLoadList {
+        if { [load_trace_limited] } {
+            break
+        }
         set sig [hdl_to_name $hdl]
         if { [is_module_boundary_signal $sig] } {
+            if { ![load_trace_budget_mark_edge $query_signame $sig "npi_trace_load_module"] } {
+                break
+            }
             append_unique_signal module_loads $sig
             append_unique_signal all_loads $sig
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
@@ -4167,9 +4343,16 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
         log_step "load_assign_conn_error signal=$query_signame error=$err"
         set connLoadList {}
     }
+    set connLoadList [load_trace_limited_list $connLoadList "npi_nl_sig_2_mod_inst_conn" $query_signame]
     foreach hdl $connLoadList {
+        if { [load_trace_limited] } {
+            break
+        }
         set sig [hdl_to_name $hdl]
         if { [is_module_boundary_signal $sig] } {
+            if { ![load_trace_budget_mark_edge $query_signame $sig "npi_sig_2_mod_conn"] } {
+                break
+            }
             append_unique_signal module_loads $sig
             append_unique_signal all_loads $sig
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
@@ -4636,6 +4819,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         # Collect all loads
         set all_loads {}
         set module_loads {}
+        reset_load_trace_budget
         foreach sig_hdl $load_sigs {
             set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
             set signame [hdl_to_selected_name $sig_hdl $trace_select]
@@ -4670,11 +4854,18 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             # If string-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.
-            if { [llength $all_loads] == 0 } {
+            if { [llength $all_loads] == 0 && ![load_trace_limited] } {
                 set loadList {}
                 catch { ::npi_L1::npi_nl_trace_load_by_hdl $trace_sig_hdl loadList }
+                set loadList [load_trace_limited_list $loadList "npi_nl_trace_load_by_hdl_direct_fallback" $signame]
                 foreach hdl $loadList {
+                    if { [load_trace_limited] } {
+                        break
+                    }
                     set sig [hdl_to_name $hdl]
+                    if { ![load_trace_budget_mark_edge $signame $sig "direct_hdl_fallback"] } {
+                        break
+                    }
                     append_unique_signal all_loads $sig
                     set fallback_load_visited {}
                     set next_load_srcfile_hint [trace_source_hint_for_hdl $hdl $load_srcfile_hint]
@@ -4689,6 +4880,11 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                     }
                 }
             }
+        }
+        set load_limit_marker [load_trace_limit_marker]
+        if { $load_limit_marker ne "" } {
+            append_unique_signal all_loads $load_limit_marker
+            append_unique_signal module_loads $load_limit_marker
         }
 
         set filtered_drivers {}

@@ -155,7 +155,9 @@ class PortSummary:
         if not self.port_dir:
             self.port_dir = "unknown"
 
-        if signal_text.startswith("Const:") and relevant_endpoint:
+        if signal_text.startswith("TRACE_LIMIT_REACHED:") and relevant_endpoint:
+            self.add_detail(f"{role_text}={signal_text}")
+        elif signal_text.startswith("Const:") and relevant_endpoint:
             if role_text in self.matched_roles:
                 return
             self.block_actual(role_text)
@@ -1101,6 +1103,14 @@ def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tupl
             str(args.assign_trace_depth),
             "-assign-expr-trace-depth",
             str(args.assign_expr_trace_depth),
+            "-load-trace-node-limit",
+            str(args.load_trace_node_limit),
+            "-load-trace-edge-limit",
+            str(args.load_trace_edge_limit),
+            "-load-trace-api-list-limit",
+            str(args.load_trace_api_list_limit),
+            "-verdi-timeout-sec",
+            str(args.verdi_timeout_sec),
             "-trace-debug",
             str(args.trace_debug),
         ]
@@ -1332,6 +1342,47 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "-load-trace-node-limit",
+        "--load-trace-node-limit",
+        type=int,
+        default=20000,
+        help=(
+            "maximum recursive loader trace nodes per target port. "
+            "When reached, the CSV/XLSX result contains TRACE_LIMIT_REACHED instead of hanging. "
+            "Use 0 to disable this guard."
+        ),
+    )
+    parser.add_argument(
+        "-load-trace-edge-limit",
+        "--load-trace-edge-limit",
+        type=int,
+        default=100000,
+        help=(
+            "maximum recursive loader trace edges per target port. "
+            "This caps wide fanout expansion in large designs. Use 0 to disable this guard."
+        ),
+    )
+    parser.add_argument(
+        "-load-trace-api-list-limit",
+        "--load-trace-api-list-limit",
+        type=int,
+        default=20000,
+        help=(
+            "maximum number of handles consumed from one NPI loader API result list. "
+            "Large lists are truncated and marked with TRACE_LIMIT_REACHED. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "-verdi-timeout-sec",
+        "--verdi-timeout-sec",
+        type=int,
+        default=0,
+        help=(
+            "optional wall-clock timeout in seconds for each Verdi NPI trace process. "
+            "Use 0 to run without a timeout."
+        ),
+    )
+    parser.add_argument(
         "-trace-debug",
         "--trace-debug",
         type=int,
@@ -1396,6 +1447,14 @@ def parse_args():
         parser.error("-assign-trace-depth must be 0 or a positive integer.")
     if args.assign_expr_trace_depth < 0:
         parser.error("-assign-expr-trace-depth must be 0 or a positive integer.")
+    if args.load_trace_node_limit < 0:
+        parser.error("-load-trace-node-limit must be 0 or a positive integer.")
+    if args.load_trace_edge_limit < 0:
+        parser.error("-load-trace-edge-limit must be 0 or a positive integer.")
+    if args.load_trace_api_list_limit < 0:
+        parser.error("-load-trace-api-list-limit must be 0 or a positive integer.")
+    if args.verdi_timeout_sec < 0:
+        parser.error("-verdi-timeout-sec must be 0 or a positive integer.")
     return args
 
 
@@ -1444,6 +1503,10 @@ def main() -> None:
     log_step(f"const_trace_depth={args.const_trace_depth}")
     log_step(f"assign_trace_depth={args.assign_trace_depth}")
     log_step(f"assign_expr_trace_depth={args.assign_expr_trace_depth}")
+    log_step(f"load_trace_node_limit={args.load_trace_node_limit}")
+    log_step(f"load_trace_edge_limit={args.load_trace_edge_limit}")
+    log_step(f"load_trace_api_list_limit={args.load_trace_api_list_limit}")
+    log_step(f"verdi_timeout_sec={args.verdi_timeout_sec}")
 
     try:
         workbook, sheet = load_workbook(template, args.sheet)

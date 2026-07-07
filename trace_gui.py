@@ -44,6 +44,10 @@ DEFAULT_CONFIG = {
     "const_trace_depth": "16",
     "assign_trace_depth": "2",
     "assign_expr_trace_depth": "1",
+    "load_trace_node_limit": "20000",
+    "load_trace_edge_limit": "100000",
+    "load_trace_api_list_limit": "20000",
+    "verdi_timeout_sec": "0",
     "trace_debug": False,
     "csv_output": "",
     "raw_full_output": "",
@@ -1065,6 +1069,11 @@ def require(config: Dict[str, object], key: str, label: str) -> None:
         raise ValueError(f"{label} is required")
 
 
+def require_uint(value: str, label: str) -> None:
+    if not re.fullmatch(r"\d+", value or ""):
+        raise ValueError(f"{label} must be 0 or a positive integer")
+
+
 def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(config)
@@ -1078,9 +1087,20 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     const_depth = str(cfg.get("const_trace_depth", "16")).strip()
     assign_depth = str(cfg.get("assign_trace_depth", "2")).strip()
     assign_expr_depth = str(cfg.get("assign_expr_trace_depth", "1")).strip()
+    load_node_limit = str(cfg.get("load_trace_node_limit", "20000")).strip()
+    load_edge_limit = str(cfg.get("load_trace_edge_limit", "100000")).strip()
+    load_api_list_limit = str(cfg.get("load_trace_api_list_limit", "20000")).strip()
+    verdi_timeout_sec = str(cfg.get("verdi_timeout_sec", "0")).strip()
     log_file = str(cfg.get("log_file", "")).strip()
 
     require({"lib": lib}, "lib", "KDB/elab directory")
+    require_uint(const_depth, "const trace depth")
+    require_uint(assign_depth, "assign trace depth")
+    require_uint(assign_expr_depth, "assign expr depth")
+    require_uint(load_node_limit, "load node limit")
+    require_uint(load_edge_limit, "load edge limit")
+    require_uint(load_api_list_limit, "load api list limit")
+    require_uint(verdi_timeout_sec, "Verdi timeout seconds")
 
     if mode == "xlsx":
         require(cfg, "template", "template XLSX")
@@ -1105,6 +1125,10 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-const-trace-depth", const_depth)
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
+        add_value(cmd, "-load-trace-node-limit", load_node_limit)
+        add_value(cmd, "-load-trace-edge-limit", load_edge_limit)
+        add_value(cmd, "-load-trace-api-list-limit", load_api_list_limit)
+        add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
         add_value(cmd, "--match-cache-size", cfg.get("match_cache_size", "200000"))
@@ -1129,6 +1153,10 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-const-trace-depth", const_depth)
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
+        add_value(cmd, "-load-trace-node-limit", load_node_limit)
+        add_value(cmd, "-load-trace-edge-limit", load_edge_limit)
+        add_value(cmd, "-load-trace-api-list-limit", load_api_list_limit)
+        add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
         return cmd, None
@@ -1146,6 +1174,10 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-const-trace-depth", const_depth)
         add_value(cmd, "-assign-trace-depth", assign_depth)
         add_value(cmd, "-assign-expr-trace-depth", assign_expr_depth)
+        add_value(cmd, "-load-trace-node-limit", load_node_limit)
+        add_value(cmd, "-load-trace-edge-limit", load_edge_limit)
+        add_value(cmd, "-load-trace-api-list-limit", load_api_list_limit)
+        add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
         return cmd, str(cfg.get("raw_full_output", "")).strip()
@@ -1692,9 +1724,13 @@ class TraceGui:
         self._entry_row(parent, 7, "const trace depth", "const_trace_depth")
         self._entry_row(parent, 8, "assign trace depth", "assign_trace_depth")
         self._entry_row(parent, 9, "assign expr depth", "assign_expr_trace_depth")
+        self._entry_row(parent, 10, "load node limit", "load_trace_node_limit")
+        self._entry_row(parent, 11, "load edge limit", "load_trace_edge_limit")
+        self._entry_row(parent, 12, "load api list limit", "load_trace_api_list_limit")
+        self._entry_row(parent, 13, "Verdi timeout sec", "verdi_timeout_sec")
         self._check_row(
             parent,
-            10,
+            14,
             [
                 ("stream", "stream"),
                 ("no params", "no_params"),
@@ -1704,7 +1740,7 @@ class TraceGui:
         )
         self._check_row(
             parent,
-            11,
+            15,
             [
                 ("RegCombo as keyword", "regcombo_as_keyword"),
                 ("const source fallback", "const_source_fallback"),
@@ -1720,9 +1756,13 @@ class TraceGui:
         self._entry_row(parent, 2, "const trace depth", "const_trace_depth")
         self._entry_row(parent, 3, "assign trace depth", "assign_trace_depth")
         self._entry_row(parent, 4, "assign expr depth", "assign_expr_trace_depth")
+        self._entry_row(parent, 5, "load node limit", "load_trace_node_limit")
+        self._entry_row(parent, 6, "load edge limit", "load_trace_edge_limit")
+        self._entry_row(parent, 7, "load api list limit", "load_trace_api_list_limit")
+        self._entry_row(parent, 8, "Verdi timeout sec", "verdi_timeout_sec")
         self._check_row(
             parent,
-            5,
+            9,
             [
                 ("const source fallback", "const_source_fallback"),
                 ("trace debug", "trace_debug"),
@@ -1738,7 +1778,11 @@ class TraceGui:
         self._entry_row(parent, 3, "const trace depth", "const_trace_depth")
         self._entry_row(parent, 4, "assign trace depth", "assign_trace_depth")
         self._entry_row(parent, 5, "assign expr depth", "assign_expr_trace_depth")
-        self._check_row(parent, 6, [("const source fallback", "const_source_fallback"), ("trace debug", "trace_debug")])
+        self._entry_row(parent, 6, "load node limit", "load_trace_node_limit")
+        self._entry_row(parent, 7, "load edge limit", "load_trace_edge_limit")
+        self._entry_row(parent, 8, "load api list limit", "load_trace_api_list_limit")
+        self._entry_row(parent, 9, "Verdi timeout sec", "verdi_timeout_sec")
+        self._check_row(parent, 10, [("const source fallback", "const_source_fallback"), ("trace debug", "trace_debug")])
 
     def _path_row(self, parent, row: int, label: str, key: str, kind: str) -> None:
         ttk = self.ttk

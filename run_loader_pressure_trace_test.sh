@@ -3,8 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 echo "[loader_pressure] cwd=$PWD"
+echo "[loader_pressure] python_bin=$PYTHON_BIN"
 echo "[loader_pressure] build KDB"
 mkdir -p loader_pressure_trace_build
 set +e
@@ -33,10 +35,14 @@ echo "[loader_pressure] run trace_and_filter"
   -const-trace-depth 4 \
   -assign-trace-depth 10 \
   -assign-expr-trace-depth 6 \
+  -load-trace-node-limit 50000 \
+  -load-trace-edge-limit 200000 \
+  -load-trace-api-list-limit 50000 \
+  -verdi-timeout-sec 900 \
   2>&1 | tee loader_pressure_trace.log
 
 echo "[loader_pressure] assert filtered CSV"
-python3 - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import csv
 from pathlib import Path
 

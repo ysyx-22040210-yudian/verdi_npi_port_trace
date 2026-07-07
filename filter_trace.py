@@ -72,6 +72,8 @@ def is_direct_instance_node(rest):
 def signal_belongs_to_instance(signal_name, instances):
     if not signal_name or signal_name.startswith("Const:"):
         return False
+    if signal_name.startswith("TRACE_LIMIT_REACHED:"):
+        return True
 
     for inst in instances:
         if is_direct_instance_node(strip_instance_prefix(signal_name, inst)):

@@ -1080,7 +1080,13 @@ def read_trace_rows(csv_paths: Sequence[Path]) -> List[TraceRow]:
     return rows
 
 
-def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tuple[Path, Path]:
+def trace_module(
+    args,
+    module: str,
+    ports: Sequence[str],
+    workdir: Path,
+    stop_instance_file: Optional[Path] = None,
+) -> Tuple[Path, Path]:
     full_csv = workdir / f"{safe_name(module)}_full.csv"
     module_csv = workdir / f"{safe_name(module)}_module_connections.csv"
     cmd: List[object] = [
@@ -1115,6 +1121,8 @@ def trace_module(args, module: str, ports: Sequence[str], workdir: Path) -> Tupl
             str(args.trace_debug),
         ]
     )
+    if stop_instance_file is not None:
+        cmd.extend(["-load-stop-instance-file", str(stop_instance_file)])
 
     run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv)
     return full_csv, module_csv
@@ -1584,7 +1592,13 @@ def main() -> None:
             for module in modules:
                 log_step(f"trace module: {module}")
                 try:
-                    full_csv, module_csv = trace_module(args, module, ports, workdir)
+                    full_csv, module_csv = trace_module(
+                        args,
+                        module,
+                        ports,
+                        workdir,
+                        instance_file,
+                    )
                     log_step(f"module_boundary_debug_csv={module_csv}")
                     if args.subsystem_level:
                         _, subsystem_results, module_subsystems, total_rows = stream_trace_results(
@@ -1677,7 +1691,13 @@ def main() -> None:
         for module in modules:
             log_step(f"trace module: {module}")
             try:
-                full_csv, module_csv = trace_module(args, module, ports, workdir)
+                full_csv, module_csv = trace_module(
+                    args,
+                    module,
+                    ports,
+                    workdir,
+                    instance_file,
+                )
                 log_step(f"module_boundary_debug_csv={module_csv}")
                 rows = read_trace_rows([full_csv, module_csv])
                 log_step(f"loaded trace rows for {module}: {len(rows)}")

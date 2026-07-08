@@ -4,6 +4,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if [ -z "${PYTHON_BIN:-}" ]; then
+  for candidate in /opt/rh/rh-python38/root/usr/bin/python3 /usr/local/bin/python3 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" - <<'PY' >/dev/null 2>&1
+import sys
+import openpyxl
+raise SystemExit(0 if sys.version_info >= (3, 8) else 1)
+PY
+    then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "${PYTHON_BIN:-}" ]; then
+  echo "[compact_features] ERROR: Python 3.8+ with openpyxl is required" >&2
+  exit 1
+fi
+echo "[compact_features] python_bin=$PYTHON_BIN"
+
 csv_from_list() {
   grep -v '^[[:space:]]*$' "$1" | grep -v '^[[:space:]]*#' | paste -sd, -
 }
@@ -18,7 +38,7 @@ echo "[compact_features] keywords=$KEYWORDS"
 echo "[compact_features] ports=$PORTS"
 
 echo "[compact_features] verify one module per RTL file"
-python3 - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 bad = []
 for path in sorted(Path(".").glob("compact_features_*.v")):
@@ -32,7 +52,7 @@ PY
 
 echo "[compact_features] clean previous outputs for this test only"
 rm -rf compact_features_trace_build
-rm -f compact_features_trace_vcs.log compact_features_trace_template.xlsx
+rm -f compact_features_trace_vcs.log
 rm -f compact_features_gui_command.log compact_features_gui_xlsx.log
 rm -f compact_features_filtered.csv compact_features_filtered_boundary.csv compact_features_filtered_full_owner.csv
 rm -f compact_features_filtered__*.csv compact_features_filter.log
@@ -41,8 +61,11 @@ rm -f compact_features_annotated.xlsx compact_features_annotated__subsys_*.xlsx 
 rm -f CFTarget_full.csv CFTarget_module_connections.csv CFAuxTarget_full.csv CFAuxTarget_module_connections.csv
 rm -f CFTarget_CFKeySrc_CFKeySink_instances.txt CFAuxTarget_CFKeySrc_CFKeySink_instances.txt
 
-echo "[compact_features] create xlsx template"
-python3 - <<'PY'
+if [ -f compact_features_trace_template.xlsx ]; then
+  echo "[compact_features] use existing xlsx template"
+else
+  echo "[compact_features] create xlsx template"
+  "$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -70,9 +93,10 @@ for idx, header in enumerate(headers, 1):
 ws.freeze_panes = "A2"
 wb.save("compact_features_trace_template.xlsx")
 PY
+fi
 
 echo "[compact_features] verify GUI command builder"
-python3 trace_gui.py --build-command compact_features_gui_xlsx.json | tee compact_features_gui_command.log
+"$PYTHON_BIN" trace_gui.py --build-command compact_features_gui_xlsx.json | tee compact_features_gui_command.log
 grep -q "annotate_trace_xlsx.sh" compact_features_gui_command.log
 grep -q "CFTarget,CFAuxTarget" compact_features_gui_command.log
 grep -q "CFKeySrc,CFKeySink" compact_features_gui_command.log
@@ -148,7 +172,7 @@ echo "[compact_features] run XLSX annotation"
   -log-file compact_features_annotate.log
 
 echo "[compact_features] assert CSV and XLSX results"
-python3 - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import csv
 from pathlib import Path
 from openpyxl import load_workbook

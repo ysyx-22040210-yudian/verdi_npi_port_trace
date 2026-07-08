@@ -8,6 +8,7 @@
 #                  [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
 #                  [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>]
 #                  [-load-trace-api-list-limit <N>]
+#                  [-load-stop-instance-file <instances.txt>]
 #                  [-verdi-timeout-sec <N>]
 #                  [-trace-debug 0|1] [-log-file <run.log>]
 #
@@ -51,6 +52,7 @@ ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
 LOAD_TRACE_NODE_LIMIT="${NPI_LOAD_TRACE_NODE_LIMIT:-20000}"
 LOAD_TRACE_EDGE_LIMIT="${NPI_LOAD_TRACE_EDGE_LIMIT:-100000}"
 LOAD_TRACE_API_LIST_LIMIT="${NPI_LOAD_TRACE_API_LIST_LIMIT:-20000}"
+LOAD_STOP_INSTANCE_FILE="${NPI_LOAD_STOP_INSTANCE_FILE:-}"
 VERDI_TIMEOUT_SEC="${NPI_VERDI_TIMEOUT_SEC:-0}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
 LOG_FILE=""
@@ -72,6 +74,7 @@ while [ $# -gt 0 ]; do
         -load-trace-node-limit|--load-trace-node-limit) LOAD_TRACE_NODE_LIMIT="$2"; shift 2 ;;
         -load-trace-edge-limit|--load-trace-edge-limit) LOAD_TRACE_EDGE_LIMIT="$2"; shift 2 ;;
         -load-trace-api-list-limit|--load-trace-api-list-limit) LOAD_TRACE_API_LIST_LIMIT="$2"; shift 2 ;;
+        -load-stop-instance-file|--load-stop-instance-file) LOAD_STOP_INSTANCE_FILE="$2"; shift 2 ;;
         -verdi-timeout-sec|--verdi-timeout-sec) VERDI_TIMEOUT_SEC="$2"; shift 2 ;;
         -trace-debug|--trace-debug) TRACE_DEBUG="$2"; shift 2 ;;
         -log-file|--log-file) LOG_FILE="$2"; shift 2 ;;
@@ -114,6 +117,16 @@ esac
 case "$LOAD_TRACE_API_LIST_LIMIT" in
     ''|*[!0-9]*) echo "[ERROR] -load-trace-api-list-limit must be 0 or a positive integer, got: $LOAD_TRACE_API_LIST_LIMIT" >&2; exit 1 ;;
 esac
+if [ -n "$LOAD_STOP_INSTANCE_FILE" ]; then
+    case "$LOAD_STOP_INSTANCE_FILE" in
+        /*) ;;
+        *) LOAD_STOP_INSTANCE_FILE="$PWD/$LOAD_STOP_INSTANCE_FILE" ;;
+    esac
+    if [ ! -f "$LOAD_STOP_INSTANCE_FILE" ]; then
+        echo "[ERROR] -load-stop-instance-file does not exist: $LOAD_STOP_INSTANCE_FILE" >&2
+        exit 1
+    fi
+fi
 case "$VERDI_TIMEOUT_SEC" in
     ''|*[!0-9]*) echo "[ERROR] -verdi-timeout-sec must be 0 or a positive integer, got: $VERDI_TIMEOUT_SEC" >&2; exit 1 ;;
 esac
@@ -165,6 +178,11 @@ log_step "assign_expr_trace_depth=$ASSIGN_EXPR_TRACE_DEPTH"
 log_step "load_trace_node_limit=$LOAD_TRACE_NODE_LIMIT"
 log_step "load_trace_edge_limit=$LOAD_TRACE_EDGE_LIMIT"
 log_step "load_trace_api_list_limit=$LOAD_TRACE_API_LIST_LIMIT"
+if [ -n "$LOAD_STOP_INSTANCE_FILE" ]; then
+    log_step "load_stop_instance_file=$LOAD_STOP_INSTANCE_FILE"
+else
+    log_step "load_stop_instance_file=<none>"
+fi
 log_step "verdi_timeout_sec=$VERDI_TIMEOUT_SEC"
 log_step "trace_debug=$TRACE_DEBUG"
 
@@ -181,6 +199,7 @@ export NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH="$ASSIGN_EXPR_TRACE_DEPTH"
 export NPI_LOAD_TRACE_NODE_LIMIT="$LOAD_TRACE_NODE_LIMIT"
 export NPI_LOAD_TRACE_EDGE_LIMIT="$LOAD_TRACE_EDGE_LIMIT"
 export NPI_LOAD_TRACE_API_LIST_LIMIT="$LOAD_TRACE_API_LIST_LIMIT"
+export NPI_LOAD_STOP_INSTANCE_FILE="$LOAD_STOP_INSTANCE_FILE"
 export NPI_TRACE_DEBUG="$TRACE_DEBUG"
 
 log_step "running Verdi batch trace"

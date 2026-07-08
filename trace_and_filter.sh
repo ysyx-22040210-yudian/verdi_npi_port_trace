@@ -198,42 +198,7 @@ log_step "boundary_filtered=$BOUNDARY_FILTERED"
 log_step "full_owner_filtered=$FULL_FILTERED"
 log_step "final_output=$OUTPUT"
 
-# Build npi_trace.sh command
-TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
-TRACE_CMD="$TRACE_CMD -lib $LIB"
-TRACE_CMD="$TRACE_CMD -const-source-fallback $CONST_SOURCE_FALLBACK -const-trace-depth $CONST_TRACE_DEPTH"
-TRACE_CMD="$TRACE_CMD -assign-trace-depth $ASSIGN_TRACE_DEPTH"
-TRACE_CMD="$TRACE_CMD -assign-expr-trace-depth $ASSIGN_EXPR_TRACE_DEPTH"
-TRACE_CMD="$TRACE_CMD -load-trace-node-limit $LOAD_TRACE_NODE_LIMIT"
-TRACE_CMD="$TRACE_CMD -load-trace-edge-limit $LOAD_TRACE_EDGE_LIMIT"
-TRACE_CMD="$TRACE_CMD -load-trace-api-list-limit $LOAD_TRACE_API_LIST_LIMIT"
-TRACE_CMD="$TRACE_CMD -verdi-timeout-sec $VERDI_TIMEOUT_SEC"
-TRACE_CMD="$TRACE_CMD -trace-debug $TRACE_DEBUG"
-if [ -n "$PORTS" ]; then
-    TRACE_CMD="$TRACE_CMD -ports $PORTS"
-fi
-
-# Run trace
-log_step "step 1/5: run NPI trace for target module"
-log_step "command: $TRACE_CMD > $FULL_TRACE"
-$TRACE_CMD > "$FULL_TRACE"
-
-if [ ! -s "$FULL_TRACE" ]; then
-    echo "[ERROR] Trace failed or produced no output" >&2
-    rm -f "$FULL_TRACE"
-    exit 1
-fi
-
-if [ ! -s "$MODULE_TRACE" ]; then
-    echo "[ERROR] Module-boundary trace failed or produced no output" >&2
-    exit 1
-fi
-
-TOTAL_LINES=$(wc -l < "$FULL_TRACE")
-MODULE_LINES=$(wc -l < "$MODULE_TRACE")
-log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$MODULE_LINES"
-
-log_step "step 2/5: find instances of filter module"
+log_step "step 1/5: find instances of filter module"
 FIND_CMD=("$PYTHON_BIN" "$SCRIPT_DIR/find_instances_batched.py"
     -lib "$LIB"
     -keywords "$KEYWORDS"
@@ -257,6 +222,45 @@ fi
 
 INSTANCE_COUNT=$(wc -l < "$INSTANCE_LIST")
 log_step "found_filter_instances=$INSTANCE_COUNT"
+
+# Build npi_trace.sh command. The keyword instance list is passed into the
+# loader traversal as stop points, so a hit on a keyword input port is recorded
+# but the trace does not keep drilling into that instance's internal logic.
+TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
+TRACE_CMD="$TRACE_CMD -lib $LIB"
+TRACE_CMD="$TRACE_CMD -const-source-fallback $CONST_SOURCE_FALLBACK -const-trace-depth $CONST_TRACE_DEPTH"
+TRACE_CMD="$TRACE_CMD -assign-trace-depth $ASSIGN_TRACE_DEPTH"
+TRACE_CMD="$TRACE_CMD -assign-expr-trace-depth $ASSIGN_EXPR_TRACE_DEPTH"
+TRACE_CMD="$TRACE_CMD -load-trace-node-limit $LOAD_TRACE_NODE_LIMIT"
+TRACE_CMD="$TRACE_CMD -load-trace-edge-limit $LOAD_TRACE_EDGE_LIMIT"
+TRACE_CMD="$TRACE_CMD -load-trace-api-list-limit $LOAD_TRACE_API_LIST_LIMIT"
+TRACE_CMD="$TRACE_CMD -load-stop-instance-file $INSTANCE_LIST"
+TRACE_CMD="$TRACE_CMD -verdi-timeout-sec $VERDI_TIMEOUT_SEC"
+TRACE_CMD="$TRACE_CMD -trace-debug $TRACE_DEBUG"
+if [ -n "$PORTS" ]; then
+    TRACE_CMD="$TRACE_CMD -ports $PORTS"
+fi
+
+# Run trace
+log_step "step 2/5: run NPI trace for target module"
+log_step "command: $TRACE_CMD > $FULL_TRACE"
+$TRACE_CMD > "$FULL_TRACE"
+
+if [ ! -s "$FULL_TRACE" ]; then
+    echo "[ERROR] Trace failed or produced no output" >&2
+    rm -f "$FULL_TRACE"
+    exit 1
+fi
+
+if [ ! -s "$MODULE_TRACE" ]; then
+    echo "[ERROR] Module-boundary trace failed or produced no output" >&2
+    exit 1
+fi
+
+TOTAL_LINES=$(wc -l < "$FULL_TRACE")
+MODULE_LINES=$(wc -l < "$MODULE_TRACE")
+log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$MODULE_LINES"
+
 log_step "step 3/5: filter module-boundary rows by filter-module ownership"
 log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py $MODULE_TRACE $BOUNDARY_FILTERED --instances $INSTANCE_LIST --normalize-signal-column"
 "$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column

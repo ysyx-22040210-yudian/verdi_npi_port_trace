@@ -697,6 +697,42 @@ loader 方向最容易在超大项目里跑成几天不结束，常见原因是�
 - 普通 assign、module port high-side 和源码 fallback 交替展开，遇到跨层 alias 环。
 - `-assign-trace-depth` 或 `-assign-expr-trace-depth` 设得过大，loader fanout 呈指数级扩散。
 
+#### 2026-07-03 前后 loader 行为差异
+
+2026-07-03 附近的版本主要沿 NPI 返回的端点继续追踪，loader 递归路径相对单一。后续为了修复“大项目 output 端口跨父层、同级模块 input、assign slice/fanout 追不到”的问题，工具在 loader 方向叠加了几类补充路径：
+
+- `npi_nl_trace_load` / `npi_nl_trace_load_by_hdl*`。
+- module port high-side 回溯。
+- 源码 fallback 解析 `assign B=A`、`assign B=A[10:0]`、`assign B={C,A,D}`。
+- `npi_nl_sig_2_mod_inst_conn` 透过 assign cell 找真实 module port。
+
+这些补充路径本身是为了解决漏追，但在超大 KDB 中同一个物理连接可能同时以“全路径信号、局部信号名、bit/range、module port、SigTap/Combo endpoint”等形式反复返回。如果每条路径都继续递归，就会形成类似下面的环：
+
+```text
+parent net -> NPI load endpoint -> module port high-side
+           -> source assign fanout -> same parent net / same port
+           -> handle fallback -> same generated endpoint
+```
+
+真正的根因不是缺少 `timeout`，而是 loader 图遍历语义错误：已经处理过的连接边还会再次展开；并且命中 `-keywords` 实例端口后还继续钻进该 keyword 实例内部逻辑，导致搜索空间持续放大。
+
+当前修复点：
+
+- `trace_and_filter.sh` / `annotate_trace_xlsx.py` 会先查找 `-keywords` 实例列表，再把该列表传给底层 `npi_trace.sh`。
+- `npi_trace.sh` 内部参数 `-load-stop-instance-file <instances.txt>` 会传给 `npi_port_trace.tcl`。普通用户一般不需要手写它，CSV/XLSX 模式会自动传。
+- loader 命中属于 `-keywords` 实例的端口时，会记录该 endpoint，但不会继续钻入该实例内部。
+- loader 对信号节点和连接边做规范化去重。同一条物理连接边第一次处理，后续重复边只计入 `duplicate_edges`，不再展开递归。
+- 生成逻辑端点，如 `SigTap`、`Combo`、`RegCombo`、`Always/ComboMemory` 等，只作为真实 endpoint 记录，不再当成新的普通 net 继续扩散。
+- `A[31:0]` 这类 bit range 里的冒号不会被误判为 generated logic；只有方括号外的冒号才按 generated endpoint 处理。
+
+验证不是靠保护截断的方法：
+
+```text
+load_trace_summary instance=... port=... nodes=... edges=... duplicate_edges=... limit_hit=0
+```
+
+如果 `limit_hit=0`，说明该端口 trace 自然收敛，没有依赖 node/edge/api limit 截断。`duplicate_edges` 大于 0 是正常现象，表示工具发现了 NPI/source/module-port 多路径返回的重复连接，并且已经跳过重复展开。
+
 工具默认已经启用三层保护：`load node limit=20000`、`load edge limit=100000`、`load api list limit=20000`。触发保护时不会继续死跑，会在日志中打印：
 
 ```text

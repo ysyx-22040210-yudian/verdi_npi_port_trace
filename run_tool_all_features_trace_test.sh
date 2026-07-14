@@ -249,9 +249,9 @@ reject_full("drv_ternary_stop", "driver", "Const:1'b1")
 reject_full("drv_ternary_stop", "driver", "RegCombo")
 reject_filtered_port("drv_ternary_stop", "driver")
 
-require_full("drv_precise_bus[6]", "driver", "Const:7'b0101010")
+require_full("drv_precise_bus[6]", "driver", "Const:1'b0")
 reject_full("drv_precise_bus[6]", "driver", "u_key_precise")
-require_full("drv_precise_bus[8]", "driver", "Const:3'b101")
+require_full("drv_precise_bus[8]", "driver", "Const:1'b1")
 reject_full("drv_precise_bus[8]", "driver", "u_key_precise")
 
 for port in ["drv_const_direct", "drv_const_parent", "drv_const_source"]:
@@ -286,6 +286,8 @@ for port, token in [
     require_filtered(port, "load", token)
 
 require_full("load_reg_endpoint", "load", "RegCombo")
+reject_full("load_reg_endpoint", "load", "XorRedu")
+reject_full("drv_reg_endpoint", "driver", "RegCombo")
 reject_filtered_port("load_reg_endpoint", "load")
 require_full("load_unconnected", "load", "drv_noise")
 reject_filtered_port("load_unconnected", "load")

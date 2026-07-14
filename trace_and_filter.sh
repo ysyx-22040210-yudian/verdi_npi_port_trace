@@ -226,25 +226,28 @@ log_step "found_filter_instances=$INSTANCE_COUNT"
 # Build npi_trace.sh command. The keyword instance list is passed into the
 # loader traversal as stop points, so a hit on a keyword input port is recorded
 # but the trace does not keep drilling into that instance's internal logic.
-TRACE_CMD="$SCRIPT_DIR/npi_trace.sh -module $MODULE -module-out $MODULE_TRACE"
-TRACE_CMD="$TRACE_CMD -lib $LIB"
-TRACE_CMD="$TRACE_CMD -const-source-fallback $CONST_SOURCE_FALLBACK -const-trace-depth $CONST_TRACE_DEPTH"
-TRACE_CMD="$TRACE_CMD -assign-trace-depth $ASSIGN_TRACE_DEPTH"
-TRACE_CMD="$TRACE_CMD -assign-expr-trace-depth $ASSIGN_EXPR_TRACE_DEPTH"
-TRACE_CMD="$TRACE_CMD -load-trace-node-limit $LOAD_TRACE_NODE_LIMIT"
-TRACE_CMD="$TRACE_CMD -load-trace-edge-limit $LOAD_TRACE_EDGE_LIMIT"
-TRACE_CMD="$TRACE_CMD -load-trace-api-list-limit $LOAD_TRACE_API_LIST_LIMIT"
-TRACE_CMD="$TRACE_CMD -load-stop-instance-file $INSTANCE_LIST"
-TRACE_CMD="$TRACE_CMD -verdi-timeout-sec $VERDI_TIMEOUT_SEC"
-TRACE_CMD="$TRACE_CMD -trace-debug $TRACE_DEBUG"
+TRACE_CMD=("$SCRIPT_DIR/npi_trace.sh"
+    -module "$MODULE"
+    -module-out "$MODULE_TRACE"
+    -lib "$LIB"
+    -const-source-fallback "$CONST_SOURCE_FALLBACK"
+    -const-trace-depth "$CONST_TRACE_DEPTH"
+    -assign-trace-depth "$ASSIGN_TRACE_DEPTH"
+    -assign-expr-trace-depth "$ASSIGN_EXPR_TRACE_DEPTH"
+    -load-trace-node-limit "$LOAD_TRACE_NODE_LIMIT"
+    -load-trace-edge-limit "$LOAD_TRACE_EDGE_LIMIT"
+    -load-trace-api-list-limit "$LOAD_TRACE_API_LIST_LIMIT"
+    -load-stop-instance-file "$INSTANCE_LIST"
+    -verdi-timeout-sec "$VERDI_TIMEOUT_SEC"
+    -trace-debug "$TRACE_DEBUG")
 if [ -n "$PORTS" ]; then
-    TRACE_CMD="$TRACE_CMD -ports $PORTS"
+    TRACE_CMD+=(-ports "$PORTS")
 fi
 
 # Run trace
 log_step "step 2/5: run NPI trace for target module"
-log_step "command: $TRACE_CMD > $FULL_TRACE"
-$TRACE_CMD > "$FULL_TRACE"
+log_step "command: ${TRACE_CMD[*]} > $FULL_TRACE"
+"${TRACE_CMD[@]}" > "$FULL_TRACE"
 
 if [ ! -s "$FULL_TRACE" ]; then
     echo "[ERROR] Trace failed or produced no output" >&2

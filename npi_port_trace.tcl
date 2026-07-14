@@ -350,6 +350,9 @@ proc build_port_dir_map { srcfile target_mod } {
 }
 
 proc get_handle_source_file { hdl } {
+    if { $hdl eq "" || $hdl == 0 } {
+        return ""
+    }
     foreach getter {::npi_L1::npi_ut_get_hdl_info ::npi_L1::npi_nl_ut_get_hdl_info} {
         set info ""
         catch { set info [$getter $hdl] }
@@ -365,6 +368,23 @@ proc get_handle_source_file { hdl } {
                 return $path
             }
         }
+    }
+    return ""
+}
+
+proc get_handle_size { hdl } {
+    if { $hdl eq "" || $hdl == 0 } {
+        return ""
+    }
+
+    set size ""
+    if { ![catch { set size [::npi_L1::npi_nl_get npiNlSize $hdl] }] &&
+         [string is integer -strict $size] && $size > 0 } {
+        return $size
+    }
+    if { ![catch { set size [npi_nl_get -property npiNlSize -object $hdl] }] &&
+         [string is integer -strict $size] && $size > 0 } {
+        return $size
     }
     return ""
 }
@@ -472,8 +492,23 @@ proc is_const_literal_name { name } {
     return 0
 }
 
+proc canonicalize_generated_always_input { name } {
+    # Detailed netlist mode exposes an operator-specific name where legacy
+    # mode reports the same Always input as RegCombo. Preserve that public
+    # endpoint because filtering treats RegCombo as a semantic keyword.
+    if { [regexp {^(.*):(Always[^:#]*)#Always[^:]*:([^:]+):([^:]+):[^:]+\.(IH_.+)$} \
+          $name -> prefix always_block line1 line2 input_pin] } {
+        return "${prefix}:${always_block}:${line1}:${line2}:RegCombo.${input_pin}"
+    }
+    return $name
+}
+
 proc normalize_signal_name { name } {
     set name [string trim $name]
+    if { [regexp {^(.+)#\[([0-9]+):([0-9]+)\]$} $name -> base hi lo] } {
+        regsub {\[[0-9]+:[0-9]+\]$} $base "" base
+        return "${base}\[$hi:$lo\]"
+    }
     if { [regexp {^(.+)#\[([0-9]+)\]$} $name -> base bit] } {
         regsub {\[[0-9]+:[0-9]+\]$} $base "" base
         return "${base}\[$bit\]"
@@ -481,7 +516,7 @@ proc normalize_signal_name { name } {
     if { [is_const_literal_name $name] && ![string match "Const:*" $name] } {
         return "Const:$name"
     }
-    return $name
+    return [canonicalize_generated_always_input $name]
 }
 
 proc const_literal_raw { value } {
@@ -635,19 +670,58 @@ proc const_value_from_rhs { rhs const_map } {
     return ""
 }
 
-proc const_map_keys_for_lhs { name select } {
+proc const_map_set_key { map_var blocked_var key value } {
+    upvar 1 $map_var const_map
+    upvar 1 $blocked_var blocked_keys
+
+    if { [dict exists $blocked_keys $key] } {
+        return
+    }
+    if { [dict exists $const_map $key] && [dict get $const_map $key] ne $value } {
+        dict unset const_map $key
+        dict set blocked_keys $key 1
+
+        if { [regexp {^(.+)\[[0-9]+\]$} $key -> base] } {
+            if { [dict exists $const_map $base] } {
+                dict unset const_map $base
+            }
+            dict set blocked_keys $base 1
+        } else {
+            foreach existing_key [dict keys $const_map] {
+                if { [string first "${key}\[" $existing_key] == 0 &&
+                     [regexp {\[[0-9]+\]$} $existing_key] } {
+                    dict unset const_map $existing_key
+                    dict set blocked_keys $existing_key 1
+                }
+            }
+        }
+        return
+    }
+    dict set const_map $key $value
+}
+
+proc const_map_set_lhs_value { map_var blocked_var name select value } {
+    upvar 1 $map_var const_map
+    upvar 1 $blocked_var blocked_keys
+
     if { $select eq "" } {
-        return [list $name]
+        const_map_set_key const_map blocked_keys $name $value
+        return
     }
 
-    set keys {}
+    # A part-select is positionally assigned: RHS bit zero maps to the
+    # right-hand bound of the LHS range.  Store a projected value per LHS bit
+    # so a later bit query cannot inherit the complete RHS literal.
     foreach bit [select_selected_bits $select] {
-        lappend keys "${name}\[$bit\]"
+        set rhs_offset [lhs_select_rhs_bit_for_target $select $bit]
+        if { $rhs_offset eq "" } {
+            continue
+        }
+        set projected [project_const_literal_to_bit $value $rhs_offset]
+        if { $projected ne "" } {
+            const_map_set_key const_map blocked_keys "${name}\[$bit\]" $projected
+        }
     }
-    if { [llength $keys] == 0 } {
-        lappend keys "${name}${select}"
-    }
-    return $keys
 }
 
 proc last_identifier_before_equal { text } {
@@ -663,38 +737,49 @@ proc last_identifier_before_equal { text } {
     return ""
 }
 
-proc build_const_assign_map { srcfile } {
+proc build_const_assign_map { srcfile module } {
     global const_assign_map_cache
 
-    if { $srcfile eq "" || ![file exists $srcfile] } {
+    if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
         return {}
     }
-    if { [info exists const_assign_map_cache($srcfile)] } {
-        return $const_assign_map_cache($srcfile)
+    set key "${srcfile}::${module}"
+    if { [info exists const_assign_map_cache($key)] } {
+        return $const_assign_map_cache($key)
     }
 
-    set fh [open $srcfile r]
+    set module_text [source_module_text $srcfile $module]
+    if { $module_text eq "" } {
+        set const_assign_map_cache($key) {}
+        return {}
+    }
     set text ""
-    foreach line [split [read $fh] "\n"] {
-        regsub {//.*$} $line "" line
+    set assign_text [mask_generate_regions $module_text]
+    set assign_text [mask_implicit_generate_regions $assign_text]
+    foreach line [split $assign_text "\n"] {
         append text " " [string trim $line]
     }
-    close $fh
+    set width_map [build_signal_width_map_for_module $srcfile $module]
+    set range_map [build_signal_range_map_for_module $srcfile $module]
 
     set const_map {}
+    set blocked_keys {}
     foreach stmt [split $text ";"] {
         set stmt [string trim $stmt]
         if { $stmt eq "" } {
             continue
         }
 
-        if { [regexp {^(localparam|parameter)\s+(.+)$} $stmt -> _ rest] } {
+        # parameter defaults can be overridden per instance and therefore are
+        # not elaborated facts.  A localparam is immutable in this module and
+        # may safely seed literal propagation.
+        if { [regexp {^localparam\s+(.+)$} $stmt -> rest] } {
             set name [last_identifier_before_equal $rest]
             if { $name ne "" } {
                 set rhs [string range $rest [expr {[string first "=" $rest] + 1}] end]
                 set value [const_value_from_rhs $rhs $const_map]
                 if { $value ne "" } {
-                    dict set const_map $name $value
+                    const_map_set_key const_map blocked_keys $name $value
                 }
             }
             continue
@@ -703,9 +788,16 @@ proc build_const_assign_map { srcfile } {
         if { [regexp {^assign\s+([A-Za-z_][A-Za-z0-9_$]*)(\[[^\]]+\])?\s*=\s*(.+)$} $stmt -> name bit rhs] } {
             set value [const_value_from_rhs $rhs $const_map]
             if { $value ne "" } {
-                foreach key [const_map_keys_for_lhs $name $bit] {
-                    dict set const_map $key $value
+                if { $bit eq "" && [dict exists $width_map $name] &&
+                     [dict get $width_map $name] eq "" } {
+                    continue
                 }
+                set lhs_select $bit
+                if { $lhs_select eq "" && [dict exists $range_map $name] } {
+                    const_map_set_key const_map blocked_keys $name $value
+                    set lhs_select [dict get $range_map $name]
+                }
+                const_map_set_lhs_value const_map blocked_keys $name $lhs_select $value
             }
             continue
         }
@@ -722,13 +814,22 @@ proc build_const_assign_map { srcfile } {
                 set rhs [string range $item [expr {[string first "=" $item] + 1}] end]
                 set value [const_value_from_rhs $rhs $const_map]
                 if { $value ne "" } {
-                    dict set const_map $name $value
+                    if { [dict exists $width_map $name] &&
+                         [dict get $width_map $name] eq "" } {
+                        continue
+                    }
+                    set lhs_select ""
+                    if { [dict exists $range_map $name] } {
+                        const_map_set_key const_map blocked_keys $name $value
+                        set lhs_select [dict get $range_map $name]
+                    }
+                    const_map_set_lhs_value const_map blocked_keys $name $lhs_select $value
                 }
             }
         }
     }
 
-    set const_assign_map_cache($srcfile) $const_map
+    set const_assign_map_cache($key) $const_map
     return $const_map
 }
 
@@ -800,10 +901,11 @@ proc effective_selected_bits_for_lhs { selected_bits leaf width_map } {
     if { [llength $selected_bits] > 0 } {
         return $selected_bits
     }
-    if { $leaf ne "" &&
-         [dict exists $width_map $leaf] &&
-         [dict get $width_map $leaf] == 1 } {
-        return [list 0]
+    if { $leaf ne "" && [dict exists $width_map $leaf] } {
+        set width [dict get $width_map $leaf]
+        if { [string is integer -strict $width] && $width == 1 } {
+            return [list 0]
+        }
     }
     return {}
 }
@@ -1017,7 +1119,7 @@ proc assign_lhs_leaf_name { lhs } {
 
 proc assign_lhs_select { lhs } {
     set lhs [string trim $lhs]
-    if { [regexp {(\[[0-9]+(:[0-9]+)?\])\s*$} $lhs -> select] } {
+    if { [regexp {(\[[^\]]+\])\s*$} $lhs -> select] } {
         return $select
     }
     return ""
@@ -1098,11 +1200,11 @@ proc lhs_select_rhs_bit_for_target { select bit } {
     if { [regexp {^\[([0-9]+):([0-9]+)\]$} $select -> hi lo] } {
         if { $hi >= $lo } {
             if { $bit <= $hi && $bit >= $lo } {
-                return [expr {$bit - $lo}]
+                return [expr {abs($bit - $lo)}]
             }
         } else {
             if { $bit >= $hi && $bit <= $lo } {
-                return [expr {$bit - $hi}]
+                return [expr {abs($bit - $lo)}]
             }
         }
     }
@@ -1129,8 +1231,8 @@ proc lhs_select_bit_from_rhs_offset { select offset } {
                 return $bit
             }
         } else {
-            set bit [expr {$hi + $offset}]
-            if { $bit <= $lo } {
+            set bit [expr {$lo - $offset}]
+            if { $bit >= $hi } {
                 return $bit
             }
         }
@@ -1168,6 +1270,12 @@ proc rhs_references_signal_bit { rhs leaf bit } {
     return [regexp [format {(^|[^A-Za-z0-9_$])%s([^A-Za-z0-9_$]|$)} $leaf] $rhs_without_selected]
 }
 
+proc rhs_has_unselected_signal_reference { rhs leaf } {
+    regsub -all {\s+} $rhs "" rhs_no_space
+    regsub -all [format {%s\[[^\]]+\]} $leaf] $rhs_no_space "" without_selected
+    return [regexp [format {(^|[^A-Za-z0-9_$])%s([^A-Za-z0-9_$]|$)} $leaf] $without_selected]
+}
+
 proc rhs_item_offsets_for_signal_bit { item leaf bit } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
@@ -1179,11 +1287,11 @@ proc rhs_item_offsets_for_signal_bit { item leaf bit } {
     if { [regexp [format {^%s\[([0-9]+):([0-9]+)\]$} $leaf] $item -> hi lo] } {
         if { $hi >= $lo } {
             if { $bit <= $hi && $bit >= $lo } {
-                return [list [expr {$bit - $lo}]]
+                return [list [expr {abs($bit - $lo)}]]
             }
         } else {
             if { $bit >= $hi && $bit <= $lo } {
-                return [list [expr {$bit - $hi}]]
+                return [list [expr {abs($bit - $lo)}]]
             }
         }
         return {}
@@ -1231,6 +1339,163 @@ proc strip_leading_block_end_tokens { stmt } {
     return $stmt
 }
 
+proc mask_preprocessor_conditional_regions { text } {
+    set out ""
+    set conditional_depth 0
+    foreach line [split $text "\n"] {
+        set trimmed [string trim $line]
+        set starts_conditional [regexp {^`(ifdef|ifndef)([^A-Za-z0-9_$]|$)} $trimmed]
+        set ends_conditional [regexp {^`endif([^A-Za-z0-9_$]|$)} $trimmed]
+
+        if { $conditional_depth > 0 || $starts_conditional || $ends_conditional } {
+            append out "\n"
+        } else {
+            append out $line "\n"
+        }
+
+        if { $starts_conditional } {
+            incr conditional_depth
+        }
+        if { $ends_conditional && $conditional_depth > 0 } {
+            incr conditional_depth -1
+        }
+    }
+    return $out
+}
+
+proc mask_generate_regions { text } {
+    set out ""
+    set generate_depth 0
+    foreach line [split $text "\n"] {
+        set starts [regexp -all {(^|[^A-Za-z0-9_$])generate([^A-Za-z0-9_$]|$)} $line]
+        set ends [regexp -all {(^|[^A-Za-z0-9_$])endgenerate([^A-Za-z0-9_$]|$)} $line]
+        if { $generate_depth > 0 || $starts > 0 || $ends > 0 } {
+            append out "\n"
+        } else {
+            append out $line "\n"
+        }
+        incr generate_depth $starts
+        incr generate_depth -$ends
+        if { $generate_depth < 0 } {
+            set generate_depth 0
+        }
+    }
+    return $out
+}
+
+proc mask_implicit_generate_regions { text } {
+    set out ""
+    set begin_depth 0
+    set case_depth 0
+    set pending_statement 0
+    set awaiting_else 0
+    foreach line [split $text "\n"] {
+        set trimmed [string trim $line]
+
+        if { $case_depth > 0 } {
+            append out "\n"
+            incr case_depth [regexp -all {(^|[^A-Za-z0-9_$])case[xz]?([^A-Za-z0-9_$]|$)} $trimmed]
+            incr case_depth -[regexp -all {(^|[^A-Za-z0-9_$])endcase([^A-Za-z0-9_$]|$)} $trimmed]
+            if { $case_depth < 0 } {
+                set case_depth 0
+            }
+            continue
+        }
+
+        if { $begin_depth > 0 } {
+            append out "\n"
+            incr begin_depth [regexp -all {(^|[^A-Za-z0-9_$])begin([^A-Za-z0-9_$]|$)} $trimmed]
+            incr begin_depth -[regexp -all {(^|[^A-Za-z0-9_$])end([^A-Za-z0-9_$]|$)} $trimmed]
+            if { $begin_depth < 0 } {
+                set begin_depth 0
+            }
+            if { $begin_depth == 0 } {
+                set awaiting_else 1
+            }
+            continue
+        }
+
+        if { $pending_statement } {
+            append out "\n"
+            set starts [regexp -all {(^|[^A-Za-z0-9_$])begin([^A-Za-z0-9_$]|$)} $trimmed]
+            set ends [regexp -all {(^|[^A-Za-z0-9_$])end([^A-Za-z0-9_$]|$)} $trimmed]
+            if { $starts > 0 } {
+                set begin_depth [expr {$starts - $ends}]
+                if { $begin_depth < 0 } {
+                    set begin_depth 0
+                }
+                set pending_statement 0
+                if { $begin_depth == 0 } {
+                    set awaiting_else 1
+                }
+            } elseif { [string first ";" $trimmed] >= 0 } {
+                set pending_statement 0
+                set awaiting_else 1
+            }
+            continue
+        }
+
+        if { $awaiting_else } {
+            if { $trimmed eq "" } {
+                append out "\n"
+                continue
+            }
+            if { [regexp {^else([^A-Za-z0-9_$]|$)} $trimmed] } {
+                append out "\n"
+                set awaiting_else 0
+                set starts [regexp -all {(^|[^A-Za-z0-9_$])begin([^A-Za-z0-9_$]|$)} $trimmed]
+                set ends [regexp -all {(^|[^A-Za-z0-9_$])end([^A-Za-z0-9_$]|$)} $trimmed]
+                if { $starts > 0 } {
+                    set begin_depth [expr {$starts - $ends}]
+                    if { $begin_depth < 0 } {
+                        set begin_depth 0
+                    }
+                    if { $begin_depth == 0 } {
+                        set awaiting_else 1
+                    }
+                } elseif { [string first ";" $trimmed] >= 0 } {
+                    set awaiting_else 1
+                } else {
+                    set pending_statement 1
+                }
+                continue
+            }
+            set awaiting_else 0
+        }
+
+        if { [regexp {(^|[^A-Za-z0-9_$])(if|for)\s*\(} $trimmed] } {
+            append out "\n"
+            set starts [regexp -all {(^|[^A-Za-z0-9_$])begin([^A-Za-z0-9_$]|$)} $trimmed]
+            set ends [regexp -all {(^|[^A-Za-z0-9_$])end([^A-Za-z0-9_$]|$)} $trimmed]
+            if { $starts > 0 } {
+                set begin_depth [expr {$starts - $ends}]
+                if { $begin_depth < 0 } {
+                    set begin_depth 0
+                }
+                if { $begin_depth == 0 } {
+                    set awaiting_else 1
+                }
+            } elseif { [string first ";" $trimmed] >= 0 } {
+                set awaiting_else 1
+            } else {
+                set pending_statement 1
+            }
+            continue
+        }
+        if { [regexp {(^|[^A-Za-z0-9_$])case[xz]?\s*\(} $trimmed] } {
+            append out "\n"
+            set case_depth 1
+            if { [regexp {(^|[^A-Za-z0-9_$])endcase([^A-Za-z0-9_$]|$)} $trimmed] } {
+                set case_depth 0
+            }
+            continue
+        }
+
+        append out $line "\n"
+    }
+    return $out
+}
+
 proc read_source_text_without_line_comments { srcfile } {
     if { $srcfile eq "" || ![file exists $srcfile] } {
         return ""
@@ -1242,7 +1507,7 @@ proc read_source_text_without_line_comments { srcfile } {
         append text [string trim $line] "\n"
     }
     close $fh
-    return $text
+    return [mask_preprocessor_conditional_regions $text]
 }
 
 proc build_module_text_map { srcfile } {
@@ -1497,6 +1762,11 @@ proc source_context_for_signal { signame {srcfile_hint ""} {scope_hint ""} } {
 }
 
 proc parse_assign_stmt_text { text } {
+    # Generate conditions and parameters are resolved only in the elaborated
+    # KDB.  Raw RTL cannot prove which branch exists, so source assignment
+    # fallback must ignore every explicit generate region.
+    set text [mask_generate_regions $text]
+    set text [mask_implicit_generate_regions $text]
     set assigns {}
     foreach stmt [split $text ";"] {
         set stmt [strip_leading_block_end_tokens $stmt]
@@ -1552,7 +1822,7 @@ proc build_assign_stmt_list_for_module { srcfile module } {
     global assign_stmt_list_module_cache
 
     if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
-        return [build_assign_stmt_list $srcfile]
+        return {}
     }
 
     set key "${srcfile}::${module}"
@@ -1562,7 +1832,7 @@ proc build_assign_stmt_list_for_module { srcfile module } {
 
     set text [source_module_text $srcfile $module]
     if { $text eq "" } {
-        set assigns [build_assign_stmt_list $srcfile]
+        set assigns {}
     } else {
         set assigns [parse_assign_stmt_text $text]
     }
@@ -1571,28 +1841,44 @@ proc build_assign_stmt_list_for_module { srcfile module } {
 }
 
 proc parse_signal_width_text { text } {
-    global signal_width_map_cache
-
     set widths {}
-    foreach line [split $text "\n"] {
-        regsub {//.*$} $line "" line
-        set line [string trim $line]
-        if { $line eq "" } {
+    set flat [string map [list "\r" " " "\n" " "] $text]
+
+    # ANSI port declarations can share the module line.  Split every
+    # declaration keyword that follows a Verilog list/statement delimiter into
+    # its own clause before applying the same parser to ANSI and body forms.
+    set replacement "\\1\n\\2"
+    regsub -all {([;,(])\s*((input|output|inout|wire|reg|logic)([^A-Za-z0-9_$]|$))} $flat $replacement flat
+    foreach clause [split $flat "\n"] {
+        set clause [string trim $clause]
+        if { $clause eq "" } {
             continue
         }
-        if { ![regexp {^(input|output|inout|wire|reg|logic)\s+(.*)$} $line -> _ rest] } {
+        if { ![regexp {^(input|output|inout|wire|reg|logic)([^A-Za-z0-9_$]|$)(.*)$} $clause -> _ _ rest] } {
             continue
         }
 
-        regsub -all {\b(wire|reg|logic|bit|signed|unsigned)\b} $rest " " rest
+        set semicolon [string first ";" $rest]
+        if { $semicolon >= 0 } {
+            set rest [string range $rest 0 [expr {$semicolon - 1}]]
+        }
+        regsub -all {\m(wire|reg|logic|bit|signed|unsigned)\M} $rest " " rest
+
         set width 1
-        if { [regexp {\[([0-9]+):([0-9]+)\]} $rest -> hi lo] } {
-            if { $hi >= $lo } {
-                set width [expr {$hi - $lo + 1}]
+        if { [regexp {\[([^\]]+)\]} $rest -> range] } {
+            if { [regexp {^\s*([0-9]+)\s*:\s*([0-9]+)\s*$} $range -> hi lo] } {
+                if { $hi >= $lo } {
+                    set width [expr {$hi - $lo + 1}]
+                } else {
+                    set width [expr {$lo - $hi + 1}]
+                }
             } else {
-                set width [expr {$lo - $hi + 1}]
+                # A symbolic packed range is not evidence of a scalar.  Keep
+                # the declaration for module resolution, but mark its width as
+                # unknown so bit projection will fail closed.
+                set width ""
             }
-            regsub -all {\[[0-9]+:[0-9]+\]} $rest " " rest
+            regsub -all {\[[^\]]+\]} $rest " " rest
         }
         regsub -all {[;()]} $rest " " rest
         foreach item [split $rest ","] {
@@ -1604,6 +1890,39 @@ proc parse_signal_width_text { text } {
         }
     }
     return $widths
+}
+
+proc parse_signal_range_text { text } {
+    set ranges {}
+    set flat [string map [list "\r" " " "\n" " "] $text]
+    set replacement "\\1\n\\2"
+    regsub -all {([;,(])\s*((input|output|inout|wire|reg|logic)([^A-Za-z0-9_$]|$))} $flat $replacement flat
+    foreach clause [split $flat "\n"] {
+        set clause [string trim $clause]
+        if { ![regexp {^(input|output|inout|wire|reg|logic)([^A-Za-z0-9_$]|$)(.*)$} $clause -> _ _ rest] } {
+            continue
+        }
+        set semicolon [string first ";" $rest]
+        if { $semicolon >= 0 } {
+            set rest [string range $rest 0 [expr {$semicolon - 1}]]
+        }
+        regsub -all {\m(wire|reg|logic|bit|signed|unsigned)\M} $rest " " rest
+
+        set select ""
+        if { [regexp {\[\s*([0-9]+)\s*:\s*([0-9]+)\s*\]} $rest -> left right] } {
+            set select "\[$left:$right\]"
+        }
+        regsub -all {\[[^\]]+\]} $rest " " rest
+        regsub -all {[;()]} $rest " " rest
+        foreach item [split $rest ","] {
+            regsub {=.*$} $item "" item
+            set item [string trim $item]
+            if { $select ne "" && [regexp {([A-Za-z_][A-Za-z0-9_$]*)$} $item -> name] } {
+                dict set ranges $name $select
+            }
+        }
+    }
+    return $ranges
 }
 
 proc build_signal_width_map { srcfile } {
@@ -1626,7 +1945,7 @@ proc build_signal_width_map_for_module { srcfile module } {
     global signal_width_map_module_cache
 
     if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
-        return [build_signal_width_map $srcfile]
+        return {}
     }
 
     set key "${srcfile}::${module}"
@@ -1636,12 +1955,33 @@ proc build_signal_width_map_for_module { srcfile module } {
 
     set text [source_module_text $srcfile $module]
     if { $text eq "" } {
-        set widths [build_signal_width_map $srcfile]
+        set widths {}
     } else {
         set widths [parse_signal_width_text $text]
     }
     set signal_width_map_module_cache($key) $widths
     return $widths
+}
+
+proc build_signal_range_map_for_module { srcfile module } {
+    global signal_range_map_module_cache
+
+    if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
+        return {}
+    }
+    set key "${srcfile}::${module}"
+    if { [info exists signal_range_map_module_cache($key)] } {
+        return $signal_range_map_module_cache($key)
+    }
+
+    set text [source_module_text $srcfile $module]
+    if { $text eq "" } {
+        set ranges {}
+    } else {
+        set ranges [parse_signal_range_text $text]
+    }
+    set signal_range_map_module_cache($key) $ranges
+    return $ranges
 }
 
 proc conn_references_signal_bit { conn leaf bit } {
@@ -1659,16 +1999,53 @@ proc conn_references_signal_bit { conn leaf bit } {
     return [lhs_select_contains_bit $select $bit]
 }
 
-proc conn_port_select_for_signal_bit { conn bit } {
+proc conn_port_select_for_signal_bit { conn leaf bit conn_width_map conn_range_map port port_width_map port_range_map status_var } {
+    upvar 1 $status_var status
+    set status 0
     if { $bit eq "" } {
+        set status 1
         return ""
     }
-    set select [assign_lhs_select $conn]
-    set port_bit [lhs_select_rhs_bit_for_target $select $bit]
-    if { $port_bit eq "" } {
-        return ""
+
+    # Convert the actual's declared index to a positional offset first.  A
+    # bare ascending vector cannot use its numeric index as that offset.
+    set conn_select [assign_lhs_select $conn]
+    if { $conn_select eq "" && [dict exists $conn_range_map $leaf] } {
+        set conn_select [dict get $conn_range_map $leaf]
     }
-    return "\[$port_bit\]"
+    if { $conn_select eq "" } {
+        if { ![dict exists $conn_width_map $leaf] ||
+             ![string is integer -strict [dict get $conn_width_map $leaf]] ||
+             [dict get $conn_width_map $leaf] != 1 || $bit != 0 } {
+            return ""
+        }
+        set port_offset 0
+    } else {
+        set port_offset [lhs_select_rhs_bit_for_target $conn_select $bit]
+        if { $port_offset eq "" } {
+            return ""
+        }
+    }
+
+    # Then map the same positional offset through the child formal's declared
+    # range.  If a vector range is symbolic or unavailable, fail closed.
+    if { [dict exists $port_range_map $port] } {
+        set port_bit [lhs_select_bit_from_rhs_offset [dict get $port_range_map $port] $port_offset]
+        if { $port_bit eq "" } {
+            return ""
+        }
+        set status 1
+        return "\[$port_bit\]"
+    }
+    if { [dict exists $port_width_map $port] &&
+         [string is integer -strict [dict get $port_width_map $port]] &&
+         [dict get $port_width_map $port] == 1 && $port_offset == 0 } {
+        set status 1
+        # Keep the scalar pseudo-bit spelling so downstream tracing uses the
+        # exact bit API just as it did before positional vector mapping.
+        return "\[0\]"
+    }
+    return ""
 }
 
 proc parse_instantiation_stmt_text { text } {
@@ -1716,7 +2093,7 @@ proc build_instantiation_stmt_list_for_module { srcfile module } {
     global inst_stmt_list_module_cache
 
     if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
-        return [build_instantiation_stmt_list $srcfile]
+        return {}
     }
 
     set key "${srcfile}::${module}"
@@ -1726,7 +2103,7 @@ proc build_instantiation_stmt_list_for_module { srcfile module } {
 
     set text [source_module_text $srcfile $module]
     if { $text eq "" } {
-        set insts [build_instantiation_stmt_list $srcfile]
+        set insts {}
     } else {
         set insts [parse_instantiation_stmt_text $text]
     }
@@ -1812,7 +2189,7 @@ proc source_parent_module_for_child_inst { parent_scope parent_srcfile child_ins
     return ""
 }
 
-proc source_port_connection_driver_starts { inst_path parent_path instname portname trace_select port_width parent_srcfile_hint } {
+proc source_port_connection_driver_starts { inst_path parent_path instname portname trace_select port_width parent_srcfile_hint {port_range ""} } {
     set target_bits [select_selected_bits $trace_select]
     set scalar_port_whole [expr {[llength $target_bits] == 0 && $port_width ne "" && $port_width == 1}]
     if { [llength $target_bits] == 0 } {
@@ -1862,6 +2239,7 @@ proc source_port_connection_driver_starts { inst_path parent_path instname portn
     }
 
     set width_map [build_signal_width_map_for_module $parent_srcfile $parent_module]
+    set range_map [build_signal_range_map_for_module $parent_srcfile $parent_module]
     set starts {}
     foreach bit $target_bits {
         if { [rhs_has_ternary_expr $conn_expr] } {
@@ -1875,9 +2253,20 @@ proc source_port_connection_driver_starts { inst_path parent_path instname portn
             append_unique_signal starts "${parent_scope}.${bare_name}"
             continue
         }
-        set bit_sources [rhs_driver_sources_for_bit $conn_expr $bit $parent_scope $width_map]
+        set rhs_offset $bit
+        if { $port_range ne "" } {
+            set rhs_offset [lhs_select_rhs_bit_for_target $port_range $bit]
+        } elseif { $port_width ne "" && $port_width > 1 } {
+            debug_step "source_port_conn_driver_unresolved inst=$inst_path port=$portname bit=$bit reason=unknown_port_decl_range"
+            continue
+        }
+        if { $rhs_offset eq "" } {
+            debug_step "source_port_conn_driver_unresolved inst=$inst_path port=$portname bit=$bit reason=outside_port_decl_range"
+            continue
+        }
+        set bit_sources [rhs_driver_sources_for_bit $conn_expr $rhs_offset $parent_scope $width_map $range_map]
         if { [llength $bit_sources] == 0 } {
-            set direct_source [expr_item_source_signal_for_bit $conn_expr $bit $parent_scope $width_map]
+            set direct_source [expr_item_source_signal_for_bit $conn_expr $rhs_offset $parent_scope $width_map $range_map]
             if { $direct_source ne "" } {
                 set bit_sources [list $direct_source]
             }
@@ -1956,6 +2345,7 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set range_map [build_signal_range_map_for_module $srcfile $module]
     set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set sources {}
@@ -1964,6 +2354,17 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
         set modname [lindex $inst 0]
         set instname [lindex $inst 1]
         set conn_text [lindex $inst 2]
+        if { $prefix ne "" } {
+            set child_scope "${prefix}.${instname}"
+        } else {
+            set child_scope $instname
+        }
+        set child_srcfile [source_file_for_scope_module $child_scope $modname ""]
+        if { $child_srcfile eq "" && [source_module_text $srcfile $modname] ne "" } {
+            set child_srcfile $srcfile
+        }
+        set child_width_map [build_signal_width_map_for_module $child_srcfile $modname]
+        set child_range_map [build_signal_range_map_for_module $child_srcfile $modname]
 
         foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
             set target_bits $selected_bits
@@ -1974,8 +2375,10 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
                 if { ![conn_references_signal_bit $conn $leaf $bit] } {
                     continue
                 }
-                set port_select [conn_port_select_for_signal_bit $conn $bit]
-                if { $bit ne "" && $port_select eq "" } {
+                set port_select_status 0
+                set port_select [conn_port_select_for_signal_bit $conn $leaf $bit $width_map $range_map $port $child_width_map $child_range_map port_select_status]
+                if { !$port_select_status } {
+                    debug_step "source_module_port_driver_skip signal=$signame inst=$instname port=$port conn=$conn bit=$bit reason=unknown_positional_mapping"
                     continue
                 }
                 if { $prefix ne "" } {
@@ -2060,6 +2463,7 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set range_map [build_signal_range_map_for_module $srcfile $module]
     set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set fanouts {}
@@ -2069,6 +2473,17 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
         set modname [lindex $inst 0]
         set instname [lindex $inst 1]
         set conn_text [lindex $inst 2]
+        if { $prefix ne "" } {
+            set child_scope "${prefix}.${instname}"
+        } else {
+            set child_scope $instname
+        }
+        set child_srcfile [source_file_for_scope_module $child_scope $modname ""]
+        if { $child_srcfile eq "" && [source_module_text $srcfile $modname] ne "" } {
+            set child_srcfile $srcfile
+        }
+        set child_width_map [build_signal_width_map_for_module $child_srcfile $modname]
+        set child_range_map [build_signal_range_map_for_module $child_srcfile $modname]
 
         foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
             set target_bits $selected_bits
@@ -2079,9 +2494,10 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
                 if { ![conn_references_signal_bit $conn $leaf $bit] } {
                     continue
                 }
-                set port_select [conn_port_select_for_signal_bit $conn $bit]
-                if { $bit ne "" && $port_select eq "" } {
-                    debug_step "source_module_port_load_skip signal=$signame inst=$instname port=$port conn=$conn bit=$bit reason=port_select_empty"
+                set port_select_status 0
+                set port_select [conn_port_select_for_signal_bit $conn $leaf $bit $width_map $range_map $port $child_width_map $child_range_map port_select_status]
+                if { !$port_select_status } {
+                    debug_step "source_module_port_load_skip signal=$signame inst=$instname port=$port conn=$conn bit=$bit reason=unknown_positional_mapping"
                     continue
                 }
                 if { $prefix ne "" } {
@@ -2151,7 +2567,13 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set range_map [build_signal_range_map_for_module $srcfile $module]
     set selected_bits [effective_selected_bits_for_lhs [signal_selected_bits $signame] $leaf $width_map]
+    set query_unknown_range 0
+    if { [llength $selected_bits] > 0 && [dict exists $width_map $leaf] &&
+         [dict get $width_map $leaf] eq "" } {
+        set query_unknown_range 1
+    }
 
     set fanouts {}
     set assign_list [build_assign_stmt_list_for_module $srcfile $module]
@@ -2175,6 +2597,10 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
             if { [string first $leaf $rhs] >= 0 } {
                 debug_step "source_assign_load_skip signal=$signame lhs=$lhs_leaf$lhs_select rhs=$rhs bit=$bit reason=rhs_bit_mismatch"
             }
+            continue
+        }
+        if { $query_unknown_range && [rhs_has_unselected_signal_reference $rhs $leaf] } {
+            debug_step "source_assign_load_skip signal=$signame lhs=$lhs_leaf$lhs_select reason=unknown_rhs_decl_range"
             continue
         }
         incr match_count
@@ -2212,8 +2638,16 @@ proc source_assign_load_fanouts_core { sig_hdl signame {include_expr 1} {srcfile
         if { [llength $lhs_bits] == 0 } {
             continue
         }
+        set effective_lhs_select $lhs_select
+        if { $effective_lhs_select eq "" && [dict exists $range_map $lhs_leaf] } {
+            set effective_lhs_select [dict get $range_map $lhs_leaf]
+        }
+        if { $effective_lhs_select eq "" && [dict exists $width_map $lhs_leaf] &&
+             [dict get $width_map $lhs_leaf] eq "" } {
+            continue
+        }
         foreach lhs_bit $lhs_bits {
-            set lhs_bit [lhs_select_bit_from_rhs_offset $lhs_select $lhs_bit]
+            set lhs_bit [lhs_select_bit_from_rhs_offset $effective_lhs_select $lhs_bit]
             if { $lhs_bit eq "" } {
                 continue
             }
@@ -2443,7 +2877,7 @@ proc expr_item_width { item {width_map {}} } {
         if { [dict exists $width_map $name] } {
             return [dict get $width_map $name]
         }
-        return 1
+        return ""
     }
     return ""
 }
@@ -2466,7 +2900,7 @@ proc expr_item_source_signal { item prefix } {
     return ""
 }
 
-proc expr_item_source_signal_for_bit { item bit prefix {width_map {}} } {
+proc expr_item_source_signal_for_bit { item bit prefix width_map range_map } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
 
@@ -2488,11 +2922,23 @@ proc expr_item_source_signal_for_bit { item bit prefix {width_map {}} } {
     set source_select $select
     if { $bit ne "" } {
         if { $select eq "" } {
-            set width ""
-            if { [dict exists $width_map $name] } {
+            if { [dict exists $range_map $name] } {
+                set source_bit [lhs_select_bit_from_rhs_offset [dict get $range_map $name] $bit]
+                if { $source_bit eq "" } {
+                    return ""
+                }
+                set source_select "\[$source_bit\]"
+            } elseif { [dict exists $width_map $name] } {
                 set width [dict get $width_map $name]
-            }
-            if { $width eq "" || $width > 1 || $bit != 0 } {
+                if { ![string is integer -strict $width] } {
+                    return ""
+                }
+                if { $width != 1 || $bit != 0 } {
+                    # A vector width without a numeric declaration range does
+                    # not reveal whether its left or right index is the MSB.
+                    return ""
+                }
+            } else {
                 set source_select "\[$bit\]"
             }
         } else {
@@ -2531,7 +2977,7 @@ proc expr_item_source_signals { item prefix } {
     return {}
 }
 
-proc rhs_driver_sources_for_bit { rhs bit prefix {width_map {}} } {
+proc rhs_driver_sources_for_bit { rhs bit prefix width_map range_map } {
     set rhs [string trim $rhs]
     regsub -all {\s+} $rhs "" rhs_no_space
 
@@ -2540,7 +2986,7 @@ proc rhs_driver_sources_for_bit { rhs bit prefix {width_map {}} } {
         return {}
     }
 
-    set direct_source [expr_item_source_signal_for_bit $rhs_no_space $bit $prefix $width_map]
+    set direct_source [expr_item_source_signal_for_bit $rhs_no_space $bit $prefix $width_map $range_map]
     if { $direct_source ne "" } {
         return [list $direct_source]
     }
@@ -2558,7 +3004,7 @@ proc rhs_driver_sources_for_bit { rhs bit prefix {width_map {}} } {
         }
         set msb [expr {$lsb + $width - 1}]
         if { $bit >= $lsb && $bit <= $msb } {
-            set source [expr_item_source_signal_for_bit $item [expr {$bit - $lsb}] $prefix $width_map]
+            set source [expr_item_source_signal_for_bit $item [expr {$bit - $lsb}] $prefix $width_map $range_map]
             if { $source ne "" } {
                 return [list $source]
             }
@@ -2622,6 +3068,7 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set range_map [build_signal_range_map_for_module $srcfile $module]
     set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set sources {}
@@ -2653,7 +3100,7 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
             }
 
             foreach rhs_bit $rhs_offsets {
-                set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
+                set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map $range_map]
                 if { $direct_source ne "" } {
                     append_source_signal_candidate sources $direct_source driver $srcfile
                     continue
@@ -2661,11 +3108,22 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
                 if { !$include_expr } {
                     continue
                 }
-                foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
+                foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map $range_map] {
                     append_source_signal_candidate sources $source driver $srcfile
                 }
             }
             continue
+        }
+
+        if { [llength $selected_bits] > 0 && $lhs_select eq "" &&
+             [dict exists $width_map $lhs_leaf] &&
+             [dict get $width_map $lhs_leaf] eq "" } {
+            debug_step "source_assign_driver_skip signal=$signame lhs=$lhs_leaf reason=unknown_decl_range"
+            continue
+        }
+        set effective_lhs_select $lhs_select
+        if { $effective_lhs_select eq "" && [dict exists $range_map $lhs_leaf] } {
+            set effective_lhs_select [dict get $range_map $lhs_leaf]
         }
 
         if { [llength $selected_bits] == 0 } {
@@ -2681,11 +3139,11 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
             }
         } else {
             foreach target_bit $selected_bits {
-                set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $target_bit]
+                set rhs_bit [lhs_select_rhs_bit_for_target $effective_lhs_select $target_bit]
                 if { $rhs_bit eq "" } {
                     continue
                 }
-                set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map]
+                set direct_source [expr_item_source_signal_for_bit $rhs $rhs_bit $prefix $width_map $range_map]
                 if { $direct_source ne "" } {
                     append_source_signal_candidate sources $direct_source driver $srcfile
                     continue
@@ -2693,7 +3151,7 @@ proc source_assign_driver_sources_core { sig_hdl signame {srcfile_hint ""} {incl
                 if { !$include_expr } {
                     continue
                 }
-                foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map] {
+                foreach source [rhs_driver_sources_for_bit $rhs $rhs_bit $prefix $width_map $range_map] {
                     append_source_signal_candidate sources $source driver $srcfile
                 }
             }
@@ -2729,6 +3187,7 @@ proc source_assign_driver_data_sources { sig_hdl signame {srcfile_hint ""} {scop
         set module [source_scope_module_name $prefix $srcfile]
     }
     set width_map [build_signal_width_map_for_module $srcfile $module]
+    set range_map [build_signal_range_map_for_module $srcfile $module]
     set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set sources {}
@@ -2771,13 +3230,23 @@ proc source_assign_driver_data_sources { sig_hdl signame {srcfile_hint ""} {scop
 
             foreach rhs_bit $rhs_offsets {
                 foreach data_expr $data_exprs {
-                    foreach source [rhs_driver_sources_for_bit $data_expr $rhs_bit $prefix $width_map] {
+                    foreach source [rhs_driver_sources_for_bit $data_expr $rhs_bit $prefix $width_map $range_map] {
                         append_source_signal_candidate sources $source driver $srcfile
                     }
                 }
             }
             set found_restrictive_assign 1
             continue
+        }
+
+        if { [llength $selected_bits] > 0 && $lhs_select eq "" &&
+             [dict exists $width_map $lhs_leaf] &&
+             [dict get $width_map $lhs_leaf] eq "" } {
+            continue
+        }
+        set effective_lhs_select $lhs_select
+        if { $effective_lhs_select eq "" && [dict exists $range_map $lhs_leaf] } {
+            set effective_lhs_select [dict get $range_map $lhs_leaf]
         }
 
         if { [llength $selected_bits] == 0 } {
@@ -2789,12 +3258,12 @@ proc source_assign_driver_data_sources { sig_hdl signame {srcfile_hint ""} {scop
             set found_restrictive_assign 1
         } else {
             foreach target_bit $selected_bits {
-                set rhs_bit [lhs_select_rhs_bit_for_target $lhs_select $target_bit]
+                set rhs_bit [lhs_select_rhs_bit_for_target $effective_lhs_select $target_bit]
                 if { $rhs_bit eq "" } {
                     continue
                 }
                 foreach data_expr $data_exprs {
-                    foreach source [rhs_driver_sources_for_bit $data_expr $rhs_bit $prefix $width_map] {
+                    foreach source [rhs_driver_sources_for_bit $data_expr $rhs_bit $prefix $width_map $range_map] {
                         append_source_signal_candidate sources $source driver $srcfile
                     }
                 }
@@ -3229,7 +3698,7 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
     return ""
 }
 
-proc const_driver_from_connected_signal { sig_hdl signame } {
+proc const_driver_from_connected_signal { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
     global const_source_fallback
 
     set signame [normalize_signal_name $signame]
@@ -3242,6 +3711,9 @@ proc const_driver_from_connected_signal { sig_hdl signame } {
 
     set srcfile [get_handle_source_file $sig_hdl]
     if { $srcfile eq "" } {
+        set srcfile $srcfile_hint
+    }
+    if { $srcfile eq "" } {
         return ""
     }
 
@@ -3250,7 +3722,22 @@ proc const_driver_from_connected_signal { sig_hdl signame } {
         return ""
     }
 
-    set const_map [build_const_assign_map $srcfile]
+    set prefix [signal_effective_scope_prefix $signame $scope_hint]
+    set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+    set ctx_srcfile [lindex $ctx 0]
+    set module [lindex $ctx 1]
+    if { $ctx_srcfile ne "" } {
+        set srcfile $ctx_srcfile
+    }
+    if { $module eq "" } {
+        set module [source_scope_module_name $prefix $srcfile]
+    }
+    if { $module eq "" } {
+        debug_step "const_driver_source_skip signal=$signame source=$srcfile reason=module_unresolved"
+        return ""
+    }
+
+    set const_map [build_const_assign_map $srcfile $module]
     set value [const_driver_from_assign_map $const_map $signame $leaf]
     if { $value ne "" } {
         log_step "const_driver_from_parent_signal signal=$signame source=$srcfile value=$value"
@@ -3285,6 +3772,28 @@ proc is_self_port_signal { signame inst_path portname } {
     return 0
 }
 
+proc literal_hdl_value_name { hdl value {literal_select ""} } {
+    if { $value eq "" } {
+        return ""
+    }
+    set literal_name "Const:$value"
+    if { $literal_select ne "" } {
+        set projected [project_const_literal_to_select $literal_name $literal_select]
+        if { $projected ne "" } {
+            return $projected
+        }
+    }
+    set size [get_handle_size $hdl]
+    if { $size eq "1" && [regexp {^[01xXzZ?]$} $value] } {
+        set bit [string tolower $value]
+        if { $bit eq "?" } {
+            set bit x
+        }
+        return "Const:1'b$bit"
+    }
+    return $literal_name
+}
+
 proc hdl_to_name { hdl {literal_select ""} } {
     set is_literal 0
     catch { set is_literal [::npi_L1::npi_nl_ut_get_actual_is_literal $hdl] }
@@ -3292,13 +3801,7 @@ proc hdl_to_name { hdl {literal_select ""} } {
         set value ""
         catch { set value [::npi_L1::npi_nl_ut_get_actual_value $hdl] }
         if { $value ne "" } {
-            if { $literal_select ne "" } {
-                set projected [project_const_literal_to_select "Const:$value" $literal_select]
-                if { $projected ne "" } {
-                    return $projected
-                }
-            }
-            return "Const:$value"
+            return [literal_hdl_value_name $hdl $value $literal_select]
         }
     }
 
@@ -3329,13 +3832,7 @@ proc hdl_to_name { hdl {literal_select ""} } {
                 set value ""
                 catch { set value [::npi_L1::npi_nl_ut_get_actual_value $net_hdl] }
                 if { $value ne "" } {
-                    if { $literal_select ne "" } {
-                        set projected [project_const_literal_to_select "Const:$value" $literal_select]
-                        if { $projected ne "" } {
-                            return $projected
-                        }
-                    }
-                    return "Const:$value"
+                    return [literal_hdl_value_name $net_hdl $value $literal_select]
                 }
             }
             catch { set signame [npi_nl_get_str -property npiNlFullName -object $net_hdl] }
@@ -3354,30 +3851,78 @@ proc hdl_to_name { hdl {literal_select ""} } {
     return [normalize_signal_name $signame]
 }
 
+proc hdl_matches_selected_signal { hdl resolved_name selected_name } {
+    set resolved_name [normalize_signal_name $resolved_name]
+    set selected_name [normalize_signal_name $selected_name]
+    if { $resolved_name eq $selected_name } {
+        return 1
+    }
+
+    # Verdi represents a scalar's only bit with the scalar handle itself, so
+    # a lookup for "sig[0]" can legitimately report the name "sig".  Size 1
+    # is the proof that accepting this alias cannot expose sibling bits.
+    if { [signal_select_suffix $selected_name] eq "\[0\]" &&
+         [signal_base_without_select $selected_name] eq $resolved_name &&
+         [get_handle_size $hdl] eq "1" } {
+        return 1
+    }
+    return 0
+}
+
 proc select_hdl_for_signal_select { hdl select } {
     if { $hdl eq "" || $hdl == 0 || $select eq "" } {
         return $hdl
     }
 
-    set bits [select_selected_bits $select]
-    if { [llength $bits] != 1 } {
-        return $hdl
+    set base_name [hdl_to_name $hdl]
+    set selected_name [apply_signal_select $base_name $select]
+    if { $selected_name ne "" &&
+         ![is_const_literal_name $selected_name] &&
+         [llength [signal_selected_bits $selected_name]] > 0 &&
+         [info commands ::npi_L1::npi_nl_sig_handle_by_name] ne "" } {
+        set bit_hdl ""
+        if { ![catch { set bit_hdl [::npi_L1::npi_nl_sig_handle_by_name $selected_name] } err] &&
+             $bit_hdl ne "" && $bit_hdl != 0 } {
+            set resolved_name [hdl_to_name $bit_hdl]
+            if { [hdl_matches_selected_signal $bit_hdl $resolved_name $selected_name] } {
+                debug_step "select_hdl_by_name select=$select name=$selected_name resolved=$resolved_name"
+                return $bit_hdl
+            }
+            debug_step "select_hdl_by_name_reject select=$select name=$selected_name resolved=$resolved_name reason=not_exact"
+        } else {
+            debug_step "select_hdl_by_name_skip select=$select name=$selected_name error=$err"
+        }
     }
 
-    set bit [lindex $bits 0]
-    set bit_hdl ""
-    if { ![catch { set bit_hdl [npi_nl_handle_by_index -index $bit -object $hdl] } err] &&
-         $bit_hdl ne "" && $bit_hdl != 0 } {
-        debug_step "select_hdl_by_index select=$select bit=$bit"
-        return $bit_hdl
+    set bits [select_selected_bits $select]
+    if { [llength $bits] == 1 } {
+        set bit [lindex $bits 0]
+        set bit_hdl ""
+        if { ![catch { set bit_hdl [npi_nl_handle_by_index -index $bit -object $hdl] } err] &&
+             $bit_hdl ne "" && $bit_hdl != 0 } {
+            set resolved_name [hdl_to_name $bit_hdl]
+            if { [is_const_literal_name $resolved_name] ||
+                 ($selected_name ne "" &&
+                  [hdl_matches_selected_signal $bit_hdl $resolved_name $selected_name]) } {
+                debug_step "select_hdl_by_index select=$select bit=$bit resolved=$resolved_name"
+                return $bit_hdl
+            }
+            debug_step "select_hdl_by_index_reject select=$select bit=$bit resolved=$resolved_name reason=not_exact"
+        } else {
+            debug_step "select_hdl_by_index_skip select=$select bit=$bit error=$err"
+        }
     }
-    debug_step "select_hdl_by_index_skip select=$select bit=$bit error=$err"
-    return $hdl
+
+    # Returning the original vector here makes every later by-handle fallback
+    # eligible to report sibling-bit drivers.  Keep the selected name for
+    # module-scoped source analysis, but make handle tracing fail closed.
+    log_step "select_hdl_exact_unavailable select=$select base=$base_name selected=$selected_name"
+    return ""
 }
 
 proc hdl_to_selected_name { hdl select } {
     set selected_hdl [select_hdl_for_signal_select $hdl $select]
-    set selected_by_hdl [expr {$selected_hdl ne $hdl}]
+    set selected_by_hdl [expr {$selected_hdl ne "" && $selected_hdl != 0 && $selected_hdl ne $hdl}]
 
     if { $selected_by_hdl } {
         set signame [hdl_to_name $selected_hdl]
@@ -3404,6 +3949,162 @@ proc hdl_to_selected_name { hdl select } {
         return [apply_signal_select $signame $select]
     }
     return [normalize_signal_name $signame]
+}
+
+proc raw_bit_driver_handles_by_hdl { hdl status_var source_count_var } {
+    upvar 1 $status_var status
+    upvar 1 $source_count_var source_count
+    set status 0
+    set source_count 0
+    if { $hdl eq "" || $hdl == 0 ||
+         [info commands ::npi_L1::npi_nl_bit_trace_driver_by_hdl] eq "" } {
+        return {}
+    }
+
+    set resList {}
+    if { [catch { ::npi_L1::npi_nl_bit_trace_driver_by_hdl $hdl resList } err] } {
+        return {}
+    }
+    set status 1
+    set source_count [llength $resList]
+
+    set drivers {}
+    foreach result $resList {
+        foreach driver_hdl [lindex $result 1] {
+            if { [lsearch -exact $drivers $driver_hdl] < 0 } {
+                lappend drivers $driver_hdl
+            }
+        }
+    }
+    return $drivers
+}
+
+proc exact_literal_handle_for_driver { hdl } {
+    if { $hdl eq "" || $hdl == 0 } {
+        return ""
+    }
+    if { [is_const_literal_name [hdl_to_name $hdl]] } {
+        return $hdl
+    }
+
+    if { [info commands ::npi_L1::npi_nl_port_instport_2_net] ne "" } {
+        set net_hdl ""
+        if { ![catch { set net_hdl [::npi_L1::npi_nl_port_instport_2_net $hdl] }] &&
+             $net_hdl ne "" && $net_hdl != 0 &&
+             [is_const_literal_name [hdl_to_name $net_hdl]] } {
+            return $net_hdl
+        }
+    }
+    return ""
+}
+
+proc expand_exact_assign_driver_handle { hdl depth visited_var } {
+    upvar 1 $visited_var visited
+
+    if { $hdl eq "" || $hdl == 0 } {
+        return [list $hdl]
+    }
+    # Keyword instances are trace endpoints.  Expanding their output handles
+    # first can replace the endpoint with an implementation literal.
+    if { [signal_belongs_to_stop_instance [hdl_to_name $hdl]] } {
+        return [list $hdl]
+    }
+    set literal_hdl [exact_literal_handle_for_driver $hdl]
+    if { $literal_hdl ne "" } {
+        return [list $literal_hdl]
+    }
+    if { $depth <= 0 } {
+        return [list $hdl]
+    }
+    if { [lsearch -exact $visited $hdl] >= 0 } {
+        return {}
+    }
+    lappend visited $hdl
+
+    set candidates {}
+    set pass_hdl ""
+    if { [info commands ::npi_L1::npi_nl_pass_assign_cell] ne "" &&
+         ![catch { set pass_hdl [::npi_L1::npi_nl_pass_assign_cell $hdl] }] &&
+         $pass_hdl ne "" && $pass_hdl != 0 && $pass_hdl ne $hdl } {
+        lappend candidates $pass_hdl
+    }
+
+    # Some KDB forms expose the opposite side of an assignment cell only via
+    # bit trace.  Restrict this extra hop to handles positively identified by
+    # pass_assign_cell; generic Combo/RegCombo endpoints remain semantic stops.
+    if { [llength $candidates] > 0 } {
+        set raw_status 0
+        set raw_sources 0
+        foreach candidate [raw_bit_driver_handles_by_hdl $hdl raw_status raw_sources] {
+            if { $candidate ne "" && $candidate != 0 &&
+                 [lsearch -exact $candidates $candidate] < 0 } {
+                lappend candidates $candidate
+            }
+        }
+    }
+
+    if { [llength $candidates] == 0 } {
+        return [list $hdl]
+    }
+
+    set expanded {}
+    foreach candidate $candidates {
+        foreach endpoint [expand_exact_assign_driver_handle $candidate [expr {$depth - 1}] visited] {
+            if { $endpoint ne "" && [lsearch -exact $expanded $endpoint] < 0 } {
+                lappend expanded $endpoint
+            }
+        }
+    }
+    if { [llength $expanded] == 0 } {
+        return [list $hdl]
+    }
+    return $expanded
+}
+
+proc bit_driver_handles_by_exact_hdl { hdl signame status_var } {
+    global assign_trace_max_depth
+    upvar 1 $status_var status
+    set source_count 0
+    set immediate [raw_bit_driver_handles_by_hdl $hdl status source_count]
+    if { !$status } {
+        log_step "bit_driver_npi_exact_error signal=$signame reason=api_failed"
+        return {}
+    }
+
+    set drivers {}
+    foreach driver_hdl $immediate {
+        set visited {}
+        foreach endpoint [expand_exact_assign_driver_handle $driver_hdl $assign_trace_max_depth visited] {
+            if { $endpoint ne "" && [lsearch -exact $drivers $endpoint] < 0 } {
+                lappend drivers $endpoint
+            }
+        }
+    }
+    log_step "bit_driver_npi_exact signal=$signame sources=$source_count immediate=[llength $immediate] drivers=[llength $drivers]"
+    return $drivers
+}
+
+proc bit_driver_handles_by_exact_name { signame status_var } {
+    upvar 1 $status_var status
+    set status 0
+    set signame [normalize_signal_name $signame]
+    if { $signame eq "" || [llength [signal_selected_bits $signame]] == 0 ||
+         [info commands ::npi_L1::npi_nl_sig_handle_by_name] eq "" } {
+        return {}
+    }
+
+    set hdl ""
+    if { [catch { set hdl [::npi_L1::npi_nl_sig_handle_by_name $signame] } err] ||
+         $hdl eq "" || $hdl == 0 } {
+        log_step "bit_driver_npi_exact_unavailable signal=$signame error=$err"
+        return {}
+    }
+    set resolved_name [hdl_to_name $hdl]
+    if { ![hdl_matches_selected_signal $hdl $resolved_name $signame] } {
+        log_step "bit_driver_npi_exact_unavailable signal=$signame resolved=$resolved_name reason=not_exact"
+        return {}
+    }
+    return [bit_driver_handles_by_exact_hdl $hdl $signame status]
 }
 
 proc hdl_kind { hdl } {
@@ -3871,8 +4572,11 @@ proc load_trace_signal_key { signame {srcfile_hint ""} {scope_hint ""} } {
          $ctx_srcfile ne "" &&
          $ctx_module ne "" } {
         set width_map [build_signal_width_map_for_module $ctx_srcfile $ctx_module]
-        if { [dict exists $width_map $leaf] && [dict get $width_map $leaf] == 1 } {
-            set key_signal [strip_signal_selects $scoped]
+        if { [dict exists $width_map $leaf] } {
+            set width [dict get $width_map $leaf]
+            if { [string is integer -strict $width] && $width == 1 } {
+                set key_signal [strip_signal_selects $scoped]
+            }
         }
     }
 
@@ -3987,7 +4691,10 @@ proc load_trace_should_run_hdl_fallback { signame srcfile_hint scope_hint } {
         if { $ctx_srcfile ne "" && $ctx_module ne "" } {
             set width_map [build_signal_width_map_for_module $ctx_srcfile $ctx_module]
             if { $leaf ne "" && [dict exists $width_map $leaf] } {
-                return 0
+                set width [dict get $width_map $leaf]
+                if { [string is integer -strict $width] && $width > 0 } {
+                    return 0
+                }
             }
         }
     }
@@ -4261,6 +4968,14 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     if { $signame eq "" || [is_const_literal_name $signame] } {
         return
     }
+    # The optional stop-instance list contains keyword endpoints discovered by
+    # the higher-level filter workflow.  Once a driver reaches such an
+    # instance port, its implementation is not an external tie for the traced
+    # signal and must not be expanded into internal constants or logic.
+    if { [signal_belongs_to_stop_instance $signame] } {
+        log_step "driver_endpoint_stop signal=$signame reason=stop_instance"
+        return
+    }
     if { [signal_seen_or_mark visited $signame] } {
         return
     }
@@ -4295,7 +5010,14 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     collect_driver_module_port_high_conns "" $module_port_query all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
 
     set driverList {}
-    if { [catch { ::npi_L1::npi_nl_trace_driver $signame driverList 0 1 } err] } {
+    set selected_query [expr {[llength [signal_selected_bits $signame]] > 0}]
+    if { $selected_query } {
+        set exact_status 0
+        set driverList [bit_driver_handles_by_exact_name $signame exact_status]
+        if { !$exact_status } {
+            log_step "bit_driver_npi_fail_closed signal=$signame reason=exact_trace_unavailable"
+        }
+    } elseif { [catch { ::npi_L1::npi_nl_trace_driver $signame driverList 0 1 } err] } {
         log_step "driver_assign_trace_error passMod=1 signal=$signame error=$err"
         set driverList {}
     }
@@ -4325,7 +5047,9 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     }
 
     set moduleDriverList {}
-    if { [catch { ::npi_L1::npi_nl_trace_driver $signame moduleDriverList 0 0 } err] } {
+    if { $selected_query } {
+        set moduleDriverList $driverList
+    } elseif { [catch { ::npi_L1::npi_nl_trace_driver $signame moduleDriverList 0 0 } err] } {
         log_step "driver_assign_trace_error passMod=0 signal=$signame error=$err"
         set moduleDriverList {}
     }
@@ -4909,6 +5633,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
     set port_dir_map {}
     set src_port_dir_map {}
     set src_port_width_map {}
+    set src_port_range_map {}
     set module_srcfile ""
     foreach io_hdl $io_hdl_list {
         set portname [get_port_name $io_hdl]
@@ -4931,7 +5656,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { $module_srcfile ne "" } {
             set src_port_dir_map [build_port_dir_map $module_srcfile $target_mod]
             set src_port_width_map [build_signal_width_map_for_module $module_srcfile $target_mod]
-            log_step "source_port_direction_file=$module_srcfile parsed_ports=[dict size $src_port_dir_map] parsed_widths=[dict size $src_port_width_map] instance=$inst_path"
+            set src_port_range_map [build_signal_range_map_for_module $module_srcfile $target_mod]
+            log_step "source_port_direction_file=$module_srcfile parsed_ports=[dict size $src_port_dir_map] parsed_widths=[dict size $src_port_width_map] parsed_ranges=[dict size $src_port_range_map] instance=$inst_path"
         }
     }
 
@@ -5001,6 +5727,14 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { [dict exists $src_port_width_map $base_portname] } {
             set base_port_width [dict get $src_port_width_map $base_portname]
         }
+        set base_port_range ""
+        if { [dict exists $src_port_range_map $base_portname] } {
+            set base_port_range [dict get $src_port_range_map $base_portname]
+        }
+        set npi_port_width [get_handle_size $port_hdl]
+        if { $npi_port_width ne "" } {
+            set base_port_width $npi_port_width
+        }
         foreach trace_portname [selected_port_names $base_portname] {
             set parsed_trace_port [split_port_filter_spec $trace_portname]
             set trace_select [lindex $parsed_trace_port 1]
@@ -5067,7 +5801,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             }
 
             if { $dir eq "input" && [lsearch -exact $high_sigs $sig_hdl] >= 0 } {
-                set precise_driver_starts [source_port_connection_driver_starts $inst_path $parent_path $instname $base_portname $trace_select $base_port_width $driver_srcfile_hint]
+                set precise_driver_starts [source_port_connection_driver_starts $inst_path $parent_path $instname $base_portname $trace_select $base_port_width $driver_srcfile_hint $base_port_range]
                 if { [llength $precise_driver_starts] > 0 } {
                     set precise_count_before [llength $all_drivers]
                     foreach start_sig $precise_driver_starts {
@@ -5112,7 +5846,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 set const_driver_for_connection 1
             }
 
-            set parent_const_driver [const_driver_from_connected_signal $trace_sig_hdl $signame]
+            set parent_const_driver [const_driver_from_connected_signal $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
             if { $parent_const_driver ne "" } {
                 lappend all_drivers $parent_const_driver
                 set const_driver_for_connection 1
@@ -5186,7 +5920,15 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             if { $driver_combo_stop eq "" && [llength $all_drivers] == $driver_count_before } {
                 # Note: return value can be 1 (success) or 2 (success with some condition)
                 set driverList {}
-                catch { ::npi_L1::npi_nl_trace_driver_by_hdl $trace_sig_hdl driverList 0 1 }
+                if { $trace_select ne "" } {
+                    set exact_status 0
+                    set driverList [bit_driver_handles_by_exact_hdl $trace_sig_hdl $signame exact_status]
+                    if { !$exact_status } {
+                        log_step "bit_driver_npi_fail_closed signal=$signame reason=exact_handle_trace_unavailable"
+                    }
+                } else {
+                    catch { ::npi_L1::npi_nl_trace_driver_by_hdl $trace_sig_hdl driverList 0 1 }
+                }
                 foreach hdl $driverList {
                     set sig [hdl_to_name $hdl]
                     if { $sig ne "" } {
@@ -5218,7 +5960,15 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                  $driver_combo_stop eq "" &&
                  [llength $module_drivers] == $module_driver_count_before } {
                 set moduleDriverList {}
-                catch { ::npi_L1::npi_nl_trace_driver_by_hdl $trace_sig_hdl moduleDriverList 0 0 }
+                if { $trace_select ne "" } {
+                    set exact_status 0
+                    set moduleDriverList [bit_driver_handles_by_exact_hdl $trace_sig_hdl $signame exact_status]
+                    if { !$exact_status } {
+                        log_step "bit_driver_npi_fail_closed signal=$signame reason=exact_module_handle_trace_unavailable"
+                    }
+                } else {
+                    catch { ::npi_L1::npi_nl_trace_driver_by_hdl $trace_sig_hdl moduleDriverList 0 0 }
+                }
                 foreach hdl $moduleDriverList {
                     set sig [hdl_to_name $hdl]
                     if { [is_module_boundary_signal $sig] } {

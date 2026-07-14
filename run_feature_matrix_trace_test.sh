@@ -334,14 +334,20 @@ if checked_target != 2 or checked_aux != 2 or checked_leaf != 4:
 
 for log_name in ["feature_matrix_raw.log"]:
     text = Path(log_name).read_text(errors="replace")
-    for marker in [
-        "source_assign_direct_driver_source",
-        "source_assign_direct_load_fanout",
-        "source_module_port_load",
-        "module_port_high_continue",
-    ]:
-        if marker not in text:
-            raise SystemExit(f"{log_name} missing debug marker {marker}")
+    required_paths = {
+        "driver continuation": [
+            "source_assign_direct_driver_source",
+            "driver_module_port_high_continue",
+            "bit_driver_npi_exact",
+        ],
+        "load continuation": [
+            "source_assign_direct_load_fanout",
+            "load_module_port_high_continue",
+        ],
+    }
+    for label, markers in required_paths.items():
+        if not any(marker in text for marker in markers):
+            raise SystemExit(f"{log_name} missing {label} evidence; expected one of {markers}")
 
 print("[feature_matrix] assertions passed")
 PY

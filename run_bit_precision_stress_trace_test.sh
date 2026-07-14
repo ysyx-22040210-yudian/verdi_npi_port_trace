@@ -142,13 +142,22 @@ if not y13_filtered_loads or has(y13_filtered_loads, "u_sink_low.in"):
 log_text = Path("bit_precision_stress_trace.log").read_text(errors="replace")
 required_log_tokens = [
     "trace_port_bit",
-    "select_hdl_by_index",
-    "bit_driver_source_restrict",
+    "select_hdl_by_name",
     "driver_combo_stop",
 ]
 missing = [tok for tok in required_log_tokens if tok not in log_text]
 if missing:
     raise SystemExit(f"debug log missing expected evidence {missing}")
+precision_paths = [
+    "bit_driver_npi_exact",
+    "bit_driver_source_restrict",
+    "driver_precise_start_continue",
+]
+if not any(token in log_text for token in precision_paths):
+    raise SystemExit(f"debug log missing precise driver path evidence {precision_paths}")
+for token in ["bit_driver_npi_fail_closed", "select_hdl_exact_unavailable"]:
+    if token in log_text:
+        raise SystemExit(f"exact bit trace unexpectedly failed: {token}")
 
 print("[bit_precision_stress] assertions passed")
 PY

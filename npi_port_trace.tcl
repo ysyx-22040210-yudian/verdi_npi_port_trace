@@ -1003,6 +1003,178 @@ proc scoped_signal_for_query { signame {scope_hint ""} } {
     return $signame
 }
 
+proc log_field_value { value } {
+    set value [string trim $value]
+    if { $value eq "" } {
+        return "<empty>"
+    }
+    set value [string map [list "\n" "\\n" "\r" "\\r" "\t" "\\t"] $value]
+    if { [regexp {\s} $value] } {
+        return "{$value}"
+    }
+    return $value
+}
+
+proc qualify_signal_for_log { signame {scope_hint ""} } {
+    set signame [normalize_signal_name $signame]
+    if { $signame eq "" ||
+         [is_const_literal_name $signame] ||
+         [signal_scope_prefix $signame] ne "" } {
+        return $signame
+    }
+    if { $scope_hint ne "" &&
+         [regexp {^[A-Za-z_][A-Za-z0-9_$]*(\[[0-9]+(:[0-9]+)?\])?$} $signame] } {
+        return "${scope_hint}.${signame}"
+    }
+    return $signame
+}
+
+proc append_const_path_node { path_var node } {
+    upvar 1 $path_var path
+    set node [string trim $node]
+    if { $node eq "" || $node eq "<empty>" } {
+        return
+    }
+    if { [llength $path] == 0 || [lindex $path end] ne $node } {
+        lappend path $node
+    }
+}
+
+proc const_evidence_scope { fields preferred_keys } {
+    foreach key $preferred_keys {
+        if { [dict exists $fields $key] } {
+            set value [string trim [dict get $fields $key]]
+            if { $value ne "" && $value ne "<empty>" } {
+                return $value
+            }
+        }
+    }
+    return ""
+}
+
+proc const_full_path_from_fields { value fields } {
+    set path {}
+    if { [dict exists $fields port_path] } {
+        append_const_path_node path [dict get $fields port_path]
+    }
+
+    if { [dict exists $fields chain] && [string trim [dict get $fields chain]] ne "" } {
+        set chain [string map [list "<-" "->"] [dict get $fields chain]]
+        foreach node [split $chain "->"] {
+            append_const_path_node path $node
+        }
+    } else {
+        foreach key {
+            resolved_signal resolved_traced_signal resolved_from
+            traced_signal connected_signal from_signal signal
+            source_handle_path high_signal result_signal
+        } {
+            if { ![dict exists $fields $key] } {
+                continue
+            }
+            set node [dict get $fields $key]
+            if { [is_const_literal_name $node] } {
+                continue
+            }
+            set scope [const_evidence_scope $fields {
+                resolved_scope traced_scope source_scope connected_scope
+                scope_hint current_inst instance
+            }]
+            append_const_path_node path [qualify_signal_for_log $node $scope]
+        }
+    }
+
+    append_const_path_node path $value
+    return [join $path "<-"]
+}
+
+proc const_driver_evidence_key { port_path value } {
+    return "${port_path}|${value}"
+}
+
+proc log_const_source_detail { method value args } {
+    global current_trace_instance current_trace_port current_trace_port_path
+    global current_trace_role current_const_driver_evidence_seen
+
+    set fields {}
+    set n [llength $args]
+    for {set i 0} {$i + 1 < $n} {incr i 2} {
+        set key [lindex $args $i]
+        set val [lindex $args [expr {$i + 1}]]
+        dict set fields $key $val
+    }
+
+    foreach {key varname} {
+        instance current_trace_instance
+        port current_trace_port
+        port_path current_trace_port_path
+        role current_trace_role
+    } {
+        if { ![dict exists $fields $key] &&
+             [info exists $varname] &&
+             [set $varname] ne "" } {
+            dict set fields $key [set $varname]
+        }
+    }
+    if { ![dict exists $fields port_path] &&
+         [dict exists $fields instance] &&
+         [dict exists $fields port] } {
+        dict set fields port_path "[dict get $fields instance].[dict get $fields port]"
+    }
+
+    set const_full_path [const_full_path_from_fields $value $fields]
+    set msg "const_driver_source_detail method=[log_field_value $method] value=[log_field_value $value]"
+    append msg " evidence_source=[log_field_value $method]"
+    append msg " const_full_path=[log_field_value $const_full_path]"
+    dict for {key val} $fields {
+        append msg " $key=[log_field_value $val]"
+    }
+
+    if { [dict exists $fields role] && [dict get $fields role] eq "driver" &&
+         [dict exists $fields port_path] && [dict get $fields port_path] ne "" } {
+        if { ![info exists current_const_driver_evidence_seen] } {
+            set current_const_driver_evidence_seen {}
+        }
+        dict set current_const_driver_evidence_seen \
+            [const_driver_evidence_key [dict get $fields port_path] $value] 1
+    }
+    log_step $msg
+}
+
+proc ensure_const_driver_evidence { value inst_path portname dir } {
+    global current_const_driver_evidence_seen
+    set port_path "${inst_path}.${portname}"
+    set key [const_driver_evidence_key $port_path $value]
+    if { [info exists current_const_driver_evidence_seen] &&
+         [dict exists $current_const_driver_evidence_seen $key] } {
+        return
+    }
+    log_const_source_detail trace_result_fallback $value \
+        role driver \
+        instance $inst_path \
+        port $portname \
+        port_path $port_path \
+        dir $dir \
+        result_signal $value \
+        evidence_note no_earlier_provenance_record
+}
+
+proc log_const_sources_for_signal { method consts signame srcfile scope_hint {module ""} } {
+    set signame [normalize_signal_name $signame]
+    set scope [signal_effective_scope_prefix $signame $scope_hint]
+    set resolved_signal [qualify_signal_for_log $signame $scope]
+    foreach const_sig $consts {
+        if { [is_const_literal_name $const_sig] } {
+            log_const_source_detail $method $const_sig \
+                signal $signame \
+                resolved_signal $resolved_signal \
+                resolved_scope $scope \
+                source_file $srcfile \
+                source_module $module
+        }
+    }
+}
+
 proc source_module_port_candidate_exists { candidate } {
     if { [info commands ::npi_L1::npi_mod_inst_get_port] eq "" } {
         return 1
@@ -3369,6 +3541,7 @@ proc source_assign_const_chain { signame srcfile depth visited_var {scope_hint "
     set consts {}
     foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile 1 $scope_hint] {
         if { [is_const_literal_name $source_sig] } {
+            log_const_sources_for_signal source_assign_const_chain [list $source_sig] $signame $srcfile $scope_hint
             append_unique_signal consts $source_sig
         } else {
             set next_scope_hint [signal_scope_hint_after $source_sig $scope_hint]
@@ -3384,6 +3557,20 @@ proc source_assign_direct_driver_sources { sig_hdl signame {srcfile_hint ""} {sc
     set sources [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 0 $scope_hint]
     if { [llength $sources] > 0 } {
         log_step "source_assign_direct_driver_source signal=$signame source=$srcfile_hint drivers=[join $sources ,]"
+        set srcfile $srcfile_hint
+        if { $srcfile eq "" && $sig_hdl ne "" } {
+            set srcfile [get_handle_source_file $sig_hdl]
+        }
+        set module ""
+        if { $srcfile ne "" } {
+            set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+            set ctx_srcfile [lindex $ctx 0]
+            set module [lindex $ctx 1]
+            if { $ctx_srcfile ne "" } {
+                set srcfile $ctx_srcfile
+            }
+        }
+        log_const_sources_for_signal source_assign_direct $sources $signame $srcfile $scope_hint $module
     }
     return $sources
 }
@@ -3418,6 +3605,16 @@ proc source_assign_driver_sources { sig_hdl signame {srcfile_hint ""} {scope_hin
 
     if { [llength $expanded_sources] > 0 } {
         log_step "source_assign_driver_source signal=$signame source=$srcfile drivers=[join $expanded_sources ,]"
+        set module ""
+        if { $srcfile ne "" } {
+            set ctx [source_context_for_signal $signame $srcfile $scope_hint]
+            set ctx_srcfile [lindex $ctx 0]
+            set module [lindex $ctx 1]
+            if { $ctx_srcfile ne "" } {
+                set srcfile $ctx_srcfile
+            }
+        }
+        log_const_sources_for_signal source_assign_driver $expanded_sources $signame $srcfile $scope_hint $module
     }
     return $expanded_sources
 }
@@ -3648,13 +3845,26 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
     set current_inst $start_inst
     set depth 0
     set visited {}
+    set trace_chain {}
 
     while { $depth < $max_depth } {
         if { [is_const_literal_name $current_name] } {
+            log_const_source_detail parent_port_chain_terminal $current_name \
+                signal $current_name \
+                resolved_signal $current_name \
+                current_inst $current_inst \
+                start_inst $start_inst \
+                depth $depth \
+                chain [join $trace_chain "->"]
             return $current_name
         }
         if { $current_inst eq "" || $current_name eq "" } {
             return ""
+        }
+
+        set current_log_signal [qualify_signal_for_log $current_name $current_inst]
+        if { [lsearch -exact $trace_chain $current_log_signal] < 0 } {
+            lappend trace_chain $current_log_signal
         }
 
         set visit_key "${current_inst}|${current_name}"
@@ -3668,6 +3878,7 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
         if { $port_hdl eq "" } {
             return ""
         }
+        set current_portname [get_port_name $port_hdl]
 
         set high_sigs [get_high_conn_sigs_for_port_hdl $current_inst $port_hdl]
         log_step "const_parent_port_trace depth=$depth inst=$current_inst signal=$current_name high_conn_count=[llength $high_sigs]"
@@ -3679,6 +3890,20 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
             set high_name [hdl_to_selected_name $high_hdl [signal_select_suffix $current_name]]
             if { [is_const_literal_name $high_name] } {
                 log_step "const_driver_from_parent_port_chain signal=$current_name inst=$current_inst value=$high_name depth=$depth"
+                set const_chain $trace_chain
+                lappend const_chain $high_name
+                log_const_source_detail parent_port_chain $high_name \
+                    signal $current_name \
+                    resolved_signal $current_log_signal \
+                    current_inst $current_inst \
+                    current_port $current_portname \
+                    start_inst $start_inst \
+                    high_signal $high_name \
+                    high_scope [parent_instance_path $current_inst] \
+                    source_handle_path [hdl_evidence_name $high_hdl] \
+                    source_handle_kind [hdl_kind $high_hdl] \
+                    depth $depth \
+                    chain [join $const_chain "->"]
                 return $high_name
             }
         }
@@ -3741,6 +3966,13 @@ proc const_driver_from_connected_signal { sig_hdl signame {srcfile_hint ""} {sco
     set value [const_driver_from_assign_map $const_map $signame $leaf]
     if { $value ne "" } {
         log_step "const_driver_from_parent_signal signal=$signame source=$srcfile value=$value"
+        log_const_source_detail source_const_assign_map $value \
+            signal $signame \
+            resolved_signal [qualify_signal_for_log $signame $prefix] \
+            resolved_scope $prefix \
+            source_file $srcfile \
+            source_module $module \
+            leaf $leaf
         return $value
     }
     return ""
@@ -3792,6 +4024,39 @@ proc literal_hdl_value_name { hdl value {literal_select ""} } {
         return "Const:1'b$bit"
     }
     return $literal_name
+}
+
+proc hdl_evidence_name { hdl } {
+    if { $hdl eq "" || $hdl == 0 } {
+        return ""
+    }
+
+    set candidates {}
+    set name ""
+    catch { set name [npi_nl_get_str -property npiNlFullName -object $hdl] }
+    if { [string trim $name] ne "" } {
+        lappend candidates $name
+    }
+    foreach getter {
+        ::npi_L1::npi_nl_ut_get_hdl_info
+        ::npi_L1::npi_ut_get_hdl_info
+    } {
+        set info ""
+        if { ![catch { set info [$getter $hdl] }] && $info ne "" } {
+            set name [string trim [lindex [split $info ","] 1]]
+            if { $name ne "" } {
+                lappend candidates $name
+            }
+        }
+    }
+
+    foreach candidate $candidates {
+        set candidate [normalize_signal_name $candidate]
+        if { $candidate ne "" && ![is_const_literal_name $candidate] } {
+            return $candidate
+        }
+    }
+    return ""
 }
 
 proc hdl_to_name { hdl {literal_select ""} } {
@@ -4415,7 +4680,16 @@ proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_
         if { [is_module_boundary_signal $high_sig] } {
             append_unique_signal module_drivers $high_sig
         }
-        if { ![is_const_literal_name $high_sig] } {
+        if { [is_const_literal_name $high_sig] } {
+            log_const_source_detail module_port_high_conn $high_sig \
+                role driver \
+                signal $signame \
+                resolved_signal [qualify_signal_for_log $signame] \
+                high_signal $high_sig \
+                source_handle_path [hdl_evidence_name $high_hdl] \
+                source_handle_kind [hdl_kind $high_hdl] \
+                source_file $srcfile_hint
+        } else {
             log_step "driver_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
             set next_scope_hint [signal_scope_hint_after $high_sig]
@@ -4469,7 +4743,18 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
         if { [is_module_boundary_signal $high_sig] } {
             append_unique_signal module_loads $high_sig
         }
-        if { ![is_const_literal_name $high_sig] } {
+        if { [is_const_literal_name $high_sig] } {
+            log_const_source_detail module_port_high_conn $high_sig \
+                role load \
+                signal $signame \
+                resolved_signal [qualify_signal_for_log $signame $scope_hint] \
+                high_signal $high_sig \
+                source_handle_path [hdl_evidence_name $high_hdl] \
+                source_handle_kind [hdl_kind $high_hdl] \
+                source_file $srcfile_hint \
+                next_source_file $next_srcfile_hint \
+                scope_hint $scope_hint
+        } else {
             log_step "load_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
             if { $net_depth > 0 } {
                 collect_loads_by_name_rec $high_sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint $next_scope_hint
@@ -5032,6 +5317,18 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
             continue
         }
         append_unique_signal all_drivers $sig
+        if { [is_const_literal_name $sig] } {
+            log_const_source_detail npi_trace_driver $sig \
+                role driver \
+                traced_signal $signame \
+                resolved_traced_signal [qualify_signal_for_log $signame $scope_hint] \
+                source_handle_path [hdl_evidence_name $hdl] \
+                source_handle_kind [hdl_kind $hdl] \
+                source_file $srcfile_hint \
+                source_scope $scope_hint \
+                net_depth $net_depth \
+                expr_depth $expr_depth
+        }
         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
         if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
             log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
@@ -5062,6 +5359,18 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
             }
             append_unique_signal module_drivers $sig
             append_unique_signal all_drivers $sig
+            if { [is_const_literal_name $sig] } {
+                log_const_source_detail npi_trace_module_driver $sig \
+                    role driver \
+                    traced_signal $signame \
+                    resolved_traced_signal [qualify_signal_for_log $signame $scope_hint] \
+                    source_handle_path [hdl_evidence_name $hdl] \
+                    source_handle_kind [hdl_kind $hdl] \
+                    source_file $srcfile_hint \
+                    source_scope $scope_hint \
+                    net_depth $net_depth \
+                    expr_depth $expr_depth
+            }
             collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
             if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
                 log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
@@ -5236,6 +5545,16 @@ proc append_load_hdl_endpoint { hdl from_sig all_loads_var module_loads_var net_
     append_unique_signal all_loads $sig
     if { [is_module_boundary_signal $sig] } {
         append_unique_signal module_loads $sig
+    }
+    if { [is_const_literal_name $sig] } {
+        log_const_source_detail load_hdl_endpoint $sig \
+            role load \
+            from_signal $from_sig \
+            resolved_from [qualify_signal_for_log $from_sig $scope_hint] \
+            source_file $srcfile_hint \
+            source_scope $scope_hint \
+            next_source_file $next_srcfile_hint \
+            next_scope $next_scope_hint
     }
     if { [load_trace_stop_at_endpoint $sig "from=$from_sig source=hdl_endpoint"] } {
         return
@@ -5621,7 +5940,8 @@ proc selected_port_names { portname } {
 # -----------------------------------------------------------------------
 proc process_instance { inst_path parent_path instname port_filter outfh module_outfh } {
     global target_mod const_trace_max_depth assign_trace_max_depth assign_expr_trace_max_depth
-    global current_trace_instance
+    global current_trace_instance current_trace_port current_trace_port_path
+    global current_trace_role current_const_driver_evidence_seen
 
     set current_trace_instance $inst_path
     log_step "process_instance=$inst_path parent=$parent_path instname=$instname"
@@ -5739,6 +6059,10 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set parsed_trace_port [split_port_filter_spec $trace_portname]
             set trace_select [lindex $parsed_trace_port 1]
             set portname $trace_portname
+            set current_trace_port $portname
+            set current_trace_port_path "${inst_path}.${portname}"
+            set current_trace_role driver
+            set current_const_driver_evidence_seen {}
             if { $trace_select ne "" } {
                 log_step "trace_port_bit instance=$inst_path port=$portname base_port=$base_portname select=$trace_select"
             }
@@ -5771,11 +6095,18 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         # Collect all drivers
         set all_drivers {}
         set module_drivers {}
+        set current_trace_role driver
         foreach sig_hdl $driver_sigs {
             set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
             set signame [hdl_to_selected_name $sig_hdl $trace_select]
             if { $signame eq "" } {
                 continue
+            }
+            set driver_side "unknown"
+            if { [lsearch -exact $high_sigs $sig_hdl] >= 0 } {
+                set driver_side "high"
+            } elseif { [lsearch -exact $low_sigs $sig_hdl] >= 0 } {
+                set driver_side "low"
             }
 
             set driver_scope_hint [signal_scope_prefix $signame]
@@ -5815,6 +6146,17 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                             if { $module_outfh ne "" && [is_const_literal_name $start_sig] } {
                                 append_unique_signal module_drivers $start_sig
                             }
+                            if { [is_const_literal_name $start_sig] } {
+                                log_const_source_detail source_port_connection $start_sig \
+                                    role driver \
+                                    instance $inst_path \
+                                    port $portname \
+                                    port_path "${inst_path}.${portname}" \
+                                    dir $dir \
+                                    side $driver_side \
+                                    connected_signal $signame \
+                                    connected_scope $driver_scope_hint
+                            }
                             continue
                         }
 
@@ -5845,6 +6187,19 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 lappend module_drivers $signame
                 set const_driver_for_connection 1
             }
+            if { [is_const_literal_name $signame] } {
+                log_const_source_detail npi_connection $signame \
+                    role driver \
+                    instance $inst_path \
+                    port $portname \
+                    port_path "${inst_path}.${portname}" \
+                    dir $dir \
+                    side $driver_side \
+                    connected_signal $signame \
+                    connected_scope $driver_scope_hint \
+                    source_handle_path [hdl_evidence_name $trace_sig_hdl] \
+                    source_handle_kind [hdl_kind $trace_sig_hdl]
+            }
 
             set parent_const_driver [const_driver_from_connected_signal $trace_sig_hdl $signame $driver_srcfile_hint $driver_scope_hint]
             if { $parent_const_driver ne "" } {
@@ -5853,6 +6208,16 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 if { $module_outfh ne "" } {
                     lappend module_drivers $parent_const_driver
                 }
+                log_const_source_detail connected_signal_const $parent_const_driver \
+                    role driver \
+                    instance $inst_path \
+                    port $portname \
+                    port_path "${inst_path}.${portname}" \
+                    dir $dir \
+                    side $driver_side \
+                    connected_signal $signame \
+                    connected_scope $driver_scope_hint \
+                    source_file $driver_srcfile_hint
             }
 
             set parent_port_const_driver [const_driver_from_parent_ports $trace_sig_hdl $signame $parent_path $const_trace_max_depth]
@@ -5862,6 +6227,16 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                 if { $module_outfh ne "" } {
                     lappend module_drivers $parent_port_const_driver
                 }
+                log_const_source_detail parent_port_connection_const $parent_port_const_driver \
+                    role driver \
+                    instance $inst_path \
+                    port $portname \
+                    port_path "${inst_path}.${portname}" \
+                    dir $dir \
+                    side $driver_side \
+                    connected_signal $signame \
+                    connected_scope $driver_scope_hint \
+                    start_inst $parent_path
             }
 
             set driver_count_before [llength $all_drivers]
@@ -5937,6 +6312,20 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                             continue
                         }
                         append_unique_signal all_drivers $sig
+                        if { [is_const_literal_name $sig] } {
+                            log_const_source_detail npi_trace_driver_by_hdl $sig \
+                                role driver \
+                                instance $inst_path \
+                                port $portname \
+                                port_path "${inst_path}.${portname}" \
+                                dir $dir \
+                                side $driver_side \
+                                traced_signal $signame \
+                                traced_scope $driver_scope_hint \
+                                source_handle_path [hdl_evidence_name $hdl] \
+                                source_handle_kind [hdl_kind $hdl] \
+                                source_file $driver_srcfile_hint
+                        }
                         set fallback_driver_visited {}
                         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_driver_visited $driver_srcfile_hint
                         if { [should_expand_assign_endpoint $hdl $sig] } {
@@ -5978,6 +6367,20 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         }
                         append_unique_signal module_drivers $sig
                         append_unique_signal all_drivers $sig
+                        if { [is_const_literal_name $sig] } {
+                            log_const_source_detail npi_trace_module_driver_by_hdl $sig \
+                                role driver \
+                                instance $inst_path \
+                                port $portname \
+                                port_path "${inst_path}.${portname}" \
+                                dir $dir \
+                                side $driver_side \
+                                traced_signal $signame \
+                                traced_scope $driver_scope_hint \
+                                source_handle_path [hdl_evidence_name $hdl] \
+                                source_handle_kind [hdl_kind $hdl] \
+                                source_file $driver_srcfile_hint
+                        }
                         set fallback_module_driver_visited {}
                         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_module_driver_visited $driver_srcfile_hint
                         if { [should_expand_assign_endpoint $hdl $sig] } {
@@ -5999,12 +6402,19 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         # Collect all loads
         set all_loads {}
         set module_loads {}
+        set current_trace_role load
         reset_load_trace_budget
         foreach sig_hdl $load_sigs {
             set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
             set signame [hdl_to_selected_name $sig_hdl $trace_select]
             if { $signame eq "" } {
                 continue
+            }
+            set load_side "unknown"
+            if { [lsearch -exact $high_sigs $sig_hdl] >= 0 } {
+                set load_side "high"
+            } elseif { [lsearch -exact $low_sigs $sig_hdl] >= 0 } {
+                set load_side "low"
             }
 
             set load_scope_hint [signal_scope_prefix $signame]
@@ -6027,6 +6437,19 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set load_srcfile_hint [get_handle_source_file $trace_sig_hdl]
             if { $load_srcfile_hint eq "" } {
                 set load_srcfile_hint [get_handle_source_file $sig_hdl]
+            }
+            if { [is_const_literal_name $signame] } {
+                log_const_source_detail npi_connection $signame \
+                    role load \
+                    instance $inst_path \
+                    port $portname \
+                    port_path "${inst_path}.${portname}" \
+                    dir $dir \
+                    side $load_side \
+                    connected_signal $signame \
+                    connected_scope $load_scope_hint \
+                    source_handle_path [hdl_evidence_name $trace_sig_hdl] \
+                    source_handle_kind [hdl_kind $trace_sig_hdl]
             }
             set load_hdl_visited {}
             collect_loads_by_hdl_fallback $trace_sig_hdl $signame all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth load_hdl_visited $load_srcfile_hint $load_scope_hint
@@ -6053,6 +6476,18 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         continue
                     }
                     append_unique_signal all_loads $sig
+                    if { [is_const_literal_name $sig] } {
+                        log_const_source_detail npi_trace_load_by_hdl $sig \
+                            role load \
+                            instance $inst_path \
+                            port $portname \
+                            port_path "${inst_path}.${portname}" \
+                            dir $dir \
+                            side $load_side \
+                            traced_signal $signame \
+                            traced_scope $load_scope_hint \
+                            source_file $load_srcfile_hint
+                    }
                     if { [load_trace_stop_at_endpoint $sig "from=$signame source=direct_hdl_fallback"] } {
                         continue
                     }
@@ -6113,6 +6548,11 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_loads [lsort -unique $all_loads]
         set module_drivers [lsort -unique $module_drivers]
         set module_loads [lsort -unique $module_loads]
+        foreach sig $all_drivers {
+            if { [is_const_literal_name $sig] } {
+                ensure_const_driver_evidence $sig $inst_path $portname $dir
+            }
+        }
         log_step "trace_result instance=$inst_path port=$portname drivers=[llength $all_drivers] loads=[llength $all_loads] module_drivers=[llength $module_drivers] module_loads=[llength $module_loads]"
 
         # Output module-boundary connections to the side CSV.

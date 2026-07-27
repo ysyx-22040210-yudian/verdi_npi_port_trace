@@ -792,6 +792,31 @@ Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0
 
 这类依赖 NPI high-side connection 递归，深度由 `-const-trace-depth <N>` 控制。
 
+常数命中时，CSV/XLSX 仍保持稳定格式 `Const:<value>`；详细来源写在运行日志里，不改变过滤规则。日志关键字为：
+
+```text
+const_driver_source_detail method=... value=Const:... evidence_source=... const_full_path=Top.u_target.a<-Top.tie_net<-Const:1'b1 role=driver port_path=Top.u_target.a ...
+```
+
+`const_full_path` 是从被检查端口到常数证据的完整层次链，方向用 `<-` 表示 driver 来源。例如
+`Top.u_target.a<-Top.tie_net<-Const:1'b1`。Verilog literal 本身没有独立的 hierarchy object，
+因此工具记录的是可验证的端口、层次信号/NPI endpoint、源码位置与 literal 组成的证据链，而不是伪造一个 literal instance 路径。
+`evidence_source` 与 `method` 一致，便于脚本直接按来源类型过滤。
+
+常见 `method` 含义：
+
+- `npi_connection`：NPI high/low connection 直接返回 literal，日志会带 `instance`、`port`、`port_path`、`side`、`source_handle_path`、`source_handle_kind`。
+- `source_const_assign_map` / `source_assign_direct` / `source_assign_driver`：源码/KDB fallback 从当前层次的 `assign` 或声明赋值推导出常数，日志会带 `resolved_signal`、`resolved_scope`、`source_file`、`source_module`。
+- `parent_port_chain`：多层父 port 回溯命中常数，日志会带 `current_inst`、`current_port`、`start_inst` 和 `chain=<层次信号>->...->Const:<value>`。
+- `npi_trace_driver_by_hdl` / `npi_trace_driver`：NPI trace fallback 直接返回 literal，日志会带当前被追踪的端口或信号层次，以及 NPI handle 可提供的完整名称和类型。
+- `trace_result_fallback`：最终 CSV 确认 driver 是常数，但前面的 API 没有留下更细来源元数据。该记录仍给出完整目标端口到 literal 的路径，并用 `evidence_note=no_earlier_provenance_record` 明确标识证据粒度。
+
+定位某根常数来源时建议：
+
+```bash
+grep -n "const_driver_source_detail" <run.log>
+```
+
 ## assign 继续追踪
 
 普通透传：
@@ -1096,12 +1121,13 @@ source_assign_direct_load_fanout signal=... source=... fanouts=...
 source_assign_load_fanout signal=... source=... fanouts=...
 source_module_port_driver signal=... source=... drivers=...
 const_driver_from_parent_signal signal=... source=... value=Const:...
+const_driver_source_detail method=... value=Const:... evidence_source=... const_full_path=... port_path=... resolved_signal=... resolved_scope=...
 ```
 
 快速查看命令：
 
 ```bash
-grep -nE "source_|const_driver_from_parent_signal|module_port_high_continue" <run.log>
+grep -nE "source_|const_driver_from_parent_signal|const_driver_source_detail|module_port_high_continue" <run.log>
 ```
 
 判断规则：
@@ -1132,6 +1158,7 @@ grep -nE "source_|const_driver_from_parent_signal|module_port_high_continue" <ru
 
 ```text
 const_driver_from_parent_signal signal=... source=... value=Const:...
+const_driver_source_detail method=source_const_assign_map value=Const:... evidence_source=source_const_assign_map const_full_path=... port_path=... resolved_signal=... resolved_scope=...
 ```
 
 ### 大项目跑得慢怎么办

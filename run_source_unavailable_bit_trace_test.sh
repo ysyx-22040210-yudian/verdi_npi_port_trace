@@ -130,6 +130,40 @@ for port, expected_bit in {
         raise SystemExit(f"{port} constant driver is not exactly Const:1'b{expected_bit}: {values}")
 
 log_text = Path("source_unavailable_bit_trace.log").read_text(errors="replace")
+evidence_lines = [
+    line for line in log_text.splitlines()
+    if "const_driver_source_detail " in line
+]
+for port, expected_bit in {
+    "C[7]": "1",
+    "C[6]": "0",
+    "D[0]": "1",
+    "D[1]": "0",
+}.items():
+    port_path = f"SourceUnavailableBitTop.u_child.{port}"
+    value = f"Const:1'b{expected_bit}"
+    matches = [
+        line for line in evidence_lines
+        if f"value={value}" in line
+        and "role=driver" in line
+        and f"port_path={port_path}" in line
+        and "evidence_source=npi_trace" in line
+        and "source_handle_kind=" in line
+        and "source_handle_kind=<empty>" not in line
+        and "source_handle_path=" in line
+        and "source_handle_path=<empty>" not in line
+        and "const_full_path=" in line
+    ]
+    if not matches:
+        raise SystemExit(f"{port} missing KDB-only NPI constant evidence for {value}")
+    full_paths = []
+    for line in matches:
+        match = re.search(r"const_full_path=(\{[^}]*\}|\S+)", line)
+        if match is not None:
+            full_paths.append(match.group(1).strip("{}"))
+    if not any(path.startswith(f"{port_path}<-") and path.endswith(value) for path in full_paths):
+        raise SystemExit(f"{port} missing full KDB target-to-constant path: {full_paths}")
+
 if "bit_driver_source_restrict signal=" in log_text:
     raise SystemExit("trace unexpectedly used source-based bit restriction")
 if "trace_port_bit" not in log_text:

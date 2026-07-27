@@ -106,6 +106,34 @@ if any(value.startswith("Const:") for value in mux):
     raise SystemExit(f"mux_stop leaked conditional constants: {mux}")
 
 log = Path("driver_constant_precision_trace.log").read_text()
+evidence_lines = [
+    line for line in log.splitlines()
+    if "const_driver_source_detail " in line
+]
+for port, bit in expected.items():
+    port_path = f"DCP_Top.u_target.{port}"
+    value = f"Const:1'b{bit}"
+    matches = [
+        line for line in evidence_lines
+        if f"value={value}" in line
+        and "role=driver" in line
+        and f"port_path={port_path}" in line
+        and "evidence_source=" in line
+        and "const_full_path=" in line
+    ]
+    if not matches:
+        raise SystemExit(f"{port} missing structured constant evidence for {value}")
+    full_paths = []
+    for line in matches:
+        match = re.search(r"const_full_path=(\{[^}]*\}|\S+)", line)
+        if match is None:
+            continue
+        full_paths.append(match.group(1).strip("{}"))
+    if not any(path.startswith(f"{port_path}<-") and path.endswith(value) for path in full_paths):
+        raise SystemExit(f"{port} missing full target-to-constant path: {full_paths}")
+    if all("evidence_source=trace_result_fallback" in line for line in matches):
+        raise SystemExit(f"{port} has only fallback evidence: {matches}")
+
 required_mapping_steps = {
     "ascending formal bit 0": re.compile(
         r"source_port_conn_driver_start .*port=asc_port_from_desc select=\[0\].*"

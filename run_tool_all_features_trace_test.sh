@@ -175,6 +175,7 @@ echo "[tool_all_features] run XLSX annotation"
 echo "[tool_all_features] assert CSV, XLSX, and debug log results"
 python3 - <<'PY'
 import csv
+import re
 from pathlib import Path
 from openpyxl import load_workbook
 
@@ -218,6 +219,56 @@ def reject_filtered_port(port, role):
     if got:
         raise SystemExit(f"unexpected filtered rows for port={port} role={role}: {got[:80]}")
 
+def log_fields(line):
+    return {
+        match.group(1): match.group(2).strip("{}")
+        for match in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)=(\{[^}]*\}|\S+)", line)
+    }
+
+const_evidence = [
+    log_fields(line)
+    for line in filter_text.splitlines()
+    if "const_driver_source_detail " in line
+]
+
+def require_const_evidence(port):
+    expected = sorted({
+        (r["inst_full_name"], r["signal_full_name"])
+        for r in full_rows
+        if r["port_name"] == port
+        and r["role"] == "driver"
+        and r["signal_full_name"].startswith("Const:")
+    })
+    if not expected:
+        raise SystemExit(f"missing constant driver rows for evidence check: port={port}")
+
+    for instance, value in expected:
+        port_path = f"{instance}.{port}"
+        matches = [
+            fields for fields in const_evidence
+            if fields.get("value") == value
+            and fields.get("role") == "driver"
+            and fields.get("port_path") == port_path
+        ]
+        if not matches:
+            raise SystemExit(
+                f"missing constant evidence record: port_path={port_path} value={value}"
+            )
+        if not any(
+            fields.get("evidence_source") not in {
+                None,
+                "",
+                "<empty>",
+                "trace_result_fallback",
+            }
+            and fields.get("const_full_path", "").startswith(f"{port_path}<-")
+            and fields.get("const_full_path", "").endswith(value)
+            for fields in matches
+        ):
+            raise SystemExit(
+                f"incomplete constant evidence: port_path={port_path} value={value} matches={matches}"
+            )
+
 for port, token in [
     ("drv_precise_bus[7]", "u_key_precise.out"),
     ("drv_recursive[2]", "u_kw_rec_hi.out"),
@@ -257,6 +308,15 @@ reject_full("drv_precise_bus[8]", "driver", "u_key_precise")
 for port in ["drv_const_direct", "drv_const_parent", "drv_const_source"]:
     require_full(port, "driver", "Const:")
     reject_filtered_port(port, "driver")
+
+for port in [
+    "drv_precise_bus[6]",
+    "drv_precise_bus[8]",
+    "drv_const_direct",
+    "drv_const_parent",
+    "drv_const_source",
+]:
+    require_const_evidence(port)
 
 require_full("drv_noise", "driver", "u_noise")
 reject_filtered_port("drv_noise", "driver")

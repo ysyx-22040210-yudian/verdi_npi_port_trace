@@ -624,6 +624,27 @@ def split_params_by_subsystem(rows: Sequence[ParamRow], level: int) -> Dict[str,
     return by_subsystem
 
 
+def select_subsystem_modules(
+    modules: Sequence[str],
+    subsystem: str,
+    module_data_by_subsystem: Dict[str, Dict[str, object]],
+    params_by_module_subsystem: Dict[str, Dict[str, Sequence[ParamRow]]],
+    module_errors: Dict[str, str],
+) -> List[str]:
+    selected: List[str] = []
+    for module in modules:
+        module_data = module_data_by_subsystem.get(module, {})
+        module_params = params_by_module_subsystem.get(module, {})
+        has_data = subsystem in module_data
+        has_instance = bool(module_params.get(subsystem))
+        error_without_topology = (
+            module in module_errors and not module_data and not module_params
+        )
+        if has_data or has_instance or error_without_topology:
+            selected.append(module)
+    return selected
+
+
 def split_trace_rows_by_instance(rows: Sequence[TraceRow]) -> Dict[str, List[TraceRow]]:
     by_instance: Dict[str, List[TraceRow]] = {}
     for row in rows:
@@ -663,9 +684,14 @@ def format_module_params(module: str, param_rows: Sequence[ParamRow]) -> str:
     if not rows:
         return "NO_PARAMETER"
 
-    parameters = [row for row in rows if row.param_kind != "localparam"]
+    parameters = [
+        row for row in rows if row.param_kind not in {"instance", "localparam"}
+    ]
     if not parameters:
-        return f"NO_PARAMETER; localparam_count={len(rows)}"
+        localparam_count = sum(row.param_kind == "localparam" for row in rows)
+        if localparam_count:
+            return f"NO_PARAMETER; localparam_count={localparam_count}"
+        return "NO_PARAMETER"
 
     grouped: Dict[str, List[ParamRow]] = {}
     for row in parameters:
@@ -694,7 +720,7 @@ def format_instance_params(module: str, inst_full_name: str, param_rows: Sequenc
         for row in param_rows
         if row.module == module
         and row.inst_full_name == inst_full_name
-        and row.param_kind != "localparam"
+        and row.param_kind not in {"instance", "localparam"}
     ]
     if not rows:
         return "NO_PARAMETER"
@@ -1635,11 +1661,28 @@ def main() -> None:
                     raise RuntimeError("no subsystem instances found in streamed trace rows")
                 for subsystem in sorted(subsystems):
                     log_step(f"write subsystem workbook: {subsystem}")
+                    subsystem_modules = select_subsystem_modules(
+                        modules,
+                        subsystem,
+                        module_port_results_by_subsystem,
+                        params_by_module_subsystem,
+                        module_errors,
+                    )
+                    skipped_modules = [
+                        module for module in modules if module not in subsystem_modules
+                    ]
+                    log_step(
+                        "subsystem={} output_modules={} skipped_modules={}".format(
+                            subsystem,
+                            ",".join(subsystem_modules) or "<none>",
+                            ",".join(skipped_modules) or "<none>",
+                        )
+                    )
                     subsystem_results: Dict[str, Dict[str, Dict[str, str]]] = {}
                     subsystem_errors: Dict[str, str] = {}
                     subsystem_params: Dict[str, Sequence[ParamRow]] = {}
                     subsystem_param_errors: Dict[str, str] = {}
-                    for module in modules:
+                    for module in subsystem_modules:
                         subsystem_params[module] = params_by_module_subsystem.get(module, {}).get(
                             subsystem,
                             [],
@@ -1656,7 +1699,7 @@ def main() -> None:
                             continue
                         results = module_port_results_by_subsystem.get(module, {}).get(subsystem)
                         if results is None:
-                            subsystem_errors[module] = "NO_SUBSYSTEM_INSTANCE"
+                            subsystem_errors[module] = "NO_TRACE"
                         else:
                             subsystem_results[module] = results
 
@@ -1664,13 +1707,13 @@ def main() -> None:
                         template=template,
                         sheet_name=args.sheet,
                         output=split_output_path(output, subsystem),
-                        modules=modules,
+                        modules=subsystem_modules,
                         ports=ports,
                         module_port_results=subsystem_results,
                         module_params=subsystem_params,
                         module_errors=subsystem_errors,
                         module_param_errors=subsystem_param_errors,
-                        missing_marker="NO_SUBSYSTEM_INSTANCE",
+                        missing_marker="NO_TRACE",
                     )
             else:
                 write_annotation_results_workbook(
@@ -1722,6 +1765,11 @@ def main() -> None:
                 filter_instances,
                 args.subsystem_level,
             )
+            trace_errors = {
+                module: trace.error
+                for module, trace in module_traces.items()
+                if trace.error is not None
+            }
             for subsystem in sorted(subsystems):
                 log_step(f"write subsystem workbook: {subsystem}")
                 subsystem_filter_instances = filter_instances_by_subsystem.get(subsystem, [])
@@ -1730,10 +1778,27 @@ def main() -> None:
                         subsystem, len(subsystem_filter_instances)
                     )
                 )
+                subsystem_modules = select_subsystem_modules(
+                    modules,
+                    subsystem,
+                    rows_by_module_subsystem,
+                    params_by_module_subsystem,
+                    trace_errors,
+                )
+                skipped_modules = [
+                    module for module in modules if module not in subsystem_modules
+                ]
+                log_step(
+                    "subsystem={} output_modules={} skipped_modules={}".format(
+                        subsystem,
+                        ",".join(subsystem_modules) or "<none>",
+                        ",".join(skipped_modules) or "<none>",
+                    )
+                )
                 subsystem_traces: Dict[str, ModuleTrace] = {}
                 subsystem_params: Dict[str, Sequence[ParamRow]] = {}
                 subsystem_param_errors: Dict[str, str] = {}
-                for module in modules:
+                for module in subsystem_modules:
                     subsystem_params[module] = params_by_module_subsystem.get(module, {}).get(
                         subsystem,
                         [],
@@ -1752,23 +1817,23 @@ def main() -> None:
                     if subsystem_rows is None:
                         subsystem_traces[module] = ModuleTrace(
                             rows=[],
-                            error="NO_SUBSYSTEM_INSTANCE",
+                            error="NO_TRACE",
                         )
                     else:
                         subsystem_traces[module] = ModuleTrace(rows=subsystem_rows)
-                    write_annotation_workbook(
-                        template=template,
-                        sheet_name=args.sheet,
-                        output=split_output_path(output, subsystem),
-                    modules=modules,
+                write_annotation_workbook(
+                    template=template,
+                    sheet_name=args.sheet,
+                    output=split_output_path(output, subsystem),
+                    modules=subsystem_modules,
                     ports=ports,
                     module_traces=subsystem_traces,
                     module_params=subsystem_params,
-                        module_param_errors=subsystem_param_errors,
-                        filter_instances=subsystem_filter_instances,
-                        missing_marker="NO_SUBSYSTEM_INSTANCE",
-                        regcombo_as_keyword=bool(args.regcombo_as_keyword),
-                    )
+                    module_param_errors=subsystem_param_errors,
+                    filter_instances=subsystem_filter_instances,
+                    missing_marker="NO_TRACE",
+                    regcombo_as_keyword=bool(args.regcombo_as_keyword),
+                )
         else:
             write_annotation_workbook(
                 template=template,

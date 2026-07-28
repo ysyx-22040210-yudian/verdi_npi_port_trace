@@ -254,6 +254,7 @@ foreach target_mod $target_modules {
         }
         dict set seen_paths $inst_path 1
         incr total_instances
+        csv_put $outfh [list $target_mod $inst_path "" "" instance INSTANCE_INVENTORY]
 
         set param_hdl_list {}
         set count 0

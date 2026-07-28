@@ -72,6 +72,9 @@ module TAFSubsystem #(parameter SID = 0) (
   wire sink_leaf_direct_out_used;
   wire sink_aux_used;
   wire reg_sink_used;
+  wire sparse_key;
+  wire sparse_out;
+  wire sparse_used;
 
   assign precise_b = 7'b0101010;
   assign precise_d = 3'b101;
@@ -181,4 +184,12 @@ module TAFSubsystem #(parameter SID = 0) (
     .aux_unused_out()
   );
   TAFKeySink #(.W(1)) u_sink_aux(.in(aux_out), .used(sink_aux_used));
+
+  generate
+    if (SID == 0) begin : gen_sparse_target
+      TAFKeySrc #(.W(1), .VALUE(1'b1)) u_sparse_key(.out(sparse_key));
+      TAFSparseTarget u_sparse_target(.sparse_in(sparse_key), .sparse_out(sparse_out));
+      TAFKeySink #(.W(1)) u_sparse_sink(.in(sparse_out), .used(sparse_used));
+    end
+  endgenerate
 endmodule

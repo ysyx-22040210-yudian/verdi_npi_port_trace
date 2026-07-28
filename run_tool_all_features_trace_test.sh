@@ -382,12 +382,15 @@ if len(xlsx_books) != 2:
 checked_target = 0
 checked_aux = 0
 checked_leaf = 0
+checked_sparse = 0
 for book in xlsx_books:
     wb = load_workbook(book, data_only=False)
     ws = wb.active
     headers = [cell.value for cell in ws[1]]
     for values in ws.iter_rows(min_row=2, values_only=True):
         data = dict(zip(headers, values))
+        if any("NO_SUBSYSTEM_INSTANCE" in str(value) for value in values):
+            raise SystemExit(f"{book}: stale absent-module marker found: {values}")
         module = data.get("module")
         if module == "TAFTarget":
             checked_target += 1
@@ -452,10 +455,24 @@ for book in xlsx_books:
                 raise SystemExit(f"{book}: leaf_out not yes: {data.get('leaf_out')}")
             if "LEAF_ID=" not in str(data.get("parameters", "")):
                 raise SystemExit(f"{book}: TAFLeaf parameters missing: {data.get('parameters')}")
+        elif module == "TAFSparseTarget":
+            checked_sparse += 1
+            if "subsys0" not in book.name:
+                raise SystemExit(f"{book}: sparse target leaked into absent subsystem")
+            sparse_in = str(data.get("sparse_in", ""))
+            if "driver_actual=" not in sparse_in or "NO_TRACE" in sparse_in:
+                raise SystemExit(f"{book}: sparse_in missing trace evidence: {sparse_in}")
+            if not str(data.get("sparse_out", "")).startswith("yes"):
+                raise SystemExit(f"{book}: sparse_out not yes: {data.get('sparse_out')}")
+            if str(data.get("parameters", "")) != "NO_PARAMETER":
+                raise SystemExit(
+                    f"{book}: parameterless sparse target inventory failed: {data.get('parameters')}"
+                )
 
-if checked_target != 2 or checked_aux != 2 or checked_leaf != 4:
+if checked_target != 2 or checked_aux != 2 or checked_leaf != 4 or checked_sparse != 1:
     raise SystemExit(
-        f"unexpected annotated rows: target={checked_target} aux={checked_aux} leaf={checked_leaf}"
+        "unexpected annotated rows: "
+        f"target={checked_target} aux={checked_aux} leaf={checked_leaf} sparse={checked_sparse}"
     )
 
 for marker in [

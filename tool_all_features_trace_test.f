@@ -14,5 +14,6 @@ tool_all_features_aux_target.v
 tool_all_features_target.v
 tool_all_features_target_shell0.v
 tool_all_features_target_shell1.v
+tool_all_features_sparse_target.v
 tool_all_features_subsystem.v
 tool_all_features_top.v

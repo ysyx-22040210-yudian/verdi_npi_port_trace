@@ -465,6 +465,12 @@ trace_gui_demo_annotated__subsys_top.subsys0.xlsx
 trace_gui_demo_annotated__subsys_top.subsys1.xlsx
 ```
 
+每个拆分工作簿只保留该 subsystem 中实际存在的目标 module/instance。目标 module
+只在其他 subsystem 例化时，不会再创建空实例行或把整行端口填成
+`NO_SUBSYSTEM_INSTANCE`。工具通过 `module_parameters.csv` 中的 `param_kind=instance`
+记录显式实例清单，因此无 parameter 的 module 也能正确归属；实例已确认存在但所选端口
+没有 trace 行时使用 `NO_TRACE`。
+
 `View Result` 会优先查找主输出；如果主输出不存在，会自动尝试打开拆分输出。
 
 ## 命令行用法

@@ -264,7 +264,7 @@ A[7]
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个目标端口 loader 递归最多访问多少个信号节点。超过后停止该端口 loader 追踪，并在 CSV/XLSX 中写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个目标端口 loader 递归最多展开多少条连接边。用于限制超宽 fanout 或跨层 alias 环导致的指数级扩散。超过后写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表最多消费多少个 handle。大 fanout net 返回过大列表时会截断并写入 `TRACE_LIMIT_REACHED:*`，避免单次 API 结果拖垮脚本。`0` 表示关闭该保护。 |
-| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 `verdi -batch -nologo -play npi_port_trace.tcl` 的墙钟超时秒数。`0` 表示不启用超时；大项目建议设置成可接受的上限，例如 `7200`。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | keyword 实例搜索、parameter 采集和单次 trace Verdi 进程的墙钟超时秒数。`0` 表示不启用超时；大项目建议设置成可接受的上限，例如 `7200`。超时或 leader 提前退出时都会扫描整个 session，先 TERM，并在短暂宽限后 KILL 仍未退出的 Verdi/Novas 子进程。watchdog 使用独立 sentinel，Verdi 自身的 124/137 不会误报为 `TRACE_TIMEOUT`。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开后，NPI/source fallback 会打印更详细的递归、module port high-side、源码上下文、assign fanout 匹配和 skip 原因。用于定位 `a -> b -> c -> assign B/C -> keywords/RegCombo` 这类 trace 断点；大项目常规运行建议关闭。 |
 | `stream` | `stream` | `--stream` | `true` | 启用流式聚合反标。Python 端边读 CSV 边聚合，配合匹配缓存降低大项目运行内存压力。大项目建议打开。 |
 | `no params` | `no_params` | `--no-params` | `false` | 跳过 module parameter 采集。打开后 parameter 列通常显示 `PARAM_SKIPPED`，端口反标仍继续。若大项目 parameter 采集阶段不稳定，可先打开此项。 |
@@ -471,7 +471,20 @@ trace_gui_demo_annotated__subsys_top.subsys1.xlsx
 记录显式实例清单，因此无 parameter 的 module 也能正确归属；实例已确认存在但所选端口
 没有 trace 行时使用 `NO_TRACE`。
 
-`View Result` 会优先查找主输出；如果主输出不存在，会自动尝试打开拆分输出。
+启用 `-subsystem-level` 时，每轮运行会先删除同一输出名前缀的旧主输出和旧拆分输出，
+避免失败重跑后误读历史 workbook。GUI 的 `View Result` 只打开本轮
+`__subsys_*.xlsx`；如果本轮没有生成拆分输出，不会回退到旧主输出。
+未启用 subsystem 拆分时，也会在运行前移除旧输出，失败后不会留下看似是本轮结果的
+历史 workbook。
+
+XLSX 先保存到目标目录中的临时文件，完成后再原子替换正式文件。subsystem 模式把本轮
+全部 split 视为一个输出事务；任一 workbook 保存失败会删除本轮已经发布的其他 split。
+keyword merged instances 和 errors log 也采用同目录原子替换，磁盘写满时不会发布半截
+结果。重跑会保留原正式文件的权限；若生成的 split 路径与模板路径或另一个 split
+碰撞，工具会失败退出并保护模板，不会覆盖输入文件。
+
+trace 失败不会伪装成 `NO_MODULE`：进程超时写 `TRACE_TIMEOUT`，本轮 full/boundary
+输出缺失写 `TRACE_OUTPUT_MISSING`，其他非零退出写 `TRACE_FAILED:rc=<code>`。
 
 ## 命令行用法
 

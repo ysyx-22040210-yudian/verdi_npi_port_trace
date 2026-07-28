@@ -156,9 +156,126 @@ if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
 fi
 
 TMPOUT="$(mktemp "$PWD/npi_trace_out.XXXXXX.csv")"
+VERDI_SESSION_FILE="$(mktemp "$PWD/npi_trace_session.XXXXXX")"
+VERDI_TIMEOUT_SENTINEL="$(mktemp "$PWD/npi_trace_timeout.XXXXXX")"
+VERDI_RUNNER_PID=""
 if [ -z "$MODULE_OUT" ]; then
     MODULE_OUT="${MODULE}_module_connections.csv"
 fi
+
+cleanup_failed_trace() {
+    rm -f "$TMPOUT" "$MODULE_OUT" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+}
+
+run_verdi_timeout_wrapper() {
+    local timeout_sentinel="$1"
+    local session_file="$2"
+    local child_pid
+    local child_rc
+    shift 2
+
+    trap 'printf "%s\n" "GNU_TIMEOUT" > "$timeout_sentinel"; exit 191' USR1
+    setsid sh -c 'session_file=$1; shift; printf "%s\n" "$$" > "$session_file"; exec "$@"' \
+        npi-verdi-session "$session_file" "$@" &
+    child_pid=$!
+    wait "$child_pid"
+    child_rc=$?
+    trap - USR1
+    return "$child_rc"
+}
+export -f run_verdi_timeout_wrapper
+
+session_live_pids() {
+    ps -e -o pid= -o sid= -o stat= | awk -v sid="$1" '$2 == sid && $3 !~ /^Z/ { print $1 }'
+}
+
+signal_verdi_session() {
+    local session_id="$1"
+    local signal_name="$2"
+    local pid
+    while read -r pid; do
+        if [ -n "$pid" ]; then
+            kill "-$signal_name" "$pid" 2>/dev/null || true
+        fi
+    done < <(session_live_pids "$session_id")
+}
+
+cleanup_verdi_session() {
+    local session_id="$1"
+    local term_grace="${2:-5}"
+    local remaining
+    local deadline
+    local attempt
+
+    case "$session_id" in
+        ''|*[!0-9]*)
+            echo "[ERROR] invalid Verdi session id: $session_id" >&2
+            return 1
+            ;;
+    esac
+
+    remaining="$(session_live_pids "$session_id")"
+    if [ -z "$remaining" ]; then
+        return 0
+    fi
+
+    log_step "cleaning Verdi session sid=$session_id signal=TERM"
+    signal_verdi_session "$session_id" TERM
+    deadline=$((SECONDS + term_grace))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        remaining="$(session_live_pids "$session_id")"
+        if [ -z "$remaining" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    remaining="$(session_live_pids "$session_id" | tr '\n' ',')"
+    log_step "cleaning Verdi session sid=$session_id signal=KILL remaining_pids=${remaining%,}"
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+        signal_verdi_session "$session_id" KILL
+        sleep 0.1
+        remaining="$(session_live_pids "$session_id")"
+        if [ -z "$remaining" ]; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    echo "[ERROR] could not kill all processes in Verdi session $session_id" >&2
+    return 1
+}
+
+cleanup_verdi_session_on_exit() {
+    local exit_rc=$?
+    local session_id
+
+    trap - EXIT HUP INT TERM
+    if [ -n "$VERDI_RUNNER_PID" ] && kill -0 "$VERDI_RUNNER_PID" 2>/dev/null; then
+        kill -TERM "$VERDI_RUNNER_PID" 2>/dev/null || true
+    fi
+    if [ -s "$VERDI_SESSION_FILE" ]; then
+        read -r session_id < "$VERDI_SESSION_FILE"
+        log_step "exit cleanup for Verdi session sid=$session_id"
+        cleanup_verdi_session "$session_id" 0 || true
+    fi
+    if [ -n "$VERDI_RUNNER_PID" ]; then
+        kill -KILL "$VERDI_RUNNER_PID" 2>/dev/null || true
+        wait "$VERDI_RUNNER_PID" 2>/dev/null || true
+    fi
+    if [ "$exit_rc" -ne 0 ]; then
+        cleanup_failed_trace
+    else
+        rm -f "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+    fi
+    exit "$exit_rc"
+}
+
+trap cleanup_verdi_session_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 log_step "script_dir=$SCRIPT_DIR"
 log_step "tcl=$TCL"
@@ -186,6 +303,9 @@ fi
 log_step "verdi_timeout_sec=$VERDI_TIMEOUT_SEC"
 log_step "trace_debug=$TRACE_DEBUG"
 
+# Never leave a previous or partially-written module result looking current.
+rm -f "$MODULE_OUT"
+
 export NPI_MODULE="$MODULE"
 export NPI_SRCFILE="$SRCFILE"
 export NPI_PORTS="$PORTS"
@@ -204,28 +324,72 @@ export NPI_TRACE_DEBUG="$TRACE_DEBUG"
 
 log_step "running Verdi batch trace"
 if [ "$VERDI_TIMEOUT_SEC" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
-    log_step "command: timeout ${VERDI_TIMEOUT_SEC}s verdi -batch -nologo -play $TCL"
-    timeout "${VERDI_TIMEOUT_SEC}s" verdi -batch -nologo -play "$TCL" 1>&2
-    verdi_rc=$?
+    if ! command -v setsid >/dev/null 2>&1; then
+        echo "[ERROR] setsid command is required when -verdi-timeout-sec is greater than 0" >&2
+        cleanup_failed_trace
+        exit 1
+    fi
+    log_step "command: timeout --signal=USR1 --kill-after=5s ${VERDI_TIMEOUT_SEC}s <Verdi session wrapper>"
+    timeout --signal=USR1 --kill-after=5s "${VERDI_TIMEOUT_SEC}s" \
+        bash -c 'run_verdi_timeout_wrapper "$@"' \
+        npi-timeout-wrapper "$VERDI_TIMEOUT_SENTINEL" "$VERDI_SESSION_FILE" \
+        verdi -batch -nologo -play "$TCL" 1>&2 &
+    VERDI_RUNNER_PID=$!
+    wait "$VERDI_RUNNER_PID"
+    verdi_observed_rc=$?
+    VERDI_RUNNER_PID=""
 elif [ "$VERDI_TIMEOUT_SEC" -gt 0 ]; then
-    log_step "WARN: timeout command not found; running Verdi without wall-clock timeout"
-    verdi -batch -nologo -play "$TCL" 1>&2
-    verdi_rc=$?
+    echo "[ERROR] timeout command is required when -verdi-timeout-sec is greater than 0" >&2
+    cleanup_failed_trace
+    exit 1
 else
     log_step "command: verdi -batch -nologo -play $TCL"
     verdi -batch -nologo -play "$TCL" 1>&2
-    verdi_rc=$?
+    verdi_observed_rc=$?
 fi
-log_step "verdi_exit_code=$verdi_rc"
-if [ "$VERDI_TIMEOUT_SEC" -gt 0 ] && { [ "$verdi_rc" -eq 124 ] || [ "$verdi_rc" -eq 137 ]; }; then
-    echo "[ERROR] Verdi trace timed out after ${VERDI_TIMEOUT_SEC}s" >&2
-    rm -f "$TMPOUT"
+
+timeout_triggered=0
+if [ -s "$VERDI_TIMEOUT_SENTINEL" ]; then
+    timeout_triggered=1
+fi
+
+session_cleanup_rc=0
+if [ "$VERDI_TIMEOUT_SEC" -gt 0 ]; then
+    if [ ! -s "$VERDI_SESSION_FILE" ]; then
+        echo "[ERROR] Verdi session id was not recorded" >&2
+        session_cleanup_rc=1
+    else
+        read -r verdi_session_id < "$VERDI_SESSION_FILE"
+        cleanup_verdi_session "$verdi_session_id" || session_cleanup_rc=$?
+    fi
+fi
+rm -f "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+
+verdi_failure_rc="$verdi_observed_rc"
+if [ "$session_cleanup_rc" -ne 0 ] && [ "$verdi_failure_rc" -eq 0 ]; then
+    verdi_failure_rc="$session_cleanup_rc"
+fi
+
+verdi_rc="$verdi_failure_rc"
+if [ "$timeout_triggered" -eq 1 ]; then
+    verdi_rc=124
+elif [ "$verdi_failure_rc" -eq 124 ] || [ "$verdi_failure_rc" -eq 137 ]; then
+    verdi_rc=125
+fi
+log_step "verdi_exit_code=$verdi_rc observed_exit_code=$verdi_failure_rc timeout_triggered=$timeout_triggered"
+if [ "$verdi_rc" -ne 0 ]; then
+    if [ "$timeout_triggered" -eq 1 ]; then
+        echo "[ERROR] Verdi trace timed out after ${VERDI_TIMEOUT_SEC}s (rc=$verdi_rc)" >&2
+    else
+        echo "[ERROR] Verdi trace failed with exit code $verdi_failure_rc (reported_rc=$verdi_rc)" >&2
+    fi
+    cleanup_failed_trace
     exit "$verdi_rc"
 fi
 
 if [ ! -s "$TMPOUT" ]; then
     echo "[ERROR] no output generated" >&2
-    rm -f "$TMPOUT"
+    cleanup_failed_trace
     exit 1
 fi
 
@@ -238,5 +402,11 @@ fi
 log_step "trace_done full_trace_lines=$FULL_LINES module_boundary_lines=$MODULE_LINES"
 log_step "writing full trace CSV to stdout"
 cat "$TMPOUT"
+cat_rc=$?
+if [ "$cat_rc" -ne 0 ]; then
+    echo "[ERROR] failed to write full trace CSV to stdout (rc=$cat_rc)" >&2
+    cleanup_failed_trace
+    exit "$cat_rc"
+fi
 rm -f "$TMPOUT"
 log_step "removed temp_full_trace=$TMPOUT"

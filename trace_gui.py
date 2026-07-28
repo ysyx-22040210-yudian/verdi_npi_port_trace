@@ -1210,6 +1210,19 @@ def resolve_result_file(path_text: str) -> Tuple[Path, str]:
     return path, ""
 
 
+def resolve_subsystem_result_file(path_text: str) -> Optional[Path]:
+    path = Path(path_text.strip())
+    if not path.is_absolute():
+        path = (SCRIPT_DIR / path).resolve()
+
+    candidates = sorted(
+        candidate
+        for candidate in path.parent.glob(f"{path.stem}__subsys_*{path.suffix}")
+        if candidate.is_file()
+    )
+    return candidates[0] if candidates else None
+
+
 def wrap_cell_text(value: object, width: int = 32, max_lines: int = 6) -> str:
     if value is None:
         return ""
@@ -1950,6 +1963,10 @@ class TraceGui:
         if mode == "xlsx":
             path = str(self._var("xlsx_output").get()).strip()
             if path:
+                subsystem_level_text = str(self._var("subsystem_level").get()).strip()
+                if subsystem_level_text.isdigit() and int(subsystem_level_text) > 0:
+                    resolved = resolve_subsystem_result_file(path)
+                    return str(resolved) if resolved is not None else ""
                 resolved, _note = resolve_result_file(path)
                 return str(resolved)
             return path

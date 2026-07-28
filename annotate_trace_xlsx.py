@@ -31,12 +31,19 @@ import argparse
 import csv
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from find_instances_batched import (
+    cleanup_completed_process_session,
+    terminate_timed_out_process,
+)
 
 try:
     import openpyxl
@@ -81,6 +88,41 @@ def path_has_contents(path: Path) -> bool:
     return False
 
 
+def current_umask_file_mode() -> int:
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+    return 0o666 & ~current_umask
+
+
+def atomic_save_workbook(
+    workbook,
+    output: Path,
+    output_mode: Optional[int] = None,
+) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output_mode is None:
+        try:
+            output_mode = stat.S_IMODE(output.stat().st_mode)
+        except FileNotFoundError:
+            output_mode = current_umask_file_mode()
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(output.parent),
+        prefix=f".{output.stem}.",
+        suffix=f".tmp{output.suffix}",
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        workbook.save(temp_path)
+        temp_path.chmod(output_mode)
+        os.replace(str(temp_path), str(output))
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 @dataclass(frozen=True)
 class TraceRow:
     inst_full_name: str
@@ -115,6 +157,10 @@ class TemplateAxes:
 class ModuleTrace:
     rows: Sequence[TraceRow]
     error: Optional[str] = None
+
+
+class TraceOutputError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -400,8 +446,10 @@ def create_minimal_template(
                 cell.font = header_font
                 cell.fill = header_fill
 
-    template_path.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(template_path)
+    try:
+        atomic_save_workbook(workbook, template_path)
+    finally:
+        workbook.close()
     log_step(f"created template={template_path}")
 
 
@@ -637,12 +685,21 @@ def select_subsystem_modules(
         module_params = params_by_module_subsystem.get(module, {})
         has_data = subsystem in module_data
         has_instance = bool(module_params.get(subsystem))
-        error_without_topology = (
-            module in module_errors and not module_data and not module_params
-        )
-        if has_data or has_instance or error_without_topology:
+        if has_data or has_instance:
             selected.append(module)
     return selected
+
+
+def trace_failure_marker(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "TRACE_TIMEOUT"
+    if isinstance(exc, TraceOutputError):
+        return "TRACE_OUTPUT_MISSING"
+    if isinstance(exc, subprocess.CalledProcessError):
+        if exc.returncode == 124:
+            return "TRACE_TIMEOUT"
+        return f"TRACE_FAILED:rc={exc.returncode}"
+    return f"TRACE_FAILED:{type(exc).__name__}"
 
 
 def split_trace_rows_by_instance(rows: Sequence[TraceRow]) -> Dict[str, List[TraceRow]]:
@@ -677,6 +734,98 @@ def instances_from_param_rows(module: str, rows: Sequence[ParamRow]) -> List[Ins
 
 def split_output_path(output: Path, subsystem: str) -> Path:
     return output.with_name(f"{output.stem}__subsys_{safe_name(subsystem)}{output.suffix}")
+
+
+def remove_intermediate_file(path: Path, reason: str) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if not path.is_file() and not path.is_symlink():
+        raise RuntimeError(f"refusing to remove non-file intermediate output: {path}")
+    path.unlink()
+    log_step(f"removed {reason}: {path}")
+
+
+def cleanup_subsystem_outputs(template: Path, output: Path) -> None:
+    protected = template.resolve()
+    candidates = [output]
+    if output.parent.is_dir():
+        prefix = f"{output.stem}__subsys_"
+        candidates.extend(
+            candidate
+            for candidate in output.parent.iterdir()
+            if candidate.name.startswith(prefix)
+            and candidate.name.endswith(output.suffix)
+        )
+
+    seen: Set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved == protected:
+            log_step(f"preserved subsystem template output: {candidate}")
+            continue
+        remove_intermediate_file(candidate, "stale subsystem output")
+
+
+def collect_existing_output_modes(output: Path) -> Dict[Path, int]:
+    candidates = [output]
+    if output.parent.is_dir():
+        prefix = f"{output.stem}__subsys_"
+        candidates.extend(
+            candidate
+            for candidate in output.parent.iterdir()
+            if candidate.name.startswith(prefix)
+            and candidate.name.endswith(output.suffix)
+        )
+
+    modes: Dict[Path, int] = {}
+    for candidate in candidates:
+        try:
+            modes[candidate] = stat.S_IMODE(candidate.stat().st_mode)
+        except FileNotFoundError:
+            continue
+    return modes
+
+
+def rollback_outputs(paths: Sequence[Path], reason: str) -> None:
+    failures: List[str] = []
+    seen: Set[Path] = set()
+    for path in reversed(paths):
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            remove_intermediate_file(path, reason)
+        except Exception as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise RuntimeError("failed to roll back outputs: " + "; ".join(failures))
+
+
+@dataclass
+class OutputTransaction:
+    paths: List[Path] = field(default_factory=list)
+    protected_paths: Set[Path] = field(default_factory=set)
+    committed: bool = False
+
+    def track(self, path: Path) -> Path:
+        resolved = path.resolve()
+        if resolved in self.protected_paths:
+            raise ValueError(f"subsystem output path collides with protected input: {path}")
+        if any(existing.resolve() == resolved for existing in self.paths):
+            raise ValueError(f"duplicate subsystem output path: {path}")
+        self.paths.append(path)
+        return path
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def rollback_if_uncommitted(self) -> None:
+        if not self.committed:
+            rollback_outputs(self.paths, "failed subsystem run output")
 
 
 def format_module_params(module: str, param_rows: Sequence[ParamRow]) -> str:
@@ -800,6 +949,7 @@ def write_annotation_workbook(
     filter_instances: Sequence[str],
     missing_marker: str = "NO_MODULE",
     regcombo_as_keyword: bool = False,
+    output_mode: Optional[int] = None,
 ) -> None:
     workbook, sheet = load_workbook(template, sheet_name)
     module_param_errors = module_param_errors or {}
@@ -838,8 +988,10 @@ def write_annotation_workbook(
             log_step(f"cell instance={row_key} module={module} port={port} result={result}")
             set_result_cell(sheet, axes, row_key, port, result)
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(output)
+    try:
+        atomic_save_workbook(workbook, output, output_mode=output_mode)
+    finally:
+        workbook.close()
     log_step(f"done output={output}")
 
 
@@ -855,6 +1007,7 @@ def write_annotation_results_workbook(
     module_errors: Optional[Dict[str, str]] = None,
     module_param_errors: Optional[Dict[str, str]] = None,
     missing_marker: str = "NO_MODULE",
+    output_mode: Optional[int] = None,
 ) -> None:
     workbook, sheet = load_workbook(template, sheet_name)
     module_errors = module_errors or {}
@@ -884,8 +1037,10 @@ def write_annotation_results_workbook(
             log_step(f"cell instance={row_key} module={module} port={port} result={result}")
             set_result_cell(sheet, axes, row_key, port, result)
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(output)
+    try:
+        atomic_save_workbook(workbook, output, output_mode=output_mode)
+    finally:
+        workbook.close()
     log_step(f"done output={output}")
 
 
@@ -894,28 +1049,34 @@ def run_checked(
     cwd: Path,
     stdout_path: Optional[Path] = None,
     env: Optional[Dict[str, str]] = None,
+    timeout_sec: Optional[float] = None,
 ) -> None:
     text_cmd = " ".join(str(x) for x in cmd)
     log_step(f"command: {text_cmd}")
-    if stdout_path is not None:
-        with stdout_path.open("w", encoding="utf-8", newline="") as out:
-            proc = subprocess.Popen(
-                [str(x) for x in cmd],
-                cwd=str(cwd),
-                env=env,
-                stdout=out,
-                stderr=sys.stderr,
-            )
-            rc = proc.wait()
-    else:
+    timeout = timeout_sec if timeout_sec is not None and timeout_sec > 0 else None
+    out = None
+    try:
+        if stdout_path is not None:
+            out = stdout_path.open("w", encoding="utf-8", newline="")
         proc = subprocess.Popen(
             [str(x) for x in cmd],
             cwd=str(cwd),
             env=env,
-            stdout=sys.stderr,
+            stdout=out if out is not None else sys.stderr,
             stderr=sys.stderr,
+            start_new_session=bool(timeout is not None and os.name == "posix"),
         )
-        rc = proc.wait()
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log_step(f"command timed out after {timeout_sec} seconds: {text_cmd}")
+            terminate_timed_out_process(proc)
+            raise
+        if timeout is not None and os.name == "posix":
+            cleanup_completed_process_session(proc)
+    finally:
+        if out is not None:
+            out.close()
     if rc != 0:
         raise subprocess.CalledProcessError(rc, [str(x) for x in cmd])
 
@@ -933,6 +1094,7 @@ def load_instances(path: Path) -> List[str]:
 
 def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
     out_file = workdir / f"{safe_name(args.keywords)}_instances.txt"
+    remove_intermediate_file(out_file, "stale keyword instance output")
     cmd: List[object] = [
         sys.executable,
         SCRIPT_DIR / "find_instances_batched.py",
@@ -944,13 +1106,19 @@ def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
         out_file,
         "--batch-size",
         str(args.keyword_batch_size),
+        "--verdi-timeout-sec",
+        str(args.verdi_timeout_sec),
     ]
     if args.keyword_continue_on_error:
         cmd.append("--continue-on-error")
     if args.keyword_log_instances:
         cmd.append("--log-instances")
 
-    run_checked(cmd, cwd=RUN_CWD)
+    try:
+        run_checked(cmd, cwd=RUN_CWD)
+    except Exception:
+        remove_intermediate_file(out_file, "failed keyword instance output")
+        raise
 
     instances = load_instances(out_file)
     if not instances:
@@ -990,6 +1158,7 @@ def read_param_rows(path: Path) -> List[ParamRow]:
 
 def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple[List[ParamRow], Path, Optional[str]]:
     out_file = workdir / "module_parameters.csv"
+    remove_intermediate_file(out_file, "stale module parameter output")
     if args.no_params:
         log_step("skip module parameter collection because --no-params is set")
         return [], out_file, "PARAM_SKIPPED"
@@ -1004,20 +1173,22 @@ def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple
             ["verdi", "-batch", "-nologo", "-play", SCRIPT_DIR / "npi_find_module_params.tcl"],
             cwd=RUN_CWD,
             env=env,
+            timeout_sec=args.verdi_timeout_sec,
         )
-    except subprocess.CalledProcessError as exc:
+        if not path_has_contents(out_file):
+            raise RuntimeError(
+                f"parameter Verdi completed without a non-empty output: {out_file}"
+            )
+        rows = read_param_rows(out_file)
+    except Exception as exc:
+        remove_intermediate_file(out_file, "failed module parameter output")
         if args.strict_params:
             raise
         message = f"PARAM_TRACE_FAILED: {exc}"
         log_step(message)
-        if out_file.exists() and out_file.stat().st_size > 0:
-            try:
-                return read_param_rows(out_file), out_file, message
-            except Exception as read_exc:
-                log_step(f"parameter csv read failed after Tcl error: {read_exc}")
         return [], out_file, message
 
-    return read_param_rows(out_file), out_file, None
+    return rows, out_file, None
 
 
 def strip_instance_prefix(signal_name: str, inst: str) -> Optional[str]:
@@ -1115,6 +1286,8 @@ def trace_module(
 ) -> Tuple[Path, Path]:
     full_csv = workdir / f"{safe_name(module)}_full.csv"
     module_csv = workdir / f"{safe_name(module)}_module_connections.csv"
+    remove_intermediate_file(full_csv, f"stale full trace output for {module}")
+    remove_intermediate_file(module_csv, f"stale boundary trace output for {module}")
     cmd: List[object] = [
         SCRIPT_DIR / "npi_trace.sh",
         "-module",
@@ -1150,7 +1323,22 @@ def trace_module(
     if stop_instance_file is not None:
         cmd.extend(["-load-stop-instance-file", str(stop_instance_file)])
 
-    run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv)
+    try:
+        run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv)
+        missing = [
+            path
+            for path in (full_csv, module_csv)
+            if not path_has_contents(path)
+        ]
+        if missing:
+            raise TraceOutputError(
+                "trace command completed without current non-empty output(s): "
+                + ", ".join(str(path) for path in missing)
+            )
+    except Exception:
+        remove_intermediate_file(full_csv, f"failed full trace output for {module}")
+        remove_intermediate_file(module_csv, f"failed boundary trace output for {module}")
+        raise
     return full_csv, module_csv
 
 
@@ -1497,6 +1685,17 @@ def main() -> None:
     setup_log_file(args.log_file)
     template = Path(args.template).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
+    existing_output_modes = collect_existing_output_modes(output)
+    if args.subsystem_level:
+        cleanup_subsystem_outputs(template, output)
+    elif output.resolve() != template.resolve():
+        remove_intermediate_file(output, "stale annotation output")
+    output_transaction = (
+        OutputTransaction(protected_paths={template.resolve()})
+        if args.subsystem_level
+        else None
+    )
+
     lib = Path(args.lib).expanduser()
     if not lib.is_absolute():
         lib = RUN_CWD / lib
@@ -1544,7 +1743,10 @@ def main() -> None:
 
     try:
         workbook, sheet = load_workbook(template, args.sheet)
-        modules, ports = extract_modules_and_ports(sheet, args.module, args.ports)
+        try:
+            modules, ports = extract_modules_and_ports(sheet, args.module, args.ports)
+        finally:
+            workbook.close()
         log_step(f"modules={','.join(modules)}")
         log_step(f"ports={','.join(ports)}")
 
@@ -1652,11 +1854,27 @@ def main() -> None:
                         )
                         module_port_results[module] = results
                         log_step(f"stream loaded trace rows for {module}: {total_rows}")
-                except subprocess.CalledProcessError as exc:
-                    module_errors[module] = "NO_MODULE"
-                    log_step(f"module {module} trace failed: {exc}")
+                except (subprocess.SubprocessError, TraceOutputError) as exc:
+                    marker = trace_failure_marker(exc)
+                    module_errors[module] = marker
+                    log_step(
+                        "module={} trace_status=failed marker={} error_type={} error={}".format(
+                            module, marker, type(exc).__name__, exc
+                        )
+                    )
 
             if args.subsystem_level:
+                for module, error in module_errors.items():
+                    if (
+                        not module_port_results_by_subsystem.get(module)
+                        and not params_by_module_subsystem.get(module)
+                    ):
+                        log_step(
+                            "module={} trace_status=failed subsystem_topology=none "
+                            "action=omit_from_subsystem_outputs error={}".format(
+                                module, error
+                            )
+                        )
                 if not subsystems:
                     raise RuntimeError("no subsystem instances found in streamed trace rows")
                 for subsystem in sorted(subsystems):
@@ -1703,10 +1921,14 @@ def main() -> None:
                         else:
                             subsystem_results[module] = results
 
+                    assert output_transaction is not None
+                    subsystem_output = output_transaction.track(
+                        split_output_path(output, subsystem)
+                    )
                     write_annotation_results_workbook(
                         template=template,
                         sheet_name=args.sheet,
-                        output=split_output_path(output, subsystem),
+                        output=subsystem_output,
                         modules=subsystem_modules,
                         ports=ports,
                         module_port_results=subsystem_results,
@@ -1714,6 +1936,7 @@ def main() -> None:
                         module_errors=subsystem_errors,
                         module_param_errors=subsystem_param_errors,
                         missing_marker="NO_TRACE",
+                        output_mode=existing_output_modes.get(subsystem_output),
                     )
             else:
                 write_annotation_results_workbook(
@@ -1726,7 +1949,10 @@ def main() -> None:
                     module_params=params_by_module,
                     module_errors=module_errors,
                     module_param_errors=param_errors_by_module,
+                    output_mode=existing_output_modes.get(output),
                 )
+            if output_transaction is not None:
+                output_transaction.commit()
             return
 
         module_traces: Dict[str, ModuleTrace] = {}
@@ -1754,11 +1980,28 @@ def main() -> None:
                             module, len(by_subsystem), args.subsystem_level
                         )
                     )
-            except subprocess.CalledProcessError as exc:
-                module_traces[module] = ModuleTrace(rows=[], error="NO_MODULE")
-                log_step(f"module {module} trace failed: {exc}")
+            except (subprocess.SubprocessError, TraceOutputError) as exc:
+                marker = trace_failure_marker(exc)
+                module_traces[module] = ModuleTrace(rows=[], error=marker)
+                log_step(
+                    "module={} trace_status=failed marker={} error_type={} error={}".format(
+                        module, marker, type(exc).__name__, exc
+                    )
+                )
 
         if args.subsystem_level:
+            for module, trace in module_traces.items():
+                if (
+                    trace.error is not None
+                    and not rows_by_module_subsystem.get(module)
+                    and not params_by_module_subsystem.get(module)
+                ):
+                    log_step(
+                        "module={} trace_status=failed subsystem_topology=none "
+                        "action=omit_from_subsystem_outputs error={}".format(
+                            module, trace.error
+                        )
+                    )
             if not subsystems:
                 raise RuntimeError("no subsystem instances found in full trace rows")
             filter_instances_by_subsystem = split_instances_by_subsystem(
@@ -1821,10 +2064,14 @@ def main() -> None:
                         )
                     else:
                         subsystem_traces[module] = ModuleTrace(rows=subsystem_rows)
+                assert output_transaction is not None
+                subsystem_output = output_transaction.track(
+                    split_output_path(output, subsystem)
+                )
                 write_annotation_workbook(
                     template=template,
                     sheet_name=args.sheet,
-                    output=split_output_path(output, subsystem),
+                    output=subsystem_output,
                     modules=subsystem_modules,
                     ports=ports,
                     module_traces=subsystem_traces,
@@ -1833,6 +2080,7 @@ def main() -> None:
                     filter_instances=subsystem_filter_instances,
                     missing_marker="NO_TRACE",
                     regcombo_as_keyword=bool(args.regcombo_as_keyword),
+                    output_mode=existing_output_modes.get(subsystem_output),
                 )
         else:
             write_annotation_workbook(
@@ -1846,8 +2094,13 @@ def main() -> None:
                 module_param_errors=param_errors_by_module,
                 filter_instances=filter_instances,
                 regcombo_as_keyword=bool(args.regcombo_as_keyword),
+                output_mode=existing_output_modes.get(output),
             )
+        if output_transaction is not None:
+            output_transaction.commit()
     finally:
+        if output_transaction is not None:
+            output_transaction.rollback_if_uncommitted()
         log_step(f"intermediate files kept in workdir={workdir}")
 
 

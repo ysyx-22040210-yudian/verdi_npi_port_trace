@@ -1,10 +1,21 @@
 # Verdi NPI Port Trace
 
-这是一个基于 Synopsys Verdi NPI L1 Tcl API 的 RTL 端口连接追踪和 Excel 反标工具。工具只读取已经 elaboration 完成的 VCS/Verdi KDB：
+这是一个读取 VCS/Verdi elaboration KDB 的 RTL 端口连接追踪和 Excel 反标工具。当前执行后端已经迁移到公共 `kdebug` JSON API：端口追踪严格调用 `port.trace_batch`，实例和参数采集调用 `module.find_instances`、`module.inspect` / `module.inspect_batch`，不再由业务脚本直接启动 Verdi 或 source 本仓库的 NPI Tcl。
+
+用户仍可沿用原来的 `npi_trace.sh`、CSV 和 XLSX 入口。`npi_trace.sh` 现在是兼容包装器，实际执行链路是：
+
+```text
+CLI / GUI -> shell compatibility wrapper -> kdebug_backend.py
+          -> public kdebug JSON API -> kdebug-managed Verdi/NPI backend
+```
+
+工具只读取已经 elaboration 完成的 VCS/Verdi KDB。历史命令常用以下路径：
 
 ```text
 simv.daidir/kdb.elab++
 ```
+
+适配器会把它规范化为公共 kdebug 要求的 `simv.daidir`。也可以直接把 `simv.daidir` 传给 `-lib`。完整迁移契约和兼容边界见 [`KDEBUG_BACKEND_MIGRATION.md`](KDEBUG_BACKEND_MIGRATION.md)。
 
 当前不支持 filelist 直接导入。`-filelist`、`-top`、`-incdir` 只作为历史兼容参数名保留，迁移到其他项目时应先用 VCS 带 `-kdb` 生成 KDB。
 
@@ -19,7 +30,10 @@ simv.daidir/kdb.elab++
 - 支持 loader 方向的 fanout / slice / 拼接继续展开，例如 `assign B0 = A[10:0]`、`assign B = {C, A, D}`。
 - 支持 `-ports A[7]` 这种单 bit 端口追踪。
 - 支持 XLSX 反标、CSV 过滤、Raw Trace 三种命令行入口。
-- 支持 `-log-file` 将脚本步骤、Verdi/NPI 输出和 trace debug 日志保存到文件，Raw Trace 的 CSV stdout 保持独立。
+- 通过公共 `port.trace_batch` 在一次 KDB 导入中生成 full/boundary 结果；该 action 不可用或失败时直接报错，不回退到浅层 `trace.driver` / `trace.load`。
+- 常量 driver/load 日志包含 `evidence_source` 和目标信号到常量的 `const_full_path`，便于复核证据来源。
+- 对截断、批内单项错误、矛盾常量和无法按 bit 投影的常量采用 fail-closed 结果，不把不完整证据误写成 `NO_DRIVER` / `NO_LOAD`。
+- 支持 `-log-file` 将脚本步骤、kdebug 诊断和 trace debug 日志保存到文件，Raw Trace 的 CSV stdout 保持独立。
 - 提供 Tkinter GUI，保留全部命令行能力。
 
 ## 文件说明
@@ -33,12 +47,12 @@ simv.daidir/kdb.elab++
 | `annotate_trace_xlsx.sh` | XLSX 反标命令行入口。 |
 | `annotate_trace_xlsx.py` | XLSX 反标主实现，依赖 Python 3.8+ 和 `openpyxl`。 |
 | `trace_and_filter.sh` | CSV trace + keywords 过滤入口。 |
-| `npi_trace.sh` | 底层 NPI trace 包装脚本。 |
-| `npi_port_trace.tcl` | 核心端口 trace NPI Tcl 脚本。 |
-| `npi_find_instances.tcl` | 查找一个或多个 module 定义的所有例化实例。 |
-| `find_instances_batched.py` | 分批查找 `-keywords` module 实例，降低大项目中单个 Verdi 进程资源峰值。 |
-| `npi_find_module_params.tcl` | 采集目标 module 例化 parameter。 |
+| `npi_trace.sh` | 历史名称保留的兼容入口；当前转调 `kdebug_backend.py trace`。 |
+| `kdebug_backend.py` | 公共 kdebug JSON API 适配器，负责 KDB 路径规范化、协议校验、batch trace、常量证据和兼容 CSV 发布。 |
+| `find_instances_batched.py` | 按 workload 分批调用公共 `module.find_instances`，失败时可二分重试，降低大项目故障影响范围。 |
+| `npi_port_trace.tcl` / `npi_find_instances.tcl` / `npi_find_module_params.tcl` | 旧直接 NPI 后端的历史参考文件；当前主流程不执行这些 Tcl。 |
 | `filter_trace.py` | CSV 过滤、合并、按实例拆分。 |
+| `KDEBUG_BACKEND_MIGRATION.md` | kdebug 后端发现、JSON 契约、批处理、fail-closed 和 CSV 兼容说明。 |
 | `multi_module_trace_template.xlsx` | 多 module 测试模板。 |
 | `all_features_trace_test.v` | 单一 RTL 场景覆盖多 module、多 keywords、parameter、常数、悬空、Reg endpoint、assign 透传/拼接/切片、单 bit 端口、loader fanout、子系统拆分。 |
 | `all_features_modules.list` / `all_features_keywords.list` / `all_features_ports.list` | 全特性回归使用的 module、keywords、ports 列表文件。 |
@@ -64,8 +78,9 @@ simv.daidir/kdb.elab++
 | 依赖 | 说明 |
 | --- | --- |
 | Linux / VM shell | 主流程脚本是 `bash`。 |
-| Verdi | 必须能运行 `verdi -batch -nologo -play ...`。 |
-| VCS/Verdi KDB | 必须提供有效 `simv.daidir/kdb.elab++`。 |
+| 公共 `kdebug` CLI | 必须支持 `--json` 请求，并能访问设计 actions；通过 `--kdebug-bin`、`KDEBUG_BIN`、`KVERIF_HOME` 或 `PATH` 定位。 |
+| Verdi | kdebug 的设计后端仍需要可用 Verdi/NPI 环境，但本工具不再直接启动 Verdi。 |
+| VCS/Verdi KDB | 必须提供有效 `simv.daidir`；兼容入口也接受其下的 `kdb.elab++`。 |
 | Python 3.8+ | XLSX / GUI 流程按 Python 3.8+ 维护。 |
 | `openpyxl` | XLSX 反标和 GUI 查看 XLSX 需要。 |
 
@@ -116,6 +131,8 @@ python3 -c "import openpyxl; print(openpyxl.__version__)"
 python3 -c "import tkinter"
 which bash
 which verdi
+export KDEBUG_BIN=/path/to/kverif/tools/kdebug
+"$KDEBUG_BIN" --json actions
 ls build/simv.daidir/kdb.elab++
 ```
 
@@ -143,6 +160,24 @@ ysyx_22050058_pht
 ```
 
 `keywords` 也是 module 定义名列表，不是普通字符串关键词。工具会先查找这些 module 的所有例化实例，再判断目标端口的方向相关 trace endpoint 是否属于这些实例。
+
+## kdebug 后端选择
+
+推荐显式配置公共 CLI，避免压测主机上命中另一个版本：
+
+```bash
+export KDEBUG_BIN=/home/host/kverif/tools/kdebug
+./npi_trace.sh \
+  -module MSHR \
+  -lib /root/XiangShan-build/build/xverif_xiangshan/kdb/simv.daidir/kdb.elab++ \
+  -ports 'io_id[0],io_id[7]'
+```
+
+也可对命令单独传 `--kdebug-bin /path/to/kdebug`。自动发现顺序是：显式参数、`KDEBUG_BIN`、`$KVERIF_HOME/tools/kdebug`、本仓库 `tools/kdebug`、`PATH` 中的 `kdebug`。配置了显式路径但文件不存在或不可执行时会直接失败，不会静默换用其他版本。
+
+`-lib` 兼容原有 `kdb.elab++` 写法，但发给 kdebug 的 `target.daidir` 始终是其父目录 `simv.daidir`。无法归一到 `.daidir` 的路径会以 `INVALID_KDB_PATH` 失败。
+
+`npi_trace.sh` 会把既有的 `-const-trace-depth`、`-assign-trace-depth`、`-assign-expr-trace-depth`、三个 loader limit、`-load-stop-instance-file`、`-srcfile` 和 `-const-source-fallback` 逐项传给 `port.trace_batch`。输出行预算可用 `-trace-max-rows N` 或环境变量 `NPI_TRACE_MAX_ROWS` 设置，默认 `20000`；`0` 沿用旧语义，表示不启用该行数保护。
 
 方向判断规则：
 
@@ -196,7 +231,7 @@ GUI 界面文字为英文。顶部是麒麟芯片品牌区，中间是参数区�
 | `Common Parameters` | 三种模式共用参数区。 |
 | `XLSX Annotate` | 反标 Excel 模式。 |
 | `CSV Filter` | 生成 trace CSV 并按 keywords 过滤模式。 |
-| `Raw Trace` | 只运行底层 NPI trace 的调试模式。 |
+| `Raw Trace` | 只运行公共 kdebug trace 适配层的调试模式。 |
 | `Command Preview` | 实时显示 GUI 当前参数会生成的命令。 |
 | `Run Log` | 显示底层脚本日志、错误和退出码。 |
 
@@ -206,7 +241,7 @@ GUI 界面文字为英文。顶部是麒麟芯片品牌区，中间是参数区�
 
 | GUI 项 | JSON 字段 | 命令参数 | 是否必填 | 详细说明 |
 | --- | --- | --- | --- | --- |
-| `KDB/elab++` | `lib` | `-lib` | 必填 | VCS/Verdi 生成的 KDB 目录，通常是 `simv.daidir/kdb.elab++`。工具必须读取 KDB，不能只给 filelist。路径可以是相对工具目录的相对路径，也可以是绝对路径。 |
+| `KDB/elab++` | `lib` | `-lib` | 必填 | VCS/Verdi 生成的 KDB，可填 `simv.daidir/kdb.elab++` 或 `simv.daidir`。适配器统一归一为公共 kdebug 的 `target.daidir`。工具必须读取 KDB，不能只给 filelist。 |
 | `KDB/elab++` 的 `Browse` | 无独立字段 | 无 | 可选 | 打开目录选择窗口，用于选择 `kdb.elab++` 目录。选择后写入 `lib`。 |
 | `module` | `module` | `-module` | CSV / Raw 必填；XLSX 建议填写 | 目标 module 定义名列表。工具会对这些 module 的所有例化实例做端口 trace。可以填写多个 module，用逗号、空格、分号或换行分隔。XLSX 模式如果不填，会尝试从模板第一列读取 module 名。 |
 | `module` 的 `Load List` | 写入 `module` | 无 | 可选 | 从 `.txt`、`.list`、`.f` 等文本文件读取 module 列表。支持注释和多种分隔符。 |
@@ -214,7 +249,7 @@ GUI 界面文字为英文。顶部是麒麟芯片品牌区，中间是参数区�
 | `keywords` 的 `Load List` | 写入 `keywords` | 无 | 可选 | 从文本文件读取 keywords module 列表。适合大项目中 keywords 很多的情况。 |
 | `ports` | `ports` | `-ports` | 可选 | 只检查这些端口。为空时检查目标 module 的全部端口。支持多个端口，也支持单 bit 写法，例如 `A[7]`。 |
 | `ports` 的 `Load List` | 写入 `ports` | 无 | 可选 | 从文本文件读取端口列表。适合端口很多或要复用端口集合的场景。 |
-| `log file` | `log_file` | `-log-file` | 可选 | 将本次运行的步骤日志、Verdi/NPI 子进程输出、`trace debug` 详细诊断写入指定文件。为空时只在终端或 GUI Run Log 中显示。Raw Trace 模式下此项只记录日志，不会影响 `full trace csv` 的 stdout CSV 内容。 |
+| `log file` | `log_file` | `-log-file` | 可选 | 将本次运行的步骤日志、kdebug warning/error、常量证据和 `trace debug` 诊断写入指定文件。为空时只在终端或 GUI Run Log 中显示。Raw Trace 模式下此项只记录日志，不会影响 full trace CSV。 |
 | `log file` 的 `Browse` | 写入 `log_file` | 无 | 可选 | 打开保存文件窗口，选择 `.log` 或 `.txt` 日志输出路径。 |
 
 list 文件读取规则：
@@ -246,6 +281,8 @@ A[7]
 
 这个模式用于把 trace 结果反标到 Excel 模板中。一个目标 module 如果有多个例化实例，会在反标文件中按实例单独开行，并写入 module 名、实例名、parameter 和信号 trace 信息。
 
+下表保留迁移前的参数名以兼容 GUI 配置；深度和资源上限会逐项映射到 `port.trace_batch` 的公开 limits，详见 [`KDEBUG_BACKEND_MIGRATION.md`](KDEBUG_BACKEND_MIGRATION.md#8-参数映射)。
+
 | GUI 项 | JSON 字段 | 命令参数 | 默认值 | 详细说明 |
 | --- | --- | --- | --- | --- |
 | `template` | `template` | `-template` | 空 | 输入 XLSX 模板。模板中通常按 module 和 ports 形成交叉表。若模板不存在且提供了 `module` 和 `ports`，脚本会创建最小模板。 |
@@ -257,15 +294,15 @@ A[7]
 | `sheet` | `sheet` | `-sheet` | 空 | 指定读写的 worksheet 名。为空时使用模板第一个 worksheet。 |
 | `subsystem level` | `subsystem_level` | `-subsystem-level` | `0` | 按目标实例路径的前 N 层拆分输出，一个子系统一个反标文件。`0` 表示不拆分。例如实例路径 `top.dut.subsys0.u_mod`，设置 `3` 时 subsystem key 是 `top.dut.subsys0`。 |
 | `match cache size` | `match_cache_size` | `--match-cache-size` | `200000` | `--stream` 模式下，缓存“某个 trace endpoint 是否属于 keywords 实例”的判断结果。值越大重复判断越少，但运行内存占用越高；`0` 表示关闭缓存。 |
-| `keyword batch size` | `keyword_batch_size` | `--keyword-batch-size` | `8` | 每个 Verdi 进程搜索多少个 keyword module。大项目 keywords 很多时建议设为 `1`、`2` 或 `4`，降低单个 Verdi 进程资源峰值。允许跑慢，但更稳。 |
+| `keyword batch size` | `keyword_batch_size` | `--keyword-batch-size` | `8` | 每批提交多少个 keyword module definition，并作为失败后二分重试的初始边界。它不等同于 `port.trace_batch` 的端口数组。 |
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 module port 回溯常数 tie 的最大深度。用于 `Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0` 这类场景。`0` 表示关闭递归回溯。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 当 NPI trace 停在普通透传 net 时继续沿同方向追踪的最大深度，例如 driver 方向 `assign B = A`，loader 方向 `assign B0 = A[10:0]`、`assign B1 = A[20:11]`。这类单信号/切片连接不视为组合逻辑，`0` 表示关闭。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | 当 driver / loader 方向遇到允许展开的连续赋值表达式 endpoint 时继续展开的次数，例如 driver 方向 `assign A = {b0, b1}`，loader 方向 `assign B = {C, A, D}`。用于限制拼接表达式递归扩散，`0` 表示关闭。 |
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个目标端口 loader 递归最多访问多少个信号节点。超过后停止该端口 loader 追踪，并在 CSV/XLSX 中写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个目标端口 loader 递归最多展开多少条连接边。用于限制超宽 fanout 或跨层 alias 环导致的指数级扩散。超过后写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表最多消费多少个 handle。大 fanout net 返回过大列表时会截断并写入 `TRACE_LIMIT_REACHED:*`，避免单次 API 结果拖垮脚本。`0` 表示关闭该保护。 |
-| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | keyword 实例搜索、parameter 采集和单次 trace Verdi 进程的墙钟超时秒数。`0` 表示不启用超时；大项目建议设置成可接受的上限，例如 `7200`。超时或 leader 提前退出时都会扫描整个 session，先 TERM，并在短暂宽限后 KILL 仍未退出的 Verdi/Novas 子进程。watchdog 使用独立 sentinel，Verdi 自身的 124/137 不会误报为 `TRACE_TIMEOUT`。 |
-| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开后，NPI/source fallback 会打印更详细的递归、module port high-side、源码上下文、assign fanout 匹配和 skip 原因。用于定位 `a -> b -> c -> assign B/C -> keywords/RegCombo` 这类 trace 断点；大项目常规运行建议关闭。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | kdebug action / 兼容 wrapper 的墙钟超时秒数。`0` 表示 wrapper 不另设上限；公共请求仍带 `KDEBUG_ACTION_TIMEOUT_MS`，默认 3600000 ms。超时会终止适配器进程组。 |
+| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开后记录公共 kdebug request、warning/stderr、常量证据和协议诊断。大项目常规运行建议关闭。 |
 | `stream` | `stream` | `--stream` | `true` | 启用流式聚合反标。Python 端边读 CSV 边聚合，配合匹配缓存降低大项目运行内存压力。大项目建议打开。 |
 | `no params` | `no_params` | `--no-params` | `false` | 跳过 module parameter 采集。打开后 parameter 列通常显示 `PARAM_SKIPPED`，端口反标仍继续。若大项目 parameter 采集阶段不稳定，可先打开此项。 |
 | `strict params` | `strict_params` | `--strict-params` | `false` | parameter 采集失败时是否直接中断整个 XLSX 反标。默认关闭，失败时记录 `PARAM_TRACE_FAILED` 并继续端口反标。 |
@@ -289,15 +326,15 @@ A[7]
 | --- | --- | --- | --- | --- |
 | `output csv` | `csv_output` | `-output` | 空 | 最终过滤结果 CSV。为空时底层脚本使用默认输出名。 |
 | `output csv` 的 `Browse` | 无独立字段 | 无 | 无 | 打开保存文件窗口，选择过滤结果 CSV 路径。 |
-| `keyword batch size` | `keyword_batch_size` | `--keyword-batch-size` | `8` | 每个 Verdi 进程搜索多少个 keyword module。大项目建议调小，减少单次 Verdi 资源峰值。 |
+| `keyword batch size` | `keyword_batch_size` | `--keyword-batch-size` | `8` | keyword module definition workload 的初始分组大小，也是失败后二分重试边界。 |
 | `const trace depth` | `const_trace_depth` | `-const-trace-depth` | `16` | 多层父 port 常数 tie 回溯深度。 |
 | `assign trace depth` | `assign_trace_depth` | `-assign-trace-depth` | `2` | 普通透传/单信号切片 assign endpoint 的继续追踪深度，例如 `assign B=A`、`assign B0=A[10:0]`。 |
 | `assign expr depth` | `assign_expr_trace_depth` | `-assign-expr-trace-depth` | `1` | driver/load 方向拼接表达式 endpoint 的继续展开次数，例如 `assign A={b0,b1}`、`assign B={C,A,D}`。 |
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个端口 loader 递归节点上限，超过后结果中出现 `TRACE_LIMIT_REACHED:*`。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个端口 loader 连接展开上限，用于限制大 fanout 或环路扩散。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表消费上限，防止一个超宽 net 一次返回过多 handle。 |
-| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次底层 Verdi trace 进程超时秒数，`0` 表示不限制。 |
-| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 NPI/source fallback 详细诊断日志。常规运行关闭，定位 trace 断点时打开。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 kdebug trace 兼容流程的 wrapper 超时秒数，`0` 表示 wrapper 不另设上限。 |
+| `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开公共 kdebug request、warning/stderr、常量证据和协议诊断日志。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 | `keyword continue on error` | `keyword_continue_on_error` | `--keyword-continue-on-error` | `false` | 单个 keyword 实例搜索失败时是否继续。 |
 | `keyword log instances` | `keyword_log_instances` | `--keyword-log-instances` | `false` | 是否打印所有 keyword 实例路径。大项目建议关闭。 |
@@ -327,7 +364,7 @@ CSV 模式常见输出：
 ./npi_trace.sh ...
 ```
 
-这个模式只运行底层 NPI trace，适合定位 trace 原始行为，不做 keywords 过滤，不做 XLSX 反标。
+这个模式只运行 `kdebug_backend.py trace`，适合检查公共 kdebug 返回如何转换为兼容 CSV；不做 keywords 过滤，不做 XLSX 反标。
 
 | GUI 项 | JSON 字段 | 命令参数 | 默认值 | 详细说明 |
 | --- | --- | --- | --- | --- |
@@ -343,7 +380,7 @@ CSV 模式常见输出：
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个端口 loader 递归节点上限。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个端口 loader 连接展开上限。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表消费上限。 |
-| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 Verdi trace 进程超时秒数。 |
+| `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 kdebug trace 兼容流程的 wrapper 超时秒数。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 Raw Trace 的详细诊断日志，用于定位 module port 跨层、源码上下文和 assign fanout 是否成功。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
 
@@ -359,7 +396,7 @@ CSV 模式常见输出：
 | `Export Config` | 将当前 GUI 全部参数保存成 JSON 配置文件。 |
 | `Load Config` | 从 JSON 配置文件恢复 GUI 参数。加载时会暂停逐项刷新，全部设置完成后统一刷新命令预览。 |
 | `Run Log` | 显示底层脚本 stdout/stderr、运行状态和退出码。Raw Trace 模式下，完整 trace stdout 写入 `full trace csv`，界面日志主要显示 stderr 和状态。 |
-| `log file` | 如果公共参数里填写了 `log file`，Run Log 中看到的脚本和 Verdi/NPI 日志也会同步写入该文件，便于大项目长时间运行后离线排查。 |
+| `log file` | 如果公共参数里填写了 `log file`，Run Log 中看到的脚本、kdebug 诊断和常量证据也会同步写入该文件，便于大项目长时间运行后离线排查。 |
 
 ## GUI 结果查看器
 
@@ -401,7 +438,7 @@ CSV 模式常见输出：
 | `keep_workdir` | `keep workdir` | boolean | `false` | 兼容旧参数，当前中间文件默认保留。 |
 | `regcombo_as_keyword` | `RegCombo as keyword` | boolean | `false` | RegCombo endpoint 是否视为命中 keywords。 |
 | `match_cache_size` | `match cache size` | string/integer | `200000` | `--stream` 模式实例匹配缓存大小，`0` 关闭。 |
-| `keyword_batch_size` | `keyword batch size` | string/integer | `8` | 每个 Verdi 进程处理的 keyword module 数。 |
+| `keyword_batch_size` | `keyword batch size` | string/integer | `8` | keyword module definition workload 的分组/二分重试边界。 |
 | `keyword_continue_on_error` | `keyword continue on error` | boolean | `false` | keyword 搜索失败是否继续。 |
 | `keyword_log_instances` | `keyword log instances` | boolean | `false` | 是否打印每个 keyword 实例路径。 |
 | `const_source_fallback` | `const source fallback` | boolean | `true` | 是否启用源码 fallback 常数识别。 |
@@ -411,7 +448,7 @@ CSV 模式常见输出：
 | `load_trace_node_limit` | `load node limit` | string/integer | `20000` | 单个端口 loader 递归节点上限，`0` 表示关闭。 |
 | `load_trace_edge_limit` | `load edge limit` | string/integer | `100000` | 单个端口 loader 连接展开上限，`0` 表示关闭。 |
 | `load_trace_api_list_limit` | `load api list limit` | string/integer | `20000` | 单次 NPI loader API 返回列表消费上限，`0` 表示关闭。 |
-| `verdi_timeout_sec` | `Verdi timeout sec` | string/integer | `0` | 单次 Verdi trace 进程超时秒数，`0` 表示不启用。 |
+| `verdi_timeout_sec` | `Verdi timeout sec` | string/integer | `0` | kdebug 兼容 wrapper 超时秒数，`0` 表示不另设上限。 |
 | `trace_debug` | `trace debug` | boolean | `false` | 是否打开 trace 详细诊断日志。打开后日志会包含 `DEBUG collect_load_rec_enter`、`DEBUG source_module_port_load_probe`、`DEBUG source_assign_load_probe`、`DEBUG source_assign_load_empty` 等信息。 |
 | `csv_output` | `output csv` | string | 空 | CSV Filter 输出路径。仅 CSV 模式使用。 |
 | `raw_full_output` | `full trace csv` | string | 空 | Raw Trace 完整 CSV 输出路径。仅 Raw 模式使用。 |
@@ -560,7 +597,9 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
 
 `-log-file` 只保存日志流。`npi_trace.sh` 的完整 CSV 仍然从 stdout 输出，所以 Raw Trace 仍然要用 `>` 指定 `target_full.csv`。
 
-## 直接 Tcl 调试
+## 历史直接 Tcl 调试（非当前主流程）
+
+本节及其后的旧 NPI 递归调试细节用于阅读历史回归和定位 kdebug 内部差异，当前 CLI/GUI 不会执行这些 Tcl。迁移版本的权威行为以 [`KDEBUG_BACKEND_MIGRATION.md`](KDEBUG_BACKEND_MIGRATION.md) 和 `test_kdebug_backend.py` 为准。不要用本节命令验证当前工具是否经过公共 kdebug API。
 
 端口 trace：
 

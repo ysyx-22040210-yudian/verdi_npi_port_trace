@@ -1,5 +1,5 @@
 #!/bin/bash
-# trace_and_filter.sh - Run NPI trace and filter rows by driver/load owner module
+# trace_and_filter.sh - Run kdebug trace and filter rows by driver/load owner module
 #
 # Usage:
 #   ./trace_and_filter.sh -module <target_module> -lib <kdb.elab++> \
@@ -20,7 +20,6 @@
 #                         -output id_filtered.csv
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-FIND_INST_TCL="$SCRIPT_DIR/npi_find_instances.tcl"
 
 log_step() {
     echo "[trace_and_filter] $*" >&2
@@ -62,6 +61,7 @@ VERDI_TIMEOUT_SEC="${NPI_VERDI_TIMEOUT_SEC:-0}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
 LOG_FILE=""
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+KDEBUG_BIN="${KDEBUG_BIN:-}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -84,6 +84,7 @@ while [ $# -gt 0 ]; do
         -load-trace-edge-limit|--load-trace-edge-limit) LOAD_TRACE_EDGE_LIMIT="$2"; shift 2 ;;
         -load-trace-api-list-limit|--load-trace-api-list-limit) LOAD_TRACE_API_LIST_LIMIT="$2"; shift 2 ;;
         -verdi-timeout-sec|--verdi-timeout-sec) VERDI_TIMEOUT_SEC="$2"; shift 2 ;;
+        -kdebug-bin|--kdebug-bin) KDEBUG_BIN="$2"; shift 2 ;;
         -trace-debug|--trace-debug) TRACE_DEBUG="$2"; shift 2 ;;
         -log-file|--log-file) LOG_FILE="$2"; shift 2 ;;
         *) echo "[WARN] unknown arg: $1" >&2; shift ;;
@@ -194,6 +195,7 @@ log_step "load_trace_api_list_limit=$LOAD_TRACE_API_LIST_LIMIT"
 log_step "verdi_timeout_sec=$VERDI_TIMEOUT_SEC"
 log_step "trace_debug=$TRACE_DEBUG"
 log_step "python_bin=$PYTHON_BIN"
+log_step "kdebug_bin=${KDEBUG_BIN:-<auto>}"
 log_step "boundary_filtered=$BOUNDARY_FILTERED"
 log_step "full_owner_filtered=$FULL_FILTERED"
 log_step "final_output=$OUTPUT"
@@ -209,6 +211,9 @@ if [ "$KEYWORD_CONTINUE_ON_ERROR" -eq 1 ]; then
 fi
 if [ "$KEYWORD_LOG_INSTANCES" -eq 1 ]; then
     FIND_CMD+=(--log-instances)
+fi
+if [ -n "$KDEBUG_BIN" ]; then
+    FIND_CMD+=(--kdebug-bin "$KDEBUG_BIN")
 fi
 
 log_step "command: ${FIND_CMD[*]}"
@@ -243,9 +248,12 @@ TRACE_CMD=("$SCRIPT_DIR/npi_trace.sh"
 if [ -n "$PORTS" ]; then
     TRACE_CMD+=(-ports "$PORTS")
 fi
+if [ -n "$KDEBUG_BIN" ]; then
+    TRACE_CMD+=(--kdebug-bin "$KDEBUG_BIN")
+fi
 
 # Run trace
-log_step "step 2/5: run NPI trace for target module"
+log_step "step 2/5: run kdebug trace for target module"
 log_step "command: ${TRACE_CMD[*]} > $FULL_TRACE"
 "${TRACE_CMD[@]}" > "$FULL_TRACE"
 

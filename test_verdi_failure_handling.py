@@ -25,7 +25,9 @@ def load_find_instances_module():
     return module
 
 
-@unittest.skipUnless(os.name == "posix", "fake Verdi process tests require POSIX signals")
+@unittest.skip(
+    "legacy direct-Verdi fault injection is obsolete; kdebug process/protocol coverage lives in test_kdebug_backend.py"
+)
 class VerdiFailureHandlingTest(unittest.TestCase):
     def make_fake_verdi(self, root: Path, body: str) -> Path:
         bindir = root / "bin"
@@ -275,7 +277,7 @@ class VerdiFailureHandlingTest(unittest.TestCase):
                 ["timeout", "--kill-after=8s", "1s", *inner_command],
                 cwd=root,
                 env=self.base_env(bindir),
-                text=True,
+                universal_newlines=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=12,
@@ -459,6 +461,161 @@ class VerdiFailureHandlingTest(unittest.TestCase):
 
             child_pid = int((root / "child.pid").read_text(encoding="utf-8").strip())
             self.assert_pid_disappears(child_pid)
+
+
+@unittest.skipUnless(os.name == "posix", "kdebug shell timeout coverage requires POSIX")
+class KDebugShellFailureHandlingTest(unittest.TestCase):
+    def make_hanging_kdebug(self, root: Path) -> Path:
+        executable = root / "fake_kdebug.py"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, time\n"
+            "leftover = os.path.join(os.environ['TMPDIR'], 'kdebug-tcl-npi-leftover')\n"
+            "os.mkdir(leftover)\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.setsid()\n"
+            "    orphan = os.fork()\n"
+            "    if orphan > 0: os._exit(0)\n"
+            "    with open(os.environ['FAKE_CHILD_PIDFILE'], 'w') as handle: handle.write(str(os.getpid()))\n"
+            "    while True: time.sleep(1)\n"
+            "os.waitpid(pid, 0)\n"
+            "while True: time.sleep(1)\n",
+            encoding="utf-8",
+        )
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        return executable
+
+    def assert_pid_disappears(self, pid: int, timeout: float = 3) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            stat_path = Path("/proc") / str(pid) / "stat"
+            if stat_path.exists() and ") Z " in stat_path.read_text(errors="replace"):
+                return
+            time.sleep(0.05)
+        self.fail("fake kdebug child {} survived timeout cleanup".format(pid))
+
+    def test_timeout_removes_private_kdebug_tmpdir_and_process_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            kdb = root / "simv.daidir" / "kdb.elab++"
+            kdb.mkdir(parents=True)
+            (kdb / "marker").write_text("kdb", encoding="utf-8")
+            tmp_root = root / "tmp"
+            tmp_root.mkdir()
+            module_output = root / "module.csv"
+            child_pidfile = root / "child.pid"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "KDEBUG_BIN": str(self.make_hanging_kdebug(root)),
+                    "PYTHON_BIN": sys.executable,
+                    "TMPDIR": str(tmp_root),
+                    "FAKE_CHILD_PIDFILE": str(child_pidfile),
+                    "KDEBUG_CLIENT_CLEANUP_GRACE_SEC": "0.1",
+                    "NPI_KDEBUG_TIMEOUT_CLEANUP_GRACE_SEC": "2",
+                }
+            )
+            proc = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPT_DIR / "npi_trace.sh"),
+                    "-module",
+                    "FakeModule",
+                    "-lib",
+                    str(kdb),
+                    "-module-out",
+                    str(module_output),
+                    "-verdi-timeout-sec",
+                    "1",
+                ],
+                cwd=root,
+                env=env,
+                universal_newlines=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=12,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 124, proc.stderr)
+            self.assertEqual(proc.stdout, "")
+            self.assertFalse(module_output.exists())
+            self.assertEqual(list(root.glob("npi_trace_out.*.csv")), [])
+            self.assertEqual(list(tmp_root.iterdir()), [])
+            self.assertTrue(child_pidfile.exists(), proc.stderr)
+            self.assert_pid_disappears(int(child_pidfile.read_text().strip()))
+
+    def test_external_term_cleans_double_forked_session_by_run_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            kdb = root / "simv.daidir" / "kdb.elab++"
+            kdb.mkdir(parents=True)
+            (kdb / "marker").write_text("kdb", encoding="utf-8")
+            tmp_root = root / "tmp"
+            tmp_root.mkdir()
+            module_output = root / "module.csv"
+            child_pidfile = root / "child.pid"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "KDEBUG_BIN": str(self.make_hanging_kdebug(root)),
+                    "PYTHON_BIN": sys.executable,
+                    "TMPDIR": str(tmp_root),
+                    "FAKE_CHILD_PIDFILE": str(child_pidfile),
+                    "KDEBUG_CLIENT_CLEANUP_GRACE_SEC": "0.1",
+                    "NPI_KDEBUG_TIMEOUT_CLEANUP_GRACE_SEC": "1",
+                }
+            )
+            control_env = os.environ.copy()
+            control_env["NPI_KDEBUG_RUN_TOKEN"] = "unrelated-control-token"
+            control = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                env=control_env,
+                start_new_session=True,
+            )
+            proc = subprocess.Popen(
+                [
+                    "bash",
+                    str(SCRIPT_DIR / "npi_trace.sh"),
+                    "-module",
+                    "FakeModule",
+                    "-lib",
+                    str(kdb),
+                    "-module-out",
+                    str(module_output),
+                ],
+                cwd=root,
+                env=env,
+                universal_newlines=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not child_pidfile.exists():
+                    time.sleep(0.05)
+                self.assertTrue(child_pidfile.exists(), "double-fork child did not start")
+                proc.terminate()
+                stdout, stderr = proc.communicate(timeout=10)
+                self.assertEqual(proc.returncode, 143, stderr)
+                self.assertEqual(stdout, "")
+                self.assertIsNone(control.poll(), "cleanup killed a different run token")
+                self.assertFalse(module_output.exists())
+                self.assertEqual(list(root.glob("npi_trace_out.*.csv")), [])
+                self.assertEqual(list(tmp_root.iterdir()), [])
+                self.assert_pid_disappears(int(child_pidfile.read_text().strip()))
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                if control.poll() is None:
+                    control.terminate()
+                    control.wait(timeout=3)
 
 
 class ErrorLogCleanupTest(unittest.TestCase):

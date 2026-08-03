@@ -518,9 +518,11 @@ class ArtifactIsolationTest(unittest.TestCase):
                 verdi_timeout_sec=7,
             )
 
-            def fail_with_partial(*_args, **kwargs):
+            def fail_with_partial(cmd, **kwargs):
                 self.assertFalse(output.exists())
-                self.assertEqual(kwargs["timeout_sec"], 7)
+                self.assertEqual(kwargs["timeout_sec"], 10)
+                timeout_index = cmd.index("--timeout-sec")
+                self.assertEqual(cmd[timeout_index + 1], "7")
                 output.write_text(
                     "module,inst_full_name,param_name,param_value,param_kind,param_info\n"
                     "Stale,top.old,P,1,parameter,partial\n",
@@ -528,7 +530,9 @@ class ArtifactIsolationTest(unittest.TestCase):
                 )
                 raise subprocess.CalledProcessError(1, ["verdi"])
 
-            with patch("annotate_trace_xlsx.run_checked", side_effect=fail_with_partial):
+            with patch.dict(
+                os.environ, {"KDEBUG_COMMAND_CLEANUP_GRACE_SEC": "3"}
+            ), patch("annotate_trace_xlsx.run_checked", side_effect=fail_with_partial):
                 rows, path, error = find_module_parameters(args, ["Target"], root)
 
             self.assertEqual(rows, [])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find filter-module instances with resource-bounded Verdi batches."""
+"""Find filter-module instances through resource-bounded kdebug batches."""
 
 from __future__ import annotations
 
@@ -23,6 +23,19 @@ VERDI_KILL_AFTER_SEC = 5
 
 def log_step(message: str) -> None:
     print(f"[find_instances_batched] {message}", file=sys.stderr)
+
+
+def timeout_with_cleanup_grace(timeout_sec: Optional[float]) -> Optional[float]:
+    if timeout_sec is None or timeout_sec <= 0:
+        return None
+    try:
+        grace = max(
+            0.0, float(os.environ.get("KDEBUG_COMMAND_CLEANUP_GRACE_SEC", "15"))
+        )
+    except ValueError:
+        grace = 15.0
+        log_step("invalid KDEBUG_COMMAND_CLEANUP_GRACE_SEC; using 15s")
+    return timeout_sec + grace
 
 
 def split_csv_arg(text: str) -> List[str]:
@@ -244,16 +257,26 @@ def cleanup_completed_process_session(proc: subprocess.Popen) -> None:
     terminate_posix_process_session(proc, "post-exit")
 
 
-def run_verdi_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -> List[str]:
-    env = os.environ.copy()
+def run_kdebug_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -> List[str]:
     modules_text = ",".join(modules)
-    env["NPI_LIB"] = str(args.lib)
-    env["NPI_FILTER_MODULE"] = modules_text
-    env["NPI_FILTER_MODULES"] = modules_text
-    env["NPI_INSTANCE_OUTFILE"] = str(outfile)
-    env["NPI_FIND_LOG_INSTANCES"] = "1" if args.log_instances else "0"
-
-    cmd = ["verdi", "-batch", "-nologo", "-play", str(SCRIPT_DIR / "npi_find_instances.tcl")]
+    cmd = [
+        sys.executable,
+        str(SCRIPT_DIR / "kdebug_backend.py"),
+        "find-instances",
+        "--lib",
+        str(args.lib),
+        "--definitions",
+        modules_text,
+        "--output",
+        str(outfile),
+    ]
+    kdebug_bin = getattr(args, "kdebug_bin", "")
+    if kdebug_bin:
+        cmd.extend(["--kdebug-bin", kdebug_bin])
+    if args.log_instances:
+        cmd.append("--debug")
+    if args.verdi_timeout_sec > 0:
+        cmd.extend(["--timeout-sec", str(args.verdi_timeout_sec)])
     log_step(
         "batch={} module_count={} modules={} outfile={}".format(
             batch_id,
@@ -269,14 +292,14 @@ def run_verdi_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -
     proc = subprocess.Popen(
         cmd,
         cwd=str(RUN_CWD),
-        env=env,
         stdout=sys.stderr,
         stderr=sys.stderr,
         start_new_session=(os.name == "posix" and args.verdi_timeout_sec > 0),
     )
     try:
-        if args.verdi_timeout_sec > 0:
-            rc = proc.wait(timeout=args.verdi_timeout_sec)
+        command_timeout = timeout_with_cleanup_grace(args.verdi_timeout_sec)
+        if command_timeout is not None:
+            rc = proc.wait(timeout=command_timeout)
         else:
             rc = proc.wait()
     except subprocess.TimeoutExpired as exc:
@@ -305,7 +328,7 @@ def run_batch_with_retry(args, modules: Sequence[str], batch_id: str) -> Tuple[L
         f"{args.output.stem}__batch_{safe_name(batch_id)}{args.output.suffix}"
     )
     try:
-        instances = run_verdi_find(args, modules, batch_id, batch_file)
+        instances = run_kdebug_find(args, modules, batch_id, batch_file)
         return instances, []
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         if isinstance(exc, subprocess.TimeoutExpired):
@@ -337,7 +360,7 @@ def run_batch_with_retry(args, modules: Sequence[str], batch_id: str) -> Tuple[L
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Find instances for many -keywords modules using smaller Verdi batches."
+        description="Find instances for many -keywords modules through public kdebug JSON actions."
     )
     parser.add_argument("-lib", required=True, help="KDB path, for example kdb.elab++")
     parser.add_argument("-keywords", required=True, help="comma-separated filter module names")
@@ -368,6 +391,11 @@ def parse_args():
         type=int,
         default=0,
         help="wall-clock limit for each Verdi process; 0 disables the timeout",
+    )
+    parser.add_argument(
+        "--kdebug-bin",
+        default=os.environ.get("KDEBUG_BIN", ""),
+        help="kdebug executable; defaults to KDEBUG_BIN/KVERIF_HOME/PATH discovery",
     )
     args = parser.parse_args()
 
@@ -403,6 +431,7 @@ def main() -> int:
     log_step(f"continue_on_error={args.continue_on_error}")
     log_step(f"log_instances={args.log_instances}")
     log_step(f"verdi_timeout_sec={args.verdi_timeout_sec}")
+    log_step(f"kdebug_bin={args.kdebug_bin or '<auto>'}")
     log_step(f"output={args.output}")
     output_mode = existing_file_mode(args.output)
     error_output = args.output.with_name(f"{args.output.stem}_errors.log")

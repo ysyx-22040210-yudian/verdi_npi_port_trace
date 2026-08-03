@@ -43,6 +43,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from find_instances_batched import (
     cleanup_completed_process_session,
     terminate_timed_out_process,
+    timeout_with_cleanup_grace,
 )
 
 try:
@@ -1113,6 +1114,9 @@ def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
         cmd.append("--continue-on-error")
     if args.keyword_log_instances:
         cmd.append("--log-instances")
+    kdebug_bin = getattr(args, "kdebug_bin", "")
+    if kdebug_bin:
+        cmd.extend(["--kdebug-bin", kdebug_bin])
 
     try:
         run_checked(cmd, cwd=RUN_CWD)
@@ -1163,21 +1167,33 @@ def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple
         log_step("skip module parameter collection because --no-params is set")
         return [], out_file, "PARAM_SKIPPED"
 
-    env = os.environ.copy()
-    env["NPI_LIB"] = args.lib
-    env["NPI_PARAM_MODULES"] = ",".join(modules)
-    env["NPI_PARAM_OUTFILE"] = str(out_file)
-
     try:
+        cmd: List[object] = [
+            sys.executable,
+            SCRIPT_DIR / "kdebug_backend.py",
+            "find-parameters",
+            "--lib",
+            args.lib,
+            "--modules",
+            ",".join(modules),
+            "--output",
+            out_file,
+        ]
+        kdebug_bin = getattr(args, "kdebug_bin", "")
+        if kdebug_bin:
+            cmd.extend(["--kdebug-bin", kdebug_bin])
+        if getattr(args, "trace_debug", 0):
+            cmd.append("--debug")
+        if args.verdi_timeout_sec > 0:
+            cmd.extend(["--timeout-sec", str(args.verdi_timeout_sec)])
         run_checked(
-            ["verdi", "-batch", "-nologo", "-play", SCRIPT_DIR / "npi_find_module_params.tcl"],
+            cmd,
             cwd=RUN_CWD,
-            env=env,
-            timeout_sec=args.verdi_timeout_sec,
+            timeout_sec=timeout_with_cleanup_grace(args.verdi_timeout_sec),
         )
         if not path_has_contents(out_file):
             raise RuntimeError(
-                f"parameter Verdi completed without a non-empty output: {out_file}"
+                f"parameter kdebug backend completed without a non-empty output: {out_file}"
             )
         rows = read_param_rows(out_file)
     except Exception as exc:
@@ -1238,7 +1254,7 @@ def signal_belongs_to_instance(signal_name: str, instances: Iterable[str]) -> bo
         if is_direct_instance_node(strip_instance_prefix(signal_name, inst)):
             return True
 
-        # npi_port_trace.tcl may remove a common top prefix for readability.
+        # The trace backend may remove a common top prefix for readability.
         parts = inst.split(".")
         for idx in range(1, len(parts)):
             suffix = ".".join(parts[idx:])
@@ -1322,6 +1338,9 @@ def trace_module(
     )
     if stop_instance_file is not None:
         cmd.extend(["-load-stop-instance-file", str(stop_instance_file)])
+    kdebug_bin = getattr(args, "kdebug_bin", "")
+    if kdebug_bin:
+        cmd.extend(["--kdebug-bin", kdebug_bin])
 
     try:
         run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv)
@@ -1465,6 +1484,11 @@ def parse_args():
         help="comma-separated target ports; defaults to the template port columns",
     )
     parser.add_argument("-lib", required=True, help="KDB path, for example kdb.elab++")
+    parser.add_argument(
+        "--kdebug-bin",
+        default=os.environ.get("KDEBUG_BIN", ""),
+        help="kdebug executable; defaults to KDEBUG_BIN/KVERIF_HOME/PATH discovery",
+    )
     parser.add_argument(
         "-filelist",
         default="",
@@ -1731,6 +1755,7 @@ def main() -> None:
     log_step(f"template={template}")
     log_step(f"output={output}")
     log_step(f"lib={args.lib}")
+    log_step(f"kdebug_bin={args.kdebug_bin or '<auto>'}")
     log_step(f"workdir={workdir}")
     log_step(f"const_source_fallback={args.const_source_fallback}")
     log_step(f"const_trace_depth={args.const_trace_depth}")

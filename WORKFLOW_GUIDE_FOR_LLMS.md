@@ -1,5 +1,7 @@
 # Verdi NPI Port Trace 工作流学习文档
 
+> 后端迁移提示：本文主体记录旧版直接 Verdi/NPI Tcl 工作流，不能作为当前执行路径的权威说明。当前工具通过 `kdebug_backend.py` 调用公共 kdebug JSON API；请先阅读 [`KDEBUG_BACKEND_MIGRATION.md`](KDEBUG_BACKEND_MIGRATION.md)，旧 Tcl 内容仅用于历史行为对照。
+
 本文面向接手本项目的工程师或大模型。目标是让读者不依赖历史对话，也能理解这个工具为什么存在、如何运行、每个脚本的职责边界，以及在大项目中应该如何稳定使用和继续开发。
 
 ![Verdi NPI Port Trace 工作流程图](workflow_diagram.svg)
@@ -503,4 +505,3 @@ NPI 负责追踪
 Python 负责聚合和反标
 GUI 负责收参和展示
 ```
-

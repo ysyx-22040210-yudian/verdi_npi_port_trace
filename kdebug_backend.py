@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -140,12 +141,12 @@ def tool_prefix(path: str) -> List[str]:
     return [bash, path]
 
 
-def normalize_daidir(lib: Path) -> Path:
+def normalize_design_input(lib: Path) -> Path:
     path = lib.expanduser().resolve()
     if not path.exists():
         raise KDebugError("KDB path does not exist: {}".format(path), "KDB_NOT_FOUND")
-    if path.name == "kdb.elab++":
-        path = path.parent
+    if path.name.endswith(".elab++"):
+        pass
     elif path.name.endswith(".daidir"):
         pass
     else:
@@ -155,11 +156,14 @@ def normalize_daidir(lib: Path) -> Path:
                 break
         else:
             raise KDebugError(
-                "kdebug expects a simv.daidir directory; cannot normalize {}".format(lib),
+                "kdebug expects a simv.daidir or *.elab++ directory; cannot normalize {}".format(lib),
                 "INVALID_KDB_PATH",
             )
     if not path.is_dir():
-        raise KDebugError("kdebug daidir is not a directory: {}".format(path))
+        raise KDebugError(
+            "kdebug design input is not a directory: {}".format(path),
+            "INVALID_KDB_PATH",
+        )
     return path
 
 
@@ -206,9 +210,9 @@ def is_timeout_code(code: Any) -> bool:
 
 
 class KDebugClient:
-    def __init__(self, binary: str, daidir: Path, timeout_sec: int = 0, debug: bool = False):
+    def __init__(self, binary: str, design_input: Path, timeout_sec: int = 0, debug: bool = False):
         self.binary = binary
-        self.daidir = daidir
+        self.design_input = design_input
         self.timeout_sec = timeout_sec
         self.debug = debug
 
@@ -222,7 +226,7 @@ class KDebugClient:
         request: Dict[str, Any] = {
             "api_version": API_VERSION,
             "action": action,
-            "target": {"daidir": str(self.daidir)},
+            "target": {"daidir": str(self.design_input)},
             "args": args or {},
         }
         effective_limits = dict(limits or {})
@@ -513,6 +517,7 @@ def atomic_write_csv_pair(
         raise
     backups: Dict[Path, Optional[Path]] = {}
     committed: List[Path] = []
+    preserved_backups = set()
     try:
         for path in paths:
             if not path.exists():
@@ -547,7 +552,11 @@ def atomic_write_csv_pair(
                     os.replace(str(backup_path), str(path))
                     backups[path] = None
             except BaseException as rollback_error:
-                rollback_errors.append("{}: {}".format(path, rollback_error))
+                recovery = ""
+                if backup_path is not None and backup_path.exists():
+                    preserved_backups.add(backup_path)
+                    recovery = " (recovery copy preserved at {})".format(backup_path)
+                rollback_errors.append("{}: {}{}".format(path, rollback_error, recovery))
         if rollback_errors:
             raise KDebugError(
                 "CSV publish failed and rollback was incomplete: {}".format(
@@ -563,7 +572,7 @@ def atomic_write_csv_pair(
             except FileNotFoundError:
                 pass
         for backup_path in backups.values():
-            if backup_path is None:
+            if backup_path is None or backup_path in preserved_backups:
                 continue
             try:
                 backup_path.unlink()
@@ -624,6 +633,27 @@ def normalize_port_trace_rows(items: Any, surface: str) -> List[List[str]]:
             )
         rows.append([instance, port, direction, role, endpoint])
     return rows
+
+
+def port_trace_constant_semantics(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.startswith("Const:"):
+        text = text[len("Const:"):]
+    text = text.replace("_", "").lower()
+    if text in ("0", "'0"):
+        return "bit:0"
+    if text in ("1", "'1"):
+        return "bit:1"
+    match = re.match(r"^(?:[0-9]+)?'s?([bodh])([0-9a-f]+)$", text)
+    if match:
+        try:
+            base = {"b": 2, "o": 8, "d": 10, "h": 16}[match.group(1)]
+            number = int(match.group(2), base)
+            if number in (0, 1):
+                return "bit:{}".format(number)
+        except (KeyError, ValueError):
+            pass
+    return "literal:" + text
 
 
 def validate_port_trace_constants(
@@ -697,13 +727,16 @@ def validate_port_trace_constants(
             evidence_by_key.setdefault(key, []).append(item)
 
     final_constants = set()
+    constants_across_surfaces: Dict[Tuple[str, str, str], set] = {}
     for surface, rows in (("full", full_rows), ("boundary", boundary_rows)):
         groups: Dict[Tuple[str, str, str], Dict[str, set]] = {}
         for instance, port, _direction, role, endpoint in rows:
             key = (instance, port, role)
             group = groups.setdefault(key, {"constants": set(), "signals": set()})
             if endpoint.startswith("Const:"):
-                group["constants"].add(endpoint)
+                semantics = port_trace_constant_semantics(endpoint)
+                group["constants"].add(semantics)
+                constants_across_surfaces.setdefault(key, set()).add(semantics)
                 final_constants.add(("{}.{}".format(instance, port), role, endpoint))
             elif not endpoint.startswith(("NO_", "TRACE_LIMIT_REACHED:", "TRACE_STOP:")):
                 group["signals"].add(endpoint)
@@ -715,6 +748,14 @@ def validate_port_trace_constants(
                     ),
                     "KDEBUG_AMBIGUOUS_CONSTANT",
                 )
+
+    for (instance, port, role), constants in constants_across_surfaces.items():
+        if len(constants) > 1:
+            raise KDebugError(
+                "port.trace_batch published conflicting constants across full and boundary "
+                "surfaces for {}.{} {}".format(instance, port, role),
+                "KDEBUG_AMBIGUOUS_CONSTANT",
+            )
 
     for port_path, role, value in sorted(final_constants):
         if role != "driver":
@@ -803,9 +844,9 @@ def validate_port_trace_errors(errors: Any) -> List[Dict[str, Any]]:
 
 
 def run_trace(args: argparse.Namespace) -> int:
-    daidir = normalize_daidir(Path(args.lib))
+    design_input = normalize_design_input(Path(args.lib))
     binary = resolve_kdebug(args.kdebug_bin)
-    client = KDebugClient(binary, daidir, args.timeout_sec, bool(args.trace_debug))
+    client = KDebugClient(binary, design_input, args.timeout_sec, bool(args.trace_debug))
     requested_ports = unique_csv_arg(args.ports)
     action_args: Dict[str, Any] = {
         "module": args.module,
@@ -913,8 +954,8 @@ def run_trace(args: argparse.Namespace) -> int:
 
 
 def run_find_instances(args: argparse.Namespace) -> int:
-    daidir = normalize_daidir(Path(args.lib))
-    client = KDebugClient(resolve_kdebug(args.kdebug_bin), daidir, args.timeout_sec, args.debug)
+    design_input = normalize_design_input(Path(args.lib))
+    client = KDebugClient(resolve_kdebug(args.kdebug_bin), design_input, args.timeout_sec, args.debug)
     definitions = split_csv_arg(args.definitions)
     found = find_instances(client, definitions)
     merged = sorted({instance for instances in found.values() for instance in instances})
@@ -953,8 +994,8 @@ def parameter_value(item: Dict[str, Any]) -> str:
 
 
 def run_find_parameters(args: argparse.Namespace) -> int:
-    daidir = normalize_daidir(Path(args.lib))
-    client = KDebugClient(resolve_kdebug(args.kdebug_bin), daidir, args.timeout_sec, args.debug)
+    design_input = normalize_design_input(Path(args.lib))
+    client = KDebugClient(resolve_kdebug(args.kdebug_bin), design_input, args.timeout_sec, args.debug)
     definitions = split_csv_arg(args.modules)
     instances_by_module = find_instances(client, definitions)
     owner_by_instance = {

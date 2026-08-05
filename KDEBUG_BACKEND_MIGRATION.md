@@ -36,7 +36,7 @@ export KDEBUG_BIN=/home/host/kverif/tools/kdebug
 
 显式配置的路径不可执行时返回 `KDEBUG_NOT_FOUND`，不会继续搜索并意外使用另一个版本。
 
-## 3. KDB 路径规范化
+## 3. 设计库路径透传
 
 历史接口继续接受：
 
@@ -44,13 +44,13 @@ export KDEBUG_BIN=/home/host/kverif/tools/kdebug
 /path/to/simv.daidir/kdb.elab++
 ```
 
-公共 kdebug 的 `target.daidir` 必须是：
+公共 kdebug 的兼容字段 `target.daidir` 直接接收：
 
 ```text
-/path/to/simv.daidir
+/path/to/simv.daidir/kdb.elab++
 ```
 
-适配器会把 `kdb.elab++` 归一到父目录，也接受直接传入 `simv.daidir`，或从其内部路径向上查找最近的 `.daidir`。路径不存在返回 `KDB_NOT_FOUND`；无法归一到 `.daidir` 返回 `INVALID_KDB_PATH`。本工具仍不接受 filelist 代替 elaborated KDB。
+适配器保留 `kdb.elab++` 的完整路径，使 kdebug 能以 `debImport -elab` 原生导入；直接传入 `simv.daidir` 时仍使用 `-dbdir`。为兼容旧调用，其他 `.daidir` 内部路径仍向上查找最近的 `.daidir`。路径不存在返回 `KDB_NOT_FOUND`；无法识别为 `.daidir` 或 `.elab++` 目录时返回 `INVALID_KDB_PATH`。本工具仍不接受 filelist 代替 elaborated KDB，也不会在 elab++ 失败后自动回退父目录。
 
 ## 4. 批处理策略
 
@@ -177,7 +177,7 @@ module,inst_full_name,param_name,param_value,param_kind,param_info
 迁移版本至少应验证：
 
 1. `KDEBUG_BIN` 指向预期版本，`--json actions` 包含所需 action。
-2. `kdb.elab++` 和 `simv.daidir` 两种 `-lib` 写法归一到相同 target。
+2. `kdb.elab++` 原样进入 `target.daidir` 并走 `debImport -elab`；`simv.daidir` 走 `-dbdir`，两者查询结果等价。
 3. `port.trace_batch` 一次返回 full/boundary surface；缺失端口记录 `PORT_NOT_FOUND` 且不生成伪 `NO_DRIVER`。
 4. 精确 bit 常量不会同时发布 `1'b0` 和 `1'b1`，日志包含 `evidence_source` 和 `const_full_path`。
 5. kdebug 非零退出、非法 JSON、`ok=false`、truncated 和 timeout 均不发布半截 CSV。

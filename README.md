@@ -15,7 +15,7 @@ CLI / GUI -> shell compatibility wrapper -> kdebug_backend.py
 simv.daidir/kdb.elab++
 ```
 
-适配器会把它规范化为公共 kdebug 要求的 `simv.daidir`。也可以直接把 `simv.daidir` 传给 `-lib`。完整迁移契约和兼容边界见 [`KDEBUG_BACKEND_MIGRATION.md`](KDEBUG_BACKEND_MIGRATION.md)。
+适配器会把 `kdb.elab++` 原路径传给公共 kdebug，由 kdebug 通过 `debImport -elab` 原生导入；也可以直接把 `simv.daidir` 传给 `-lib`，继续使用 `-dbdir`。完整迁移契约和兼容边界见 [`KDEBUG_BACKEND_MIGRATION.md`](KDEBUG_BACKEND_MIGRATION.md)。
 
 当前不支持 filelist 直接导入。`-filelist`、`-top`、`-incdir` 只作为历史兼容参数名保留，迁移到其他项目时应先用 VCS 带 `-kdb` 生成 KDB。
 
@@ -48,7 +48,7 @@ simv.daidir/kdb.elab++
 | `annotate_trace_xlsx.py` | XLSX 反标主实现，依赖 Python 3.8+ 和 `openpyxl`。 |
 | `trace_and_filter.sh` | CSV trace + keywords 过滤入口。 |
 | `npi_trace.sh` | 历史名称保留的兼容入口；当前转调 `kdebug_backend.py trace`。 |
-| `kdebug_backend.py` | 公共 kdebug JSON API 适配器，负责 KDB 路径规范化、协议校验、batch trace、常量证据和兼容 CSV 发布。 |
+| `kdebug_backend.py` | 公共 kdebug JSON API 适配器，负责设计库路径校验和透传、协议校验、batch trace、常量证据和兼容 CSV 发布。 |
 | `find_instances_batched.py` | 按 workload 分批调用公共 `module.find_instances`，失败时可二分重试，降低大项目故障影响范围。 |
 | `npi_port_trace.tcl` / `npi_find_instances.tcl` / `npi_find_module_params.tcl` | 旧直接 NPI 后端的历史参考文件；当前主流程不执行这些 Tcl。 |
 | `filter_trace.py` | CSV 过滤、合并、按实例拆分。 |
@@ -80,7 +80,7 @@ simv.daidir/kdb.elab++
 | Linux / VM shell | 主流程脚本是 `bash`。 |
 | 公共 `kdebug` CLI | 必须支持 `--json` 请求，并能访问设计 actions；通过 `--kdebug-bin`、`KDEBUG_BIN`、`KVERIF_HOME` 或 `PATH` 定位。 |
 | Verdi | kdebug 的设计后端仍需要可用 Verdi/NPI 环境，但本工具不再直接启动 Verdi。 |
-| VCS/Verdi KDB | 必须提供有效 `simv.daidir`；兼容入口也接受其下的 `kdb.elab++`。 |
+| VCS/Verdi KDB | 必须提供有效 `simv.daidir` 或 `kdb.elab++` 目录；两种路径均由 kdebug 原生打开。 |
 | Python 3.8+ | XLSX / GUI 流程按 Python 3.8+ 维护。 |
 | `openpyxl` | XLSX 反标和 GUI 查看 XLSX 需要。 |
 
@@ -175,7 +175,7 @@ export KDEBUG_BIN=/home/host/kverif/tools/kdebug
 
 也可对命令单独传 `--kdebug-bin /path/to/kdebug`。自动发现顺序是：显式参数、`KDEBUG_BIN`、`$KVERIF_HOME/tools/kdebug`、本仓库 `tools/kdebug`、`PATH` 中的 `kdebug`。配置了显式路径但文件不存在或不可执行时会直接失败，不会静默换用其他版本。
 
-`-lib` 兼容原有 `kdb.elab++` 写法，但发给 kdebug 的 `target.daidir` 始终是其父目录 `simv.daidir`。无法归一到 `.daidir` 的路径会以 `INVALID_KDB_PATH` 失败。
+`-lib` 兼容原有 `kdb.elab++` 写法，并把该完整路径原样写入 kdebug 的 `target.daidir`；不会再静默改写为父目录。直接传 `simv.daidir` 仍保持兼容。路径不存在返回 `KDB_NOT_FOUND`，既不是 `.daidir` 也不是 `.elab++` 目录的输入返回 `INVALID_KDB_PATH`。
 
 `npi_trace.sh` 会把既有的 `-const-trace-depth`、`-assign-trace-depth`、`-assign-expr-trace-depth`、三个 loader limit、`-load-stop-instance-file`、`-srcfile` 和 `-const-source-fallback` 逐项传给 `port.trace_batch`。输出行预算可用 `-trace-max-rows N` 或环境变量 `NPI_TRACE_MAX_ROWS` 设置，默认 `20000`；`0` 沿用旧语义，表示不启用该行数保护。
 
@@ -241,7 +241,7 @@ GUI 界面文字为英文。顶部是麒麟芯片品牌区，中间是参数区�
 
 | GUI 项 | JSON 字段 | 命令参数 | 是否必填 | 详细说明 |
 | --- | --- | --- | --- | --- |
-| `KDB/elab++` | `lib` | `-lib` | 必填 | VCS/Verdi 生成的 KDB，可填 `simv.daidir/kdb.elab++` 或 `simv.daidir`。适配器统一归一为公共 kdebug 的 `target.daidir`。工具必须读取 KDB，不能只给 filelist。 |
+| `KDB/elab++` | `lib` | `-lib` | 必填 | VCS/Verdi 生成的 KDB，可填 `simv.daidir/kdb.elab++` 或 `simv.daidir`。适配器把所选目录写入公共 kdebug 的 `target.daidir`；前者走原生 `debImport -elab`，后者走 `-dbdir`。工具必须读取 KDB，不能只给 filelist。 |
 | `KDB/elab++` 的 `Browse` | 无独立字段 | 无 | 可选 | 打开目录选择窗口，用于选择 `kdb.elab++` 目录。选择后写入 `lib`。 |
 | `module` | `module` | `-module` | CSV / Raw 必填；XLSX 建议填写 | 目标 module 定义名列表。工具会对这些 module 的所有例化实例做端口 trace。可以填写多个 module，用逗号、空格、分号或换行分隔。XLSX 模式如果不填，会尝试从模板第一列读取 module 名。 |
 | `module` 的 `Load List` | 写入 `module` | 无 | 可选 | 从 `.txt`、`.list`、`.f` 等文本文件读取 module 列表。支持注释和多种分隔符。 |
@@ -853,13 +853,13 @@ Child.a <- Parent0.p0 <- Parent1.p1 <- 1'b0
 常数命中时，CSV/XLSX 仍保持稳定格式 `Const:<value>`；详细来源写在运行日志里，不改变过滤规则。日志关键字为：
 
 ```text
-const_driver_source_detail method=... value=Const:... evidence_source=... const_full_path=Top.u_target.a<-Top.tie_net<-Const:1'b1 role=driver port_path=Top.u_target.a ...
+const_driver_source_detail method=... value=Const:... evidence_source=kdebug.port.trace_batch const_full_path=Top.u_target.a<-Top.tie_net<-Const:1'b1 role=driver port_path=Top.u_target.a ...
 ```
 
 `const_full_path` 是从被检查端口到常数证据的完整层次链，方向用 `<-` 表示 driver 来源。例如
 `Top.u_target.a<-Top.tie_net<-Const:1'b1`。Verilog literal 本身没有独立的 hierarchy object，
 因此工具记录的是可验证的端口、层次信号/NPI endpoint、源码位置与 literal 组成的证据链，而不是伪造一个 literal instance 路径。
-`evidence_source` 与 `method` 一致，便于脚本直接按来源类型过滤。
+`evidence_source` 固定为 `kdebug.port.trace_batch`，标识公共 action 来源；`method` 保留具体的常数推导方法，便于按来源类型过滤。
 
 常见 `method` 含义：
 
@@ -1179,7 +1179,7 @@ source_assign_direct_load_fanout signal=... source=... fanouts=...
 source_assign_load_fanout signal=... source=... fanouts=...
 source_module_port_driver signal=... source=... drivers=...
 const_driver_from_parent_signal signal=... source=... value=Const:...
-const_driver_source_detail method=... value=Const:... evidence_source=... const_full_path=... port_path=... resolved_signal=... resolved_scope=...
+const_driver_source_detail method=... value=Const:... evidence_source=kdebug.port.trace_batch const_full_path=... port_path=... resolved_signal=... resolved_scope=...
 ```
 
 快速查看命令：
@@ -1216,7 +1216,7 @@ grep -nE "source_|const_driver_from_parent_signal|const_driver_source_detail|mod
 
 ```text
 const_driver_from_parent_signal signal=... source=... value=Const:...
-const_driver_source_detail method=source_const_assign_map value=Const:... evidence_source=source_const_assign_map const_full_path=... port_path=... resolved_signal=... resolved_scope=...
+const_driver_source_detail method=source_const_assign_map value=Const:... evidence_source=kdebug.port.trace_batch const_full_path=... port_path=... resolved_signal=... resolved_scope=...
 ```
 
 ### 大项目跑得慢怎么办

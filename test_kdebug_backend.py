@@ -30,13 +30,24 @@ class KDebugBackendContractTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.assertIn("a command is required", stderr.getvalue())
 
-    def test_normalize_nested_kdb_to_daidir(self):
+    def test_preserves_elab_and_normalizes_other_nested_kdb_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             daidir = Path(tmpdir) / "simv.daidir"
             kdb = daidir / "kdb.elab++"
             kdb.mkdir(parents=True)
-            self.assertEqual(backend.normalize_daidir(kdb), daidir.resolve())
-            self.assertEqual(backend.normalize_daidir(daidir), daidir.resolve())
+            nested = daidir / "nested" / "marker"
+            nested.mkdir(parents=True)
+            standalone = Path(tmpdir) / "standalone.elab++"
+            standalone.mkdir()
+            self.assertEqual(backend.normalize_design_input(kdb), kdb.resolve())
+            self.assertEqual(backend.normalize_design_input(standalone), standalone.resolve())
+            self.assertEqual(backend.normalize_design_input(daidir), daidir.resolve())
+            self.assertEqual(backend.normalize_design_input(nested), daidir.resolve())
+            invalid = Path(tmpdir) / "invalid.elab++"
+            invalid.write_text("not a directory", encoding="utf-8")
+            with self.assertRaises(backend.KDebugError) as caught:
+                backend.normalize_design_input(invalid)
+            self.assertEqual(caught.exception.code, "INVALID_KDB_PATH")
 
     def test_trace_parser_maps_legacy_semantics_to_port_batch_limits(self):
         args = backend.build_parser().parse_args(
@@ -92,6 +103,63 @@ class KDebugBackendContractTest(unittest.TestCase):
         with self.assertRaises(backend.KDebugError) as caught:
             backend.validate_port_trace_constants(rows, [], [])
         self.assertEqual(caught.exception.code, "KDEBUG_UNVERIFIED_CONSTANT")
+
+    def test_conflicting_constants_across_surfaces_fail_closed(self):
+        def evidence(value):
+            port_path = "top.u0.a"
+            return {
+                "kind": "constant",
+                "value": value,
+                "method": "source_port_connection",
+                "role": "driver",
+                "port_path": port_path,
+                "const_full_path": "{}<-{}".format(port_path, value),
+                "effective": True,
+                "constant": {"value": value, "effective": True},
+                "provenance": {
+                    "origin": "source_port_connection",
+                    "unconditional": True,
+                    "path": [port_path, value],
+                    "source": {},
+                },
+            }
+
+        full = [["top.u0", "a", "input", "driver", "Const:1'b0"]]
+        boundary = [["top.u0", "a", "input", "driver", "Const:1'b1"]]
+        with self.assertRaises(backend.KDebugError) as caught:
+            backend.validate_port_trace_constants(
+                full, boundary, [evidence("Const:1'b0"), evidence("Const:1'b1")]
+            )
+        self.assertEqual(caught.exception.code, "KDEBUG_AMBIGUOUS_CONSTANT")
+
+    def test_equivalent_constants_across_surfaces_are_allowed(self):
+        def evidence(value):
+            port_path = "top.u0.a"
+            return {
+                "kind": "constant",
+                "value": value,
+                "method": "source_port_connection",
+                "role": "driver",
+                "port_path": port_path,
+                "const_full_path": "{}<-{}".format(port_path, value),
+                "effective": True,
+                "constant": {"value": value, "effective": True},
+                "provenance": {
+                    "origin": "source_port_connection",
+                    "unconditional": True,
+                    "path": [port_path, value],
+                    "source": {},
+                },
+            }
+
+        full = [["top.u0", "a", "input", "driver", "Const:1'b0"]]
+        boundary = [["top.u0", "a", "input", "driver", "Const:'b0"]]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            backend.validate_port_trace_constants(
+                full, boundary, [evidence("Const:1'b0"), evidence("Const:'b0")]
+            )
+        self.assertEqual(stderr.getvalue().count("const_driver_source_detail"), 2)
 
     def test_parameter_csv_always_contains_instance_inventory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -281,6 +349,43 @@ class KDebugBackendContractTest(unittest.TestCase):
             self.assertEqual(list(root.glob("*.tmp")), [])
             self.assertEqual(list(root.glob("*.rollback")), [])
 
+    def test_csv_pair_preserves_recovery_copy_when_rollback_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            full = root / "full.csv"
+            boundary = root / "boundary.csv"
+            full.write_text("old full\n", encoding="utf-8")
+            boundary.write_text("old boundary\n", encoding="utf-8")
+            real_replace = os.replace
+
+            def fail_publish_and_rollback(source, destination):
+                source_path = Path(source)
+                destination_path = Path(destination)
+                if destination_path == boundary.resolve() and source_path.suffix == ".tmp":
+                    raise OSError("injected boundary publish failure")
+                if destination_path == full.resolve() and source_path.suffix == ".rollback":
+                    raise OSError("injected full rollback failure")
+                return real_replace(source, destination)
+
+            with mock.patch.object(
+                backend.os, "replace", side_effect=fail_publish_and_rollback
+            ), self.assertRaises(backend.KDebugError) as caught:
+                backend.atomic_write_csv_pair(
+                    full,
+                    ["kind"],
+                    [["new full"]],
+                    boundary,
+                    ["kind"],
+                    [["new boundary"]],
+                )
+
+            self.assertEqual(caught.exception.code, "OUTPUT_ROLLBACK_FAILED")
+            self.assertEqual(boundary.read_text(encoding="utf-8"), "old boundary\n")
+            recovery = list(root.glob("*.rollback"))
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), "old full\n")
+            self.assertIn(str(recovery[0]), str(caught.exception))
+
     def test_csv_pair_rejects_output_path_collision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "same.csv"
@@ -366,6 +471,7 @@ class KDebugClientProcessTest(unittest.TestCase):
                 root,
                 "import json, sys\n"
                 "r = json.load(sys.stdin)\n"
+                f"assert r['target']['daidir'] == {str(kdb.resolve())!r}\n"
                 "a = r['action']\n"
                 "if a != 'port.trace_batch':\n"
                 " json.dump({'api_version':'kdebug.v1','action':a,'ok':False,'error':{'code':'UNKNOWN_ACTION','message':a}},sys.stdout); raise SystemExit(2)\n"

@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.transaction.writer.create.request.v1",
+  "title": "transaction.writer.create request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "transaction.writer.create"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "begin_time": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stream": {
+          "type": "string"
+        },
+        "transactions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "duration"
+            ],
+            "properties": {
+              "start_delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "duration": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "type": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "relation",
+              "master",
+              "slave"
+            ],
+            "properties": {
+              "relation": {
+                "type": "string"
+              },
+              "master": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "slave": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "output",
+        "stream",
+        "transactions"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

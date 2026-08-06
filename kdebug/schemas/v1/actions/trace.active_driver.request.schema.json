@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.trace.active_driver.request.v1",
+  "title": "trace.active_driver request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "trace.active_driver"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "daidir": {
+          "type": "string",
+          "description": "VCS simv.daidir or kdb.elab++ directory"
+        },
+        "fsdb": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "signal": {
+          "type": "string",
+          "description": "Exact hierarchical signal path to trace the active driver for"
+        },
+        "requested_time": {
+          "type": "string",
+          "description": "Waveform time to query the active driver, e.g. '120ns'"
+        },
+        "include_control": {
+          "type": "boolean",
+          "description": "Report control context (if/case) when no assignment confirmed (default true)"
+        },
+        "include_parity": {
+          "type": "boolean",
+          "description": "Run parity check: compare active trace vs static driver candidates"
+        },
+        "include_trace": {
+          "type": "boolean",
+          "description": "Return full data.trace with nodes, edges, selected_path (default false for compact)"
+        },
+        "include_alias_candidates": {
+          "type": "boolean",
+          "description": "Include alias_candidates even when a unique alias was resolved"
+        },
+        "include_compat_fields": {
+          "type": "boolean",
+          "description": "Return backward-compatible statements/path/active_values/requested_values fields"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "signal",
+        "requested_time"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "description": "Resource limits for the recursive active trace",
+      "properties": {
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum recursion depth through pass-through assignments and aliases (default 8)"
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of trace nodes before truncation (default 50)"
+        },
+        "max_alias_candidates": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of alias candidates to explore (default 8)"
+        },
+        "max_trace_signals": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum signal count for value lookup (default 64)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "description": "Output format controls. verbosity=full|debug implies include_trace=true",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "json",
+            "kout"
+          ]
+        },
+        "verbosity": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "full",
+            "debug"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

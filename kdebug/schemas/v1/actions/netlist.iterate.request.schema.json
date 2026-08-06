@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.netlist.iterate.request.v1",
+  "title": "netlist.iterate request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "netlist.iterate"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "object_type": {
+          "type": "string",
+          "pattern": "^npiNl[A-Za-z0-9_]+$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "object_type"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

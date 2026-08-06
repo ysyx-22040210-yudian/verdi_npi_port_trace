@@ -1,0 +1,110 @@
+{
+  "bundle_format": 1,
+  "component": "kdebug",
+  "version": "0.1.0-tcl",
+  "source": {
+    "repository": "https://github.com/ysyx-22040210-yudian/kverif.git",
+    "commit": "05e08de4f319415f17e2455331b21cacc08891d1",
+    "commit_date": "2026-08-06T02:08:24+08:00",
+    "subject": "Support native elab++ design databases"
+  },
+  "bundle_patches": [
+    "libexec/kdebug-engine pins KDEBUG_ENGINE_EXE to its executable launcher so session daemons do not depend on the Python file mode"
+  ],
+  "binary": {
+    "path": "kdebug/kdebug",
+    "sha256": "af3bd7670e1a04d11d0da7b30b9925fd07ac666956be94f2315ac3cc85177403",
+    "size_bytes": 3460952,
+    "format": "ELF 64-bit LSB executable",
+    "os": "Linux",
+    "architecture": "x86_64",
+    "linkage": "glibc dynamic",
+    "build_id": "a352cda8113e8885f0d7e2c442d3c875e7a3e002",
+    "minimum_symbol_versions": {
+      "GLIBC": "2.14",
+      "GLIBCXX": "3.4.19",
+      "CXXABI": "1.3.2"
+    }
+  },
+  "runtime_files": [
+    {
+      "path": "tools/kdebug",
+      "sha256": "1b4c26a3f257a5379406ef852fcb42da857fe9adce7bc14cdd28da09d8142669",
+      "size_bytes": 3139,
+      "text_eol": "lf"
+    },
+    {
+      "path": "kdebug/help.txt",
+      "sha256": "8345feb80409032313b9b25887821e905560e246048259896f2746f021bd59e7",
+      "size_bytes": 11376,
+      "text_eol": "lf"
+    },
+    {
+      "path": "kdebug/libexec/kdebug-engine",
+      "sha256": "c8781ce496c2eb7532fb8667ac698695ef22bced64b4b12ea2d43d0df82fbb40",
+      "size_bytes": 401,
+      "text_eol": "lf"
+    },
+    {
+      "path": "kdebug/libexec/tcl_engine/kdebug_engine.py",
+      "sha256": "9b268164d3e9cf4fe2f1eb4a18de3f3e04ce1087a14c72f7a0996c6461c7cefe",
+      "size_bytes": 143107,
+      "text_eol": "lf"
+    },
+    {
+      "path": "kdebug/libexec/tcl_engine/kdebug_npi.tcl",
+      "sha256": "de8cb52ec4c4bbfbaddde13c457549b11b918575c31f213c7dbcff33a04393ac",
+      "size_bytes": 93235,
+      "text_eol": "lf"
+    },
+    {
+      "path": "kdebug/libexec/tcl_engine/kdebug_port_trace.tcl",
+      "sha256": "26256ecafc34acc9be07f69187ac6f21f97db32fb7735422a84fa3c78885d760",
+      "size_bytes": 253598,
+      "text_eol": "lf"
+    }
+  ],
+  "schemas": {
+    "path": "kdebug/schemas/v1",
+    "file_count": 228,
+    "tree_sha256": "35c3342057fc3cdb3385dd9d32912c212c32bb56d4228d1ff1258f242fcae881",
+    "tree_sha256_algorithm": "SHA-256 over sorted POSIX relative path, NUL, LF-normalized bytes, NUL"
+  },
+  "licenses": [
+    {
+      "path": "LICENSES/kdebug-MIT.txt",
+      "sha256": "f64c58537ae9534f10aef9527aeaf21d2d5d014ab9e2d9c6fac61b0a673c1c74",
+      "size_bytes": 1066,
+      "text_eol": "lf"
+    },
+    {
+      "path": "LICENSES/nlohmann-json-MIT.txt",
+      "sha256": "16cda9aea495e53865709335b4f5dedd4066c75f4f1e432cdac5dcb7b235e3db",
+      "size_bytes": 1118,
+      "text_eol": "lf"
+    }
+  ],
+  "compatibility": {
+    "supported_host": "Linux x86_64 with glibc 2.14 or newer",
+    "unsupported_hosts": [
+      "Linux ARM64",
+      "Linux with musl libc",
+      "Windows",
+      "macOS"
+    ],
+    "base_runtime": [
+      "bash",
+      "Python 3.6 or newer"
+    ],
+    "design_action_runtime": [
+      "Synopsys Verdi with NPI Tcl support",
+      "a valid Verdi license",
+      "a compatible simv.daidir or *.elab++ design database"
+    ]
+  },
+  "executable_paths": [
+    "tools/kdebug",
+    "kdebug/kdebug",
+    "kdebug/libexec/kdebug-engine"
+  ]
+}

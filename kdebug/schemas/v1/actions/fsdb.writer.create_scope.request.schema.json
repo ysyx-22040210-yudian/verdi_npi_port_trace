@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.fsdb.writer.create_scope.request.v1",
+  "title": "fsdb.writer.create_scope request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "fsdb.writer.create_scope"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "begin_time": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_time_delta": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "scope",
+                  "up"
+                ]
+              },
+              "type": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "def_name": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "def_name": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "output"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

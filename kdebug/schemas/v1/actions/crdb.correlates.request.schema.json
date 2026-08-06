@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.crdb.correlates.request.v1",
+  "title": "crdb.correlates request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "crdb.correlates"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "crdb": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "RTL",
+            "GATE"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "crdb",
+        "name"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

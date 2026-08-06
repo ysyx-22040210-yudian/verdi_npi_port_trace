@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.dm.clone_module.request.v1",
+  "title": "dm.clone_module request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "dm.clone_module"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "new_name": {
+          "type": "string"
+        },
+        "output_dir": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "module",
+        "new_name",
+        "output_dir"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

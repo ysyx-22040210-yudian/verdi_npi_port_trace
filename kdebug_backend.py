@@ -9,6 +9,7 @@ from __future__ import print_function
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -94,6 +95,228 @@ def executable_path(command: str) -> Optional[str]:
     return shutil.which(command)
 
 
+def bundled_kdebug_path() -> Path:
+    return Path(__file__).resolve().parent / "tools" / "kdebug"
+
+
+def canonical_bundle_bytes(path: Path, text_eol: Optional[str] = None) -> bytes:
+    content = path.read_bytes()
+    if text_eol == "lf":
+        content = content.replace(b"\r\n", b"\n")
+    return content
+
+
+def schema_tree_sha256(schema_root: Path) -> str:
+    digest = hashlib.sha256()
+    paths = sorted(
+        (path for path in schema_root.rglob("*.json") if path.is_file()),
+        key=lambda path: path.relative_to(schema_root).as_posix(),
+    )
+    for path in paths:
+        relative = path.relative_to(schema_root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(canonical_bundle_bytes(path, "lf"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def validate_bundle_manifest(root: Path, manifest_path: Path) -> None:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise KDebugError(
+            "cannot read bundled kdebug manifest {}: {}".format(manifest_path, exc),
+            "KDEBUG_BUNDLE_INVALID",
+        )
+    if not isinstance(manifest, dict) or manifest.get("bundle_format") != 1:
+        raise KDebugError(
+            "bundled kdebug manifest has an unsupported format: {}".format(manifest_path),
+            "KDEBUG_BUNDLE_INVALID",
+        )
+
+    root = root.resolve()
+
+    def validate_entry(entry: Any, kind: str) -> Path:
+        if not isinstance(entry, dict):
+            raise KDebugError(
+                "bundled kdebug manifest has an invalid {} entry".format(kind),
+                "KDEBUG_BUNDLE_INVALID",
+            )
+        relative = entry.get("path")
+        digest = entry.get("sha256")
+        size = entry.get("size_bytes")
+        if not isinstance(relative, str) or not relative or not isinstance(digest, str):
+            raise KDebugError(
+                "bundled kdebug manifest {} entry is missing path or sha256".format(kind),
+                "KDEBUG_BUNDLE_INVALID",
+            )
+        path = (root / relative).resolve()
+        try:
+            inside_root = os.path.commonpath([str(root), str(path)]) == str(root)
+        except ValueError:
+            inside_root = False
+        if not inside_root:
+            raise KDebugError(
+                "bundled kdebug manifest path escapes the repository: {}".format(relative),
+                "KDEBUG_BUNDLE_INVALID",
+            )
+        if not path.is_file():
+            raise KDebugError(
+                "bundled kdebug manifest references a missing {} file: {}".format(kind, path),
+                "KDEBUG_BUNDLE_INCOMPLETE",
+            )
+        try:
+            content = canonical_bundle_bytes(path, entry.get("text_eol"))
+        except OSError as exc:
+            raise KDebugError(
+                "cannot read bundled kdebug {} file {}: {}".format(kind, path, exc),
+                "KDEBUG_BUNDLE_INCOMPLETE",
+            )
+        actual_digest = hashlib.sha256(content).hexdigest()
+        if not isinstance(size, int) or size != len(content) or digest != actual_digest:
+            raise KDebugError(
+                "bundled kdebug {} integrity check failed: {}".format(kind, path),
+                "KDEBUG_BUNDLE_INVALID",
+            )
+        return path
+
+    binary = validate_entry(manifest.get("binary"), "binary")
+    expected_binary = (root / "kdebug" / "kdebug").resolve()
+    if binary != expected_binary:
+        raise KDebugError(
+            "bundled kdebug manifest selects an unexpected frontend: {}".format(binary),
+            "KDEBUG_BUNDLE_INVALID",
+        )
+
+    runtime_entries = manifest.get("runtime_files")
+    license_entries = manifest.get("licenses")
+    if not isinstance(runtime_entries, list) or not isinstance(license_entries, list):
+        raise KDebugError(
+            "bundled kdebug manifest must list runtime_files and licenses",
+            "KDEBUG_BUNDLE_INVALID",
+        )
+    expected_runtime_paths = {
+        "tools/kdebug",
+        "kdebug/help.txt",
+        "kdebug/libexec/kdebug-engine",
+        "kdebug/libexec/tcl_engine/kdebug_engine.py",
+        "kdebug/libexec/tcl_engine/kdebug_npi.tcl",
+        "kdebug/libexec/tcl_engine/kdebug_port_trace.tcl",
+    }
+    expected_license_paths = {
+        "LICENSES/kdebug-MIT.txt",
+        "LICENSES/nlohmann-json-MIT.txt",
+    }
+
+    def require_exact_paths(entries: List[Any], expected: set, kind: str) -> None:
+        paths = [entry.get("path") for entry in entries if isinstance(entry, dict)]
+        if len(paths) != len(entries) or len(paths) != len(set(paths)) or set(paths) != expected:
+            raise KDebugError(
+                "bundled kdebug manifest {} path set is incomplete or unexpected".format(kind),
+                "KDEBUG_BUNDLE_INVALID",
+            )
+
+    require_exact_paths(runtime_entries, expected_runtime_paths, "runtime")
+    require_exact_paths(license_entries, expected_license_paths, "license")
+    for entry in runtime_entries:
+        validate_entry(entry, "runtime")
+    for entry in license_entries:
+        validate_entry(entry, "license")
+
+    schemas = manifest.get("schemas")
+    if not isinstance(schemas, dict) or not isinstance(schemas.get("file_count"), int):
+        raise KDebugError(
+            "bundled kdebug manifest has an invalid schemas entry",
+            "KDEBUG_BUNDLE_INVALID",
+        )
+    if schemas.get("path") != "kdebug/schemas/v1":
+        raise KDebugError(
+            "bundled kdebug manifest selects an unexpected schema directory",
+            "KDEBUG_BUNDLE_INVALID",
+        )
+    schema_root = (root / schemas["path"]).resolve()
+    try:
+        inside_root = os.path.commonpath([str(root), str(schema_root)]) == str(root)
+    except ValueError:
+        inside_root = False
+    if not inside_root or not schema_root.is_dir():
+        raise KDebugError(
+            "bundled kdebug schema directory is missing or invalid: {}".format(schema_root),
+            "KDEBUG_BUNDLE_INCOMPLETE",
+        )
+    actual_schema_count = sum(1 for path in schema_root.rglob("*.json") if path.is_file())
+    if actual_schema_count != schemas["file_count"]:
+        raise KDebugError(
+            "bundled kdebug schema count mismatch: expected {}, found {}".format(
+                schemas["file_count"], actual_schema_count
+            ),
+            "KDEBUG_BUNDLE_INCOMPLETE",
+        )
+    expected_schema_hash = schemas.get("tree_sha256")
+    if not isinstance(expected_schema_hash, str) or schema_tree_sha256(schema_root) != expected_schema_hash:
+        raise KDebugError(
+            "bundled kdebug schema integrity check failed: {}".format(schema_root),
+            "KDEBUG_BUNDLE_INVALID",
+        )
+
+
+def validate_bundled_kdebug(launcher: Path) -> str:
+    launcher = launcher.resolve()
+    root = launcher.parent.parent
+    required = [
+        root / "kdebug" / "kdebug",
+        root / "kdebug" / "help.txt",
+        root / "kdebug" / "BUNDLE_MANIFEST.json",
+        root / "kdebug" / "libexec" / "kdebug-engine",
+        root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_engine.py",
+        root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_npi.tcl",
+        root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_port_trace.tcl",
+        root / "kdebug" / "schemas" / "v1" / "actions"
+        / "port.trace_batch.request.schema.json",
+        root / "LICENSES" / "kdebug-MIT.txt",
+        root / "LICENSES" / "nlohmann-json-MIT.txt",
+    ]
+    if not launcher.is_file():
+        raise KDebugError(
+            "bundled kdebug launcher is not a file: {}".format(launcher),
+            "KDEBUG_BUNDLE_INCOMPLETE",
+        )
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise KDebugError(
+            "bundled kdebug runtime is incomplete; missing: {}".format(
+                ", ".join(missing)
+            ),
+            "KDEBUG_BUNDLE_INCOMPLETE",
+        )
+    validate_bundle_manifest(root, required[2])
+    executable_files = [launcher, required[0], required[3]]
+    if os.name == "posix":
+        not_executable = [str(path) for path in executable_files if not os.access(path, os.X_OK)]
+        if not_executable:
+            raise KDebugError(
+                "bundled kdebug entry point is not executable: {}; run chmod +x on the listed file".format(
+                    ", ".join(not_executable)
+                ),
+                "KDEBUG_BUNDLE_NOT_EXECUTABLE",
+            )
+    try:
+        with required[0].open("rb") as handle:
+            elf_magic = handle.read(4)
+    except OSError as exc:
+        raise KDebugError(
+            "cannot read bundled kdebug frontend {}: {}".format(required[0], exc),
+            "KDEBUG_BUNDLE_INCOMPLETE",
+        )
+    if elf_magic != b"\x7fELF":
+        raise KDebugError(
+            "bundled kdebug frontend is not a Linux ELF binary: {}".format(required[0]),
+            "KDEBUG_BUNDLE_INVALID",
+        )
+    return str(launcher)
+
+
 def resolve_kdebug(explicit: Optional[str]) -> str:
     configured = explicit or os.environ.get("KDEBUG_BIN")
     if configured:
@@ -105,22 +328,22 @@ def resolve_kdebug(explicit: Optional[str]) -> str:
             )
         return resolved
 
+    bundled = bundled_kdebug_path()
+    if os.path.lexists(str(bundled)):
+        return validate_bundled_kdebug(bundled)
+
     home = os.environ.get("KVERIF_HOME")
     candidates = []
     if home:
         candidates.append(os.path.join(home, "tools", "kdebug"))
-    candidates.extend(
-        [
-            os.path.join(str(Path(__file__).resolve().parent), "tools", "kdebug"),
-            "kdebug",
-        ]
-    )
+    candidates.append("kdebug")
     for candidate in candidates:
         resolved = executable_path(candidate)
         if resolved:
             return resolved
     raise KDebugError(
-        "cannot find kdebug; use --kdebug-bin, KDEBUG_BIN, KVERIF_HOME, or PATH",
+        "cannot find kdebug; bundled launcher was expected at {}; use --kdebug-bin, "
+        "KDEBUG_BIN, KVERIF_HOME, or PATH to override".format(bundled),
         "KDEBUG_NOT_FOUND",
     )
 

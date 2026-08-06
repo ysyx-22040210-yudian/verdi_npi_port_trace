@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.meta.v1",
+  "title": "kdebug response meta",
+  "type": "object",
+  "properties": {
+    "truncated": {"type": "boolean"},
+    "elapsed_ms": {"type": "integer"},
+    "log_truncated": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

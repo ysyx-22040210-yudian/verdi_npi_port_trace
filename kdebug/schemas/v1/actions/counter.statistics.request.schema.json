@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.counter.statistics.request.v1",
+  "title": "counter.statistics request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "counter.statistics"
+      ]
+    },
+    "target": {
+      "type": "object"
+    },
+    "args": {
+      "type": "object",
+      "required": [
+        "clock",
+        "time_range",
+        "vld",
+        "cnt"
+      ],
+      "properties": {
+        "clock": {
+          "type": "string"
+        },
+        "sampling": {
+          "type": "string",
+          "enum": [
+            "posedge",
+            "negedge"
+          ]
+        },
+        "time_range": {
+          "type": "object"
+        },
+        "vld": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "required": [
+                "expr",
+                "signals"
+              ],
+              "properties": {
+                "expr": {
+                  "type": "string"
+                },
+                "signals": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        "cnt": {
+          "type": "string"
+        },
+        "max_samples": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    },
+    "limits": {
+      "type": "object"
+    },
+    "output": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

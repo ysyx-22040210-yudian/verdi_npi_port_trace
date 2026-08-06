@@ -9,6 +9,8 @@ CLI / GUI -> shell compatibility wrapper -> kdebug_backend.py
           -> public kdebug JSON API -> kdebug-managed Verdi/NPI backend
 ```
 
+仓库已经随附一套固定版本的 Linux x86-64 `kdebug` 运行包，包括 ELF 前端、Python/Tcl engine、全部 action schema 和许可证。兼容主机上不再需要单独安装 KVerif；默认入口是本仓库的 `tools/kdebug`。
+
 工具只读取已经 elaboration 完成的 VCS/Verdi KDB。历史命令常用以下路径：
 
 ```text
@@ -48,6 +50,9 @@ simv.daidir/kdb.elab++
 | `annotate_trace_xlsx.py` | XLSX 反标主实现，依赖 Python 3.8+ 和 `openpyxl`。 |
 | `trace_and_filter.sh` | CSV trace + keywords 过滤入口。 |
 | `npi_trace.sh` | 历史名称保留的兼容入口；当前转调 `kdebug_backend.py trace`。 |
+| `tools/kdebug` | 仓库内置 kdebug 的自包含入口；固定 `KVERIF_HOME`，检查必需布局/执行位，并自动准备 Verdi/NPI 环境。完整哈希由主流程的 `kdebug_backend.py` 校验。 |
+| `kdebug/` | 固定版本的 Linux x86-64 ELF、engine、帮助和 228 个 JSON schema；版本、ABI 与哈希见 `kdebug/BUNDLE_MANIFEST.json`。 |
+| `LICENSES/` | 内置 kdebug 及其随附 nlohmann/json 的许可证。 |
 | `kdebug_backend.py` | 公共 kdebug JSON API 适配器，负责设计库路径校验和透传、协议校验、batch trace、常量证据和兼容 CSV 发布。 |
 | `find_instances_batched.py` | 按 workload 分批调用公共 `module.find_instances`，失败时可二分重试，降低大项目故障影响范围。 |
 | `npi_port_trace.tcl` / `npi_find_instances.tcl` / `npi_find_module_params.tcl` | 旧直接 NPI 后端的历史参考文件；当前主流程不执行这些 Tcl。 |
@@ -77,10 +82,11 @@ simv.daidir/kdb.elab++
 
 | 依赖 | 说明 |
 | --- | --- |
-| Linux / VM shell | 主流程脚本是 `bash`。 |
-| 公共 `kdebug` CLI | 必须支持 `--json` 请求，并能访问设计 actions；通过 `--kdebug-bin`、`KDEBUG_BIN`、`KVERIF_HOME` 或 `PATH` 定位。 |
+| Linux x86-64 / VM shell | 主流程脚本是 `bash`；内置 ELF 要求 glibc 2.14+。常见 RHEL/CentOS 7+ x86-64 主机满足该 ABI。 |
+| 内置 `kdebug` CLI | 已随仓库提供，无需安装 KVerif。显式 `--kdebug-bin` 或 `KDEBUG_BIN` 可覆盖内置版本。 |
 | Verdi | kdebug 的设计后端仍需要可用 Verdi/NPI 环境，但本工具不再直接启动 Verdi。 |
 | VCS/Verdi KDB | 必须提供有效 `simv.daidir` 或 `kdb.elab++` 目录；两种路径均由 kdebug 原生打开。 |
+| Python 3.6+ | Raw Trace / CSV 命令行及内置 kdebug engine 的最低运行版本。 |
 | Python 3.8+ | XLSX / GUI 流程按 Python 3.8+ 维护。 |
 | `openpyxl` | XLSX 反标和 GUI 查看 XLSX 需要。 |
 
@@ -131,8 +137,8 @@ python3 -c "import openpyxl; print(openpyxl.__version__)"
 python3 -c "import tkinter"
 which bash
 which verdi
-export KDEBUG_BIN=/path/to/kverif/tools/kdebug
-"$KDEBUG_BIN" --json actions
+./tools/kdebug --json actions
+./tools/kdebug --json schema --action port.trace_batch --kind request
 ls build/simv.daidir/kdb.elab++
 ```
 
@@ -163,17 +169,26 @@ ysyx_22050058_pht
 
 ## kdebug 后端选择
 
-推荐显式配置公共 CLI，避免压测主机上命中另一个版本：
+默认使用仓库内置且经过完整性检查的 CLI：
 
 ```bash
-export KDEBUG_BIN=/home/host/kverif/tools/kdebug
 ./npi_trace.sh \
   -module MSHR \
   -lib /root/XiangShan-build/build/xverif_xiangshan/kdb/simv.daidir/kdb.elab++ \
   -ports 'io_id[0],io_id[7]'
 ```
 
-也可对命令单独传 `--kdebug-bin /path/to/kdebug`。自动发现顺序是：显式参数、`KDEBUG_BIN`、`$KVERIF_HOME/tools/kdebug`、本仓库 `tools/kdebug`、`PATH` 中的 `kdebug`。配置了显式路径但文件不存在或不可执行时会直接失败，不会静默换用其他版本。
+需要调试其他版本时，可对命令单独传 `--kdebug-bin /path/to/kdebug`，或设置 `KDEBUG_BIN`。自动发现顺序是：显式参数、`KDEBUG_BIN`、本仓库 `tools/kdebug`、`$KVERIF_HOME/tools/kdebug`、`PATH` 中的 `kdebug`。显式路径不可执行时会直接失败；内置 bundle 存在但缺文件、哈希不匹配或丢失执行位时也会直接失败，不会静默换用其他版本。
+
+从 GitHub 分发时推荐使用 `git clone`，Git 会保留三个入口的执行位：
+
+```bash
+git clone https://github.com/ysyx-22040210-yudian/verdi_npi_port_trace.git
+cd verdi_npi_port_trace
+./tools/kdebug --json actions
+```
+
+内置 ELF 只支持 Linux x86-64 + glibc，不支持 ARM64、Alpine/musl、Windows 或 macOS。设计查询仍依赖目标机已有的 Verdi/NPI 和有效许可证；“无需安装”指无需另装 KVerif/kdebug，不表示能够脱离 EDA runtime 打开 KDB。完整构建来源、SHA-256、Build ID 和最低 ABI 记录在 `kdebug/BUNDLE_MANIFEST.json`。
 
 `-lib` 兼容原有 `kdb.elab++` 写法，并把该完整路径原样写入 kdebug 的 `target.daidir`；不会再静默改写为父目录。直接传 `simv.daidir` 仍保持兼容。路径不存在返回 `KDB_NOT_FOUND`，既不是 `.daidir` 也不是 `.elab++` 目录的输入返回 `INVALID_KDB_PATH`。
 

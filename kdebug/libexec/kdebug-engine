@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$script_dir/tcl_engine/kdebug_engine.py" ]]; then
+  engine_dir="$script_dir/tcl_engine"
+else
+  engine_dir="$(cd "$script_dir/../tcl_engine" && pwd)"
+fi
+
+python_bin="${PYTHON:-python3}"
+export KDEBUG_ENGINE_EXE="$script_dir/kdebug-engine"
+exec "$python_bin" "$engine_dir/kdebug_engine.py" "$@"

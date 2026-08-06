@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.source_location.v1",
+  "title": "kdebug source location",
+  "type": "object",
+  "properties": {
+    "file": {"type": "string"},
+    "line": {"type": "integer"},
+    "column": {"type": "integer"},
+    "module": {"type": "string"},
+    "kind": {"type": "string"}
+  },
+  "additionalProperties": true
+}

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Find filter-module instances through resource-bounded kdebug batches."""
 
-from __future__ import annotations
-
 import argparse
 import os
 import re
@@ -142,7 +140,7 @@ def posix_session_processes(session_id: int) -> List[int]:
         ["ps", "-e", "-o", "pid=", "-o", "sid=", "-o", "stat="],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        universal_newlines=True,
         check=False,
     )
     if result.returncode != 0:

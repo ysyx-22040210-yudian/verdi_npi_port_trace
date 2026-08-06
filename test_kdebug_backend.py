@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import hashlib
 import io
 import json
 import os
@@ -16,7 +17,222 @@ from unittest import mock
 import kdebug_backend as backend
 
 
+def make_fake_kdebug_bundle(root: Path, omit=(), executable: bool = True) -> Path:
+    launcher = root / "tools" / "kdebug"
+    manifest_path = root / "kdebug" / "BUNDLE_MANIFEST.json"
+    files = {
+        launcher: b"#!/usr/bin/env bash\nexit 0\n",
+        root / "kdebug" / "kdebug": b"\x7fELFfake",
+        root / "kdebug" / "help.txt": b"help\n",
+        root / "kdebug" / "libexec" / "kdebug-engine": b"#!/usr/bin/env bash\nexit 0\n",
+        root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_engine.py": b"pass\n",
+        root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_npi.tcl": b"# npi\n",
+        root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_port_trace.tcl": b"# trace\n",
+        root / "kdebug" / "schemas" / "v1" / "actions"
+        / "port.trace_batch.request.schema.json": b"{}\n",
+        root / "kdebug" / "schemas" / "v1" / "actions"
+        / "port.trace_batch.response.schema.json": b"{}\n",
+        root / "LICENSES" / "kdebug-MIT.txt": b"MIT\n",
+        root / "LICENSES" / "nlohmann-json-MIT.txt": b"MIT\n",
+    }
+    omitted = set(omit)
+    for path, content in files.items():
+        if path.relative_to(root).as_posix() in omitted:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def entry(path, text=False):
+        content = path.read_bytes().replace(b"\r\n", b"\n") if text else path.read_bytes()
+        result = {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        if text:
+            result["text_eol"] = "lf"
+        return result
+
+    if manifest_path.relative_to(root).as_posix() not in omitted:
+        runtime_paths = [
+            launcher,
+            root / "kdebug" / "help.txt",
+            root / "kdebug" / "libexec" / "kdebug-engine",
+            root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_engine.py",
+            root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_npi.tcl",
+            root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_port_trace.tcl",
+        ]
+        manifest = {
+            "bundle_format": 1,
+            "binary": entry(root / "kdebug" / "kdebug"),
+            "runtime_files": [entry(path, text=True) for path in runtime_paths if path.exists()],
+            "schemas": {
+                "path": "kdebug/schemas/v1",
+                "file_count": 2,
+                "tree_sha256": backend.schema_tree_sha256(root / "kdebug" / "schemas" / "v1"),
+            },
+            "licenses": [
+                entry(root / "LICENSES" / "kdebug-MIT.txt", text=True),
+                entry(root / "LICENSES" / "nlohmann-json-MIT.txt", text=True),
+            ],
+        }
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    mode = stat.S_IRUSR | stat.S_IWUSR
+    if executable:
+        mode |= stat.S_IXUSR
+    launcher.chmod(mode)
+    for path in (root / "kdebug" / "kdebug", root / "kdebug" / "libexec" / "kdebug-engine"):
+        if path.exists():
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    return launcher
+
+
 class KDebugBackendContractTest(unittest.TestCase):
+    def test_resolve_kdebug_prefers_complete_repo_bundle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            launcher = make_fake_kdebug_bundle(root)
+            fake_module = root / "kdebug_backend.py"
+            fake_module.write_text("# location marker\n", encoding="utf-8")
+            with mock.patch.object(backend, "__file__", str(fake_module)), mock.patch.dict(
+                os.environ, {"KDEBUG_BIN": "", "KVERIF_HOME": str(root / "external")}
+            ), mock.patch.object(backend.shutil, "which", return_value="/usr/bin/kdebug"):
+                self.assertEqual(backend.resolve_kdebug(None), str(launcher.resolve()))
+
+    def test_incomplete_repo_bundle_fails_without_path_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_fake_kdebug_bundle(
+                root, omit={"kdebug/libexec/tcl_engine/kdebug_npi.tcl"}
+            )
+            fake_module = root / "kdebug_backend.py"
+            fake_module.write_text("# location marker\n", encoding="utf-8")
+            with mock.patch.object(backend, "__file__", str(fake_module)), mock.patch.dict(
+                os.environ, {"KDEBUG_BIN": "", "KVERIF_HOME": ""}
+            ), mock.patch.object(backend.shutil, "which", return_value="/usr/bin/kdebug"):
+                with self.assertRaises(backend.KDebugError) as caught:
+                    backend.resolve_kdebug(None)
+            self.assertEqual(caught.exception.code, "KDEBUG_BUNDLE_INCOMPLETE")
+            self.assertIn("kdebug_npi.tcl", str(caught.exception))
+
+    def test_corrupt_repo_bundle_fails_without_path_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_fake_kdebug_bundle(root)
+            (root / "kdebug" / "help.txt").write_text("changed\n", encoding="utf-8")
+            fake_module = root / "kdebug_backend.py"
+            fake_module.write_text("# location marker\n", encoding="utf-8")
+            with mock.patch.object(backend, "__file__", str(fake_module)), mock.patch.dict(
+                os.environ, {"KDEBUG_BIN": "", "KVERIF_HOME": ""}
+            ), mock.patch.object(backend.shutil, "which", return_value="/usr/bin/kdebug"):
+                with self.assertRaises(backend.KDebugError) as caught:
+                    backend.resolve_kdebug(None)
+            self.assertEqual(caught.exception.code, "KDEBUG_BUNDLE_INVALID")
+            self.assertIn("integrity check failed", str(caught.exception))
+
+    def test_manifest_cannot_omit_a_required_runtime_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_fake_kdebug_bundle(root)
+            manifest_path = root / "kdebug" / "BUNDLE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["runtime_files"] = manifest["runtime_files"][1:]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            fake_module = root / "kdebug_backend.py"
+            fake_module.write_text("# location marker\n", encoding="utf-8")
+            with mock.patch.object(backend, "__file__", str(fake_module)), mock.patch.dict(
+                os.environ, {"KDEBUG_BIN": "", "KVERIF_HOME": ""}
+            ):
+                with self.assertRaises(backend.KDebugError) as caught:
+                    backend.resolve_kdebug(None)
+            self.assertEqual(caught.exception.code, "KDEBUG_BUNDLE_INVALID")
+            self.assertIn("path set", str(caught.exception))
+
+    @unittest.skipUnless(os.name == "posix", "executable mode is a POSIX contract")
+    def test_nonexecutable_repo_bundle_fails_without_path_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            launcher = make_fake_kdebug_bundle(root, executable=False)
+            fake_module = root / "kdebug_backend.py"
+            fake_module.write_text("# location marker\n", encoding="utf-8")
+            with mock.patch.object(backend, "__file__", str(fake_module)), mock.patch.dict(
+                os.environ, {"KDEBUG_BIN": "", "KVERIF_HOME": ""}
+            ), mock.patch.object(backend.shutil, "which", return_value="/usr/bin/kdebug"):
+                with self.assertRaises(backend.KDebugError) as caught:
+                    backend.resolve_kdebug(None)
+            self.assertEqual(caught.exception.code, "KDEBUG_BUNDLE_NOT_EXECUTABLE")
+            self.assertIn(str(launcher.resolve()), str(caught.exception))
+
+    def test_checked_in_bundle_matches_manifest(self):
+        root = Path(__file__).resolve().parent
+        manifest = json.loads(
+            (root / "kdebug" / "BUNDLE_MANIFEST.json").read_text(encoding="utf-8")
+        )
+        binary = root / manifest["binary"]["path"]
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        self.assertEqual(digest, manifest["binary"]["sha256"])
+        self.assertEqual(binary.stat().st_size, manifest["binary"]["size_bytes"])
+        self.assertEqual(binary.read_bytes()[:4], b"\x7fELF")
+        for kind in ("runtime_files", "licenses"):
+            for entry in manifest[kind]:
+                path = root / entry["path"]
+                content = backend.canonical_bundle_bytes(path, entry.get("text_eol"))
+                self.assertEqual(hashlib.sha256(content).hexdigest(), entry["sha256"])
+                self.assertEqual(len(content), entry["size_bytes"])
+        schemas = list((root / "kdebug" / "schemas" / "v1").rglob("*.json"))
+        self.assertEqual(len(schemas), manifest["schemas"]["file_count"])
+        self.assertEqual(
+            backend.schema_tree_sha256(root / manifest["schemas"]["path"]),
+            manifest["schemas"]["tree_sha256"],
+        )
+        with mock.patch.dict(os.environ, {"KDEBUG_BIN": "", "KVERIF_HOME": ""}):
+            self.assertEqual(
+                backend.resolve_kdebug(None), str((root / "tools" / "kdebug").resolve())
+            )
+
+    @unittest.skipUnless(os.name == "posix", "bundled Linux CLI smoke requires POSIX")
+    def test_checked_in_bundled_cli_actions_and_schema(self):
+        root = Path(__file__).resolve().parent
+        launcher = root / "tools" / "kdebug"
+        env = dict(os.environ)
+        for name in ("KDEBUG_BIN", "KVERIF_HOME", "PYTHONPATH", "PYTHON"):
+            env.pop(name, None)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            linked_launcher = Path(tmpdir) / "kdebug-link"
+            linked_launcher.symlink_to(launcher)
+            actions_run = subprocess.run(
+                [str(linked_launcher), "--json", "actions"],
+                cwd=tmpdir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=30,
+            )
+            self.assertEqual(actions_run.returncode, 0, actions_run.stderr)
+            actions = json.loads(actions_run.stdout)
+            implemented = actions.get("data", {}).get("implemented", [])
+            self.assertTrue(
+                {"port.trace_batch", "module.find_instances", "module.inspect_batch"}
+                .issubset(set(implemented))
+            )
+            schema_run = subprocess.run(
+                [
+                    str(launcher), "--json", "schema", "--action",
+                    "port.trace_batch", "--kind", "request",
+                ],
+                cwd=tmpdir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=30,
+            )
+            self.assertEqual(schema_run.returncode, 0, schema_run.stderr)
+            schema = json.loads(schema_run.stdout)
+            self.assertEqual(schema.get("data", {}).get("action"), "port.trace_batch")
+
     def test_timeout_codes_include_engine_and_tcl_timeouts(self):
         self.assertTrue(backend.is_timeout_code("KDEBUG_TIMEOUT"))
         self.assertTrue(backend.is_timeout_code("TCL_NPI_TIMEOUT"))

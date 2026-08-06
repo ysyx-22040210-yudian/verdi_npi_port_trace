@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.module.objects.request.v1",
+  "title": "module.objects request",
+  "type": "object",
+  "required": ["api_version", "action", "target", "args"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string", "enum": ["module.objects"]},
+    "target": {"type": "object", "additionalProperties": true},
+    "args": {
+      "type": "object",
+      "required": ["module", "kind"],
+      "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "kind": {
+          "type": "string",
+          "enum": [
+            "continuous_assignments", "functions", "generate_scopes", "instances",
+            "instances_in_generate", "io", "language_interfaces", "nets", "parameters",
+            "ports", "primitives", "always_processes", "initial_processes", "tasks", "variables"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {"max_rows": {"type": "integer", "minimum": 1}},
+      "additionalProperties": true
+    },
+    "output": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

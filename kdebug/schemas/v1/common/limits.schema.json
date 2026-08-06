@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.limits.v1",
+  "title": "kdebug limits",
+  "type": "object",
+  "properties": {
+    "max_rows": {"type": "integer"},
+    "max_events": {"type": "integer"},
+    "max_samples": {"type": "integer"},
+    "max_depth": {"type": "integer"},
+    "max_paths": {"type": "integer"},
+    "max_results": {"type": "integer"}
+  },
+  "additionalProperties": true
+}

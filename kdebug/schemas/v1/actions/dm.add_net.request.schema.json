@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.dm.add_net.request.v1",
+  "title": "dm.add_net request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "dm.add_net"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "net_type": {
+          "type": "string",
+          "pattern": "^npiDmNet[A-Za-z0-9_]+$"
+        },
+        "packed_left": {
+          "type": "integer"
+        },
+        "packed_right": {
+          "type": "integer"
+        },
+        "output_dir": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "module",
+        "name",
+        "output_dir"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

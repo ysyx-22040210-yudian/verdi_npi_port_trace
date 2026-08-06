@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.language.value.request.v1",
+  "title": "language.value request",
+  "type": "object",
+  "required": ["api_version", "action", "target", "args"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string", "enum": ["language.value"]},
+    "target": {"type": "object", "additionalProperties": true},
+    "args": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "scope": {"type": "string"},
+        "format": {
+          "type": "string",
+          "enum": ["npiBinStrVal", "npiOctStrVal", "npiHexStrVal", "npiDecStrVal", "npiStringVal", "npiRealVal", "npiIntVal"],
+          "default": "npiHexStrVal"
+        }
+      },
+      "additionalProperties": false
+    },
+    "limits": {"type": "object", "additionalProperties": true},
+    "output": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

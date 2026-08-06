@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.power.list.request.v1",
+  "title": "power.list request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "power.list"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "daidir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "VCS simv.daidir or kdb.elab++ directory"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filelist": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upf": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workdir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "defines": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          ]
+        },
+        "top": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upf_version": {
+          "type": "string",
+          "enum": [
+            "1.0",
+            "2.0"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "object_type": {
+          "type": "string",
+          "pattern": "^npiPw[A-Za-z0-9_]+$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "object_type"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

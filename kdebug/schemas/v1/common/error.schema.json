@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.error.v1",
+  "title": "kdebug error object",
+  "type": "object",
+  "required": ["code", "message"],
+  "properties": {
+    "code": {"type": "string"},
+    "message": {"type": "string"},
+    "recoverable": {"type": "boolean"},
+    "retryable": {"type": "boolean"},
+    "details": {"type": "object"},
+    "candidates": {"type": "array"},
+    "suggested_actions": {"type": "array"},
+    "suggested_next_actions": {"type": "array"}
+  },
+  "additionalProperties": true
+}

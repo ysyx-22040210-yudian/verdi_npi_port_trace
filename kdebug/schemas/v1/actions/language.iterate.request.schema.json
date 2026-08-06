@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.language.iterate.request.v1",
+  "title": "language.iterate request",
+  "type": "object",
+  "required": ["api_version", "action", "target", "args"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string", "enum": ["language.iterate"]},
+    "target": {"type": "object", "additionalProperties": true},
+    "args": {
+      "type": "object",
+      "required": ["name", "object_type"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "scope": {"type": "string"},
+        "object_type": {"type": "string", "pattern": "^npi[A-Za-z0-9_]+$"}
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {"max_rows": {"type": "integer", "minimum": 1}},
+      "additionalProperties": true
+    },
+    "output": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

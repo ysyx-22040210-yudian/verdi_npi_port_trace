@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.waveform_sample.v1",
+  "title": "kdebug waveform sample",
+  "type": "object",
+  "properties": {
+    "signal": {"type": "string"},
+    "time": {"type": "string"},
+    "time_ps": {"type": "integer"},
+    "value": {},
+    "known": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

@@ -7,3 +7,10 @@
 *.json text eol=lf
 *.md text eol=lf
 Makefile text eol=lf
+tools/kdebug text eol=lf
+kdebug/kdebug binary
+kdebug/help.txt text eol=lf
+kdebug/libexec/kdebug-engine text eol=lf
+kdebug/libexec/tcl_engine/*.py text eol=lf
+kdebug/libexec/tcl_engine/*.tcl text eol=lf
+LICENSES/*.txt text eol=lf

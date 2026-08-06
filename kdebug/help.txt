@@ -1,0 +1,334 @@
+kdebug - unified kdebug request interface
+=========================================
+
+Usage
+-----
+  kdebug -h
+  kdebug -help
+      Print this human-readable help and exit with status 0.
+
+  kdebug -
+      Read one JSON request from stdin and print one KOUT text response.
+
+  kdebug request.json
+      Read one JSON request file and print one KOUT text response.
+
+  kdebug --json -
+      Read one JSON request and print the original JSON response.
+
+  kdebug actions [--json]
+      List available actions without writing a JSON request.
+
+  kdebug schema --action <name> [--kind request|response] [--json]
+      Print the request or response schema for one action.
+
+  kdebug value-at --fsdb <waves.fsdb>|--session <id> --signal <sig> --time <time> [--format hex]
+      Query one signal value from an FSDB or existing session.
+
+  kdebug value-batch --fsdb <waves.fsdb>|--session <id> --signal <sig> [--signal <sig> ...] --time <time>
+      Query several signals at the same time.
+
+  kdebug trace-driver --daidir <simv.daidir|kdb.elab++>|--session <id> --signal <sig> [--include-source]
+      Query the static RTL driver using a daidir or native elab++ database.
+
+  kdebug active-driver --daidir <simv.daidir|kdb.elab++> --fsdb <waves.fsdb> --signal <sig> --time <time>
+      Join waveform time with design causality and locate the active driver.
+
+  kdebug session-open --name <id> [--daidir simv.daidir|kdb.elab++] [--fsdb waves.fsdb]
+      Open a reusable debug session. Use session-list/session-close to inspect or close it.
+
+  kdebug action <action> [--session id] [--daidir path] [--fsdb path] [--arg key=value]
+      Generic parameter-style shortcut for actions that do not yet have a named subcommand.
+
+Request / output contract
+-------------------------
+  Human users should prefer the parameter-style shortcuts above. The CLI
+  translates those flags into the same request object used by the backend.
+
+  JSON is still the stable machine protocol for scripts, MCP, stdio-loop,
+  schema tests and reproducible bug reports:
+
+    api_version / action / target / args / limits / output
+
+  Default output is KOUT structured text:
+
+    @kdebug.<action>.v1
+    summary:
+      key: value
+
+  Use --json or output.format=json for machine parsing, schema tests,
+  scripts, and full field access.
+
+  Machine-readable help remains available through JSON actions:
+
+    {"api_version":"kdebug.v1","action":"actions"}
+    {"api_version":"kdebug.v1","action":"schema","args":{"action":"signal.statistics","kind":"request"}}
+
+Shell setup
+-----------
+  Use <kverif-root> for your local repository root. Do not hard-code a
+  personal machine path in shared docs or scripts.
+
+  Bash (~/.bashrc):
+
+    export KVERIF_HOME=<kverif-root>
+    export PATH="$KVERIF_HOME/tools:$PATH"
+
+  Zsh (~/.zshrc):
+
+    export KVERIF_HOME=<kverif-root>
+    export PATH="$KVERIF_HOME/tools:$PATH"
+
+  Tcsh (~/.tcshrc):
+
+    setenv KVERIF_HOME <kverif-root>
+    setenv PATH "$KVERIF_HOME/tools:$PATH"
+
+Request envelope
+----------------
+  Minimal request:
+
+    {
+      "api_version": "kdebug.v1",
+      "action": "actions"
+    }
+
+  Typical request:
+
+    {
+      "api_version": "kdebug.v1",
+      "action": "trace.driver",
+      "target": {
+        "daidir": "simv.daidir",
+        "fsdb": "waves.fsdb"
+      },
+      "args": {},
+      "limits": {},
+      "output": {
+        "verbosity": "compact",
+        "pretty": false
+      }
+    }
+
+Target modes
+------------
+  target.daidir
+      Design-side facts. Use for driver/load/query, dependency graph,
+      source evidence, expression normalization, FSM/counter/sequential facts.
+
+  target.fsdb
+      Waveform-side facts. Use for scopes, values, events, APB/AXI,
+      verification windows, signal changes, handshake and anomaly checks.
+
+  target.daidir + target.fsdb
+      Combined/debug join mode. Use waveform time and design causality together,
+      especially trace.active_driver.
+
+  target.session_id
+      Required for all stateful debug queries after session.open.
+
+Session transport
+-----------------
+  Default transport is UDS. Keep the default for normal same-host debug.
+  Set KDEBUG_TRANSPORT=uds|tcp|file to choose the default transport for newly
+  opened sessions; explicit args.transport or target.transport takes priority.
+
+  Use TCP only when UDS sockets are not reachable, for example container or
+  namespace boundaries, inaccessible socket paths, or explicitly requested
+  remote/cross-process daemon access.
+
+  Local TCP session.open args:
+      Set args.transport=tcp with bind_host and port.
+
+    {
+      "name": "wave_tcp",
+      "transport": "tcp",
+      "bind_host": "127.0.0.1",
+      "port": 0
+    }
+
+  port:0 or omitted lets the daemon choose an available port. bind_host is the
+  daemon listen address; host is the client-reachable endpoint address for
+  remote/container cases. Do not bind to public addresses unless explicitly
+  needed and authorized.
+
+  Use file transport when the client cannot connect to a compute-node TCP port
+  but both sides can see the same ~/.kdebug session directory:
+
+    {
+      "name": "wave_file",
+      "transport": "file"
+    }
+
+  file transport stores a v2 state directory under
+  ~/.kdebug/{design,waveform}/sessions/<session_id>/transport/:
+
+      requests/    client-published pending requests
+      claims/      worker-claimed running requests
+      responses/   unread responses
+      done/        archived request/claim/response history
+      failed/      client_timeout / expired / stale_claim / invalid_request
+      tmp/         atomic write temp files
+      heartbeat/   worker liveness files
+
+  Request, response and heartbeat files are written via tmp file plus atomic
+  publish so readers do not consume half-written files. Old locks/ directories
+  from earlier sessions can be ignored.
+  File request timeout defaults to 300s and can be changed with
+  KDEBUG_FILE_TRANSPORT_TIMEOUT_MS. Ping/quit timeout defaults to 2s and can be
+  changed with KDEBUG_FILE_TRANSPORT_PING_TIMEOUT_MS. History is kept by
+  default; set KDEBUG_FILE_KEEP_HISTORY=0 to discard successful response
+  archives.
+
+Common actions
+--------------
+  Catalog:
+      actions, schema
+
+  Session:
+      session.open, session.list, session.doctor,
+      session.kill, session.close, session.gc
+
+  Design:
+      trace.driver, trace.load, trace.query, trace.graph, trace.path,
+      trace.explain, source.context, expr.normalize, fsm.explain,
+      counter.explain, sequential.update
+
+  Waveform:
+      scope.list, rc.generate, value.at, value.batch_at, list.value_at,
+      event.find, event.export, verify.conditions, expr.eval_at,
+      window.verify, signal.changes, signal.statistics, counter.statistics, signal.trend,
+      signal.stability, handshake.inspect, detect_anomaly
+
+  Protocol:
+      apb.query, axi.query, axi.analysis
+
+  Combined:
+      trace.active_driver
+
+Action choice guidance
+----------------------
+  active/high cycles:
+      Use signal.statistics. With args.clock it returns clock-sampled
+      high_cycles/low_cycles/activity; without args.clock it returns raw
+      value-change statistics and sampling_mode explains that behavior.
+
+  counter min/max/average:
+      Use counter.statistics with clock, time_range, vld and cnt. cnt may be a
+      single signal or a restricted {hi,lo} concat up to 64 bits.
+
+  transition timeline:
+      Use signal.changes. Compact output omits data.changes rows by default;
+      set include_rows:true or include_all_changes:true when rows are needed.
+      Use mode:"head" or mode:"tail" plus limit to inspect either end.
+
+  window holds 0/1:
+      Use window.verify, or signal.statistics for sampled activity. Do not use
+      signal.changes row counts as cycle counts.
+
+  first/last occurrence:
+      Use event.find, or signal.changes with mode:"head"/"tail".
+
+Output control
+--------------
+  output.verbosity:
+      compact  Default. Keep only information needed for the next AI decision.
+      full     Preserve larger user-facing payloads for compatibility.
+      debug    Include process/debug-oriented details.
+
+  Common args:
+      max_items, max_examples
+
+  Common limits:
+      limits.max_rows, limits.max_events, limits.max_samples,
+      limits.max_depth, limits.max_paths
+
+  Design include switches:
+      include_source, include_ast, include_candidates, include_trace,
+      include_expanded_queries, include_raw_edges, include_graph,
+      include_debug
+
+  Waveform include switches:
+      include_raw, include_signal_meta, include_rows, include_samples,
+      include_all_changes, include_transactions, include_beats,
+      include_accesses, include_debug
+
+Examples
+--------
+  List actions:
+
+    kdebug actions
+    kdebug actions --json
+
+  Query a design driver:
+
+    kdebug trace-driver --daidir simv.daidir --signal top.u.ready --include-source
+
+  Open a session, then query it explicitly:
+
+    kdebug session-open --name case_a --daidir simv.daidir --fsdb waves.fsdb
+
+    kdebug value-at --session case_a --signal top.clk --time 10ns
+
+  Join waveform time to active design driver:
+
+    kdebug active-driver --session case_a --signal top.u.ready --time 100ns
+
+  Generic action shortcut:
+
+    kdebug action signal.changes --fsdb waves.fsdb --arg signal=top.clk --arg begin=0ns --arg end=1us --limit max_rows=20
+
+Logs and troubleshooting
+------------------------
+  kdebug logs are silent and best-effort. They do not print to stdout/stderr
+  and do not change JSON responses.
+
+  Public action logs:
+      ~/.kdebug/sessions/<session_prefix>_<hash>/logs/actions.ndjson
+      ~/.kdebug/sessions/<session_prefix>_<hash>/logs/stdio.ndjson
+
+  Engine logs:
+      ~/.kdebug/engine/sessions/<hashed-session>/logs/lifecycle.ndjson
+      ~/.kdebug/engine/sessions/<hashed-session>/logs/transport.ndjson
+      ~/.kdebug/engine/sessions/<hashed-session>/logs/crash_marker.ndjson
+      log_health.ndjson in each logs/ directory
+
+  MCP direct/LSF logs:
+      ~/.kverif/mcp/sessions/<alias>/session.ndjson
+      ~/.kverif/mcp/sessions/<alias>/stdio.ndjson
+      ~/.kverif/mcp/sessions/<alias>/lsf.ndjson
+
+  SDK-free loop wrapper logs:
+      ~/.kverif/loop-wrapper/logs/uds.ndjson
+      ~/.kverif/loop-wrapper/sessions/<alias>/session.ndjson
+      ~/.kverif/loop-wrapper/sessions/<alias>/stdio.ndjson
+      ~/.kverif/loop-wrapper/sessions/<alias>/lsf.ndjson
+
+  Helpers:
+      kdebug log doctor --session <id> --json
+      kdebug log tail --session <id> --lines 40
+      kdebug log bundle --session <id> --out debug_bundle.tgz
+      kdebug log bundle --session <id> --out debug_bundle.redacted.tgz --redact
+
+  Troubleshooting order:
+      1. Check public actions.ndjson for action, routing, elapsed_ms and error.
+      2. Check stdio.ndjson for ready, invalid JSON, validate failure and EOF.
+      3. Check lifecycle.ndjson for startup, NPI init, design load, FSDB open,
+         daemon ready, timeout, refresh and restart events.
+      4. Check transport.ndjson for connect, ping, write, read and timeout.
+      5. Check MCP session/stdio/lsf logs for ready timeout, stdout pollution,
+         job id, stderr_tail and cleanup.
+      6. Check loop-wrapper uds/session/stdio/lsf logs for SDK-free wrapper
+         JSONL request parsing, socket handling, LSF job id and cleanup.
+
+Docs
+----
+  README:
+      kdebug/README.md
+
+  Agent skill:
+      skill/SKILL.md
+      skill/references/kdebug/overview.md
+
+  JSON API reference:
+      skill/references/kdebug/json-api.md

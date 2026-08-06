@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.response.v1",
+  "title": "kdebug response envelope",
+  "type": "object",
+  "required": ["api_version", "ok", "action"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "ok": {"type": "boolean"},
+    "action": {"type": "string"},
+    "summary": {"type": "object"},
+    "data": {},
+    "findings": {"type": "array"},
+    "warnings": {"type": "array"},
+    "error": {},
+    "meta": {"type": "object"}
+  },
+  "additionalProperties": true
+}

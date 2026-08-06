@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.warning.v1",
+  "title": "kdebug warning",
+  "type": "object",
+  "properties": {
+    "code": {"type": "string"},
+    "message": {"type": "string"},
+    "details": {"type": "object"}
+  },
+  "additionalProperties": true
+}

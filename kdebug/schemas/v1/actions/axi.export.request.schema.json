@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.axi.export.request.v1",
+  "title": "axi.export request",
+  "type": "object",
+  "required": ["api_version", "action", "target", "args"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string", "enum": ["axi.export"]},
+    "target": {"type": "object"},
+    "args": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string"},
+        "time_range": {"type": "object"},
+        "start": {"type": "string"},
+        "end": {"type": "string"},
+        "begin": {"type": "string"},
+        "from": {"type": "string"},
+        "to": {"type": "string"},
+        "format": {"type": "string", "enum": ["tsv", "csv"]},
+        "output_prefix": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "limits": {"type": "object"},
+    "output": {"type": "object"}
+  },
+  "additionalProperties": true
+}

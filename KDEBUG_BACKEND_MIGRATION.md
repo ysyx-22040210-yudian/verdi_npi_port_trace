@@ -23,18 +23,32 @@ npi_trace.sh / trace_and_filter.sh / annotate_trace_xlsx.py
 
 1. 命令行 `--kdebug-bin` / shell 兼容参数 `--kdebug-bin` 或 `-kdebug-bin`。
 2. 环境变量 `KDEBUG_BIN`。
-3. `$KVERIF_HOME/tools/kdebug`。
-4. 本工具目录下的 `tools/kdebug`。
+3. 本工具目录下的内置 `tools/kdebug`。
+4. `$KVERIF_HOME/tools/kdebug`。
 5. `PATH` 中的 `kdebug`。
 
-推荐在 VM 和 CI 中固定版本：
+默认不需要安装 KVerif 或设置环境变量。仓库内置 bundle 的布局是：
 
-```bash
-export KDEBUG_BIN=/home/host/kverif/tools/kdebug
-"$KDEBUG_BIN" --json actions
+```text
+tools/kdebug
+kdebug/kdebug
+kdebug/help.txt
+kdebug/BUNDLE_MANIFEST.json
+kdebug/libexec/kdebug-engine
+kdebug/libexec/tcl_engine/*
+kdebug/schemas/v1/*
+LICENSES/*
 ```
 
-显式配置的路径不可执行时返回 `KDEBUG_NOT_FOUND`，不会继续搜索并意外使用另一个版本。
+`kdebug_backend.py` 在执行前校验 manifest 格式、ELF 和 runtime 文件的 SHA-256/大小、schema 数量及三个入口的 POSIX 执行位。bundle 只要存在但不完整、哈希不匹配或不可执行，就返回 `KDEBUG_BUNDLE_INCOMPLETE`、`KDEBUG_BUNDLE_INVALID` 或 `KDEBUG_BUNDLE_NOT_EXECUTABLE`，不会回退到主机上的旧版本。显式配置的路径不可执行时返回 `KDEBUG_NOT_FOUND`，同样不会继续搜索。
+
+`--kdebug-bin` 和 `KDEBUG_BIN` 保留为有意覆盖机制。例如开发者验证另一个构建时可运行：
+
+```bash
+KDEBUG_BIN=/home/host/kverif/tools/kdebug ./npi_trace.sh ...
+```
+
+随附 ELF 的边界是 Linux x86-64、glibc 2.14+、GLIBCXX 3.4.19+、CXXABI 1.3.2+。Raw Trace/CSV 入口及 engine 需要 Bash 和 Python 3.6+；XLSX/GUI 仍需要 Python 3.8+。ARM64、Alpine/musl、Windows 和 macOS 不能直接运行该 ELF。所有真实设计 action 仍要求目标机有 Verdi/NPI、有效许可证以及兼容的 KDB；bundle 只消除了额外安装 kdebug/KVerif 的要求。准确来源提交、Build ID、哈希和许可证见 `kdebug/BUNDLE_MANIFEST.json`。
 
 ## 3. 设计库路径透传
 
@@ -176,9 +190,10 @@ module,inst_full_name,param_name,param_value,param_kind,param_info
 
 迁移版本至少应验证：
 
-1. `KDEBUG_BIN` 指向预期版本，`--json actions` 包含所需 action。
-2. `kdb.elab++` 原样进入 `target.daidir` 并走 `debImport -elab`；`simv.daidir` 走 `-dbdir`，两者查询结果等价。
-3. `port.trace_batch` 一次返回 full/boundary surface；缺失端口记录 `PORT_NOT_FOUND` 且不生成伪 `NO_DRIVER`。
-4. 精确 bit 常量不会同时发布 `1'b0` 和 `1'b1`，日志包含 `evidence_source` 和 `const_full_path`。
-5. kdebug 非零退出、非法 JSON、`ok=false`、truncated 和 timeout 均不发布半截 CSV。
-6. full、boundary、parameter CSV 表头及 XLSX 消费流程与迁移前兼容。
+1. 从干净 clone、任意工作目录并清空 `KDEBUG_BIN/KVERIF_HOME/PYTHONPATH` 后，内置 `tools/kdebug --json actions` 和 `schema` 可运行，manifest 哈希、schema tree 和执行位检查通过。
+2. 内置 engine 能完成 `session.open` / `session.close`，daemon 不依赖 `kdebug_engine.py` 偶然具有执行位。
+3. `kdb.elab++` 原样进入 `target.daidir` 并走 `debImport -elab`；`simv.daidir` 走 `-dbdir`，两者查询结果等价。
+4. `port.trace_batch` 一次返回 full/boundary surface；缺失端口记录 `PORT_NOT_FOUND` 且不生成伪 `NO_DRIVER`。
+5. 精确 bit 常量不会同时发布 `1'b0` 和 `1'b1`，日志包含 `evidence_source` 和 `const_full_path`。
+6. kdebug 非零退出、非法 JSON、`ok=false`、truncated 和 timeout 均不发布半截 CSV。
+7. full、boundary、parameter CSV 表头及 XLSX 消费流程与迁移前兼容。

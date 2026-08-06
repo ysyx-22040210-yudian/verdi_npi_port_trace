@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.port.trace_batch.request.v1",
+  "title": "port.trace_batch request",
+  "type": "object",
+  "required": ["api_version", "action", "target", "args"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string", "enum": ["port.trace_batch"]},
+    "target": {
+      "type": "object",
+      "required": ["daidir"],
+      "properties": {
+        "daidir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "VCS simv.daidir or kdb.elab++ directory"
+        }
+      },
+      "additionalProperties": true
+    },
+    "args": {
+      "type": "object",
+      "required": ["module"],
+      "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "ports": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_$]*(\\[[0-9]+(:[0-9]+)?\\])?$"
+          }
+        },
+        "source": {"type": "string", "minLength": 1},
+        "stop_instances": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "options": {
+          "type": "object",
+          "properties": {
+            "source_fallback": {"type": "boolean", "default": true},
+            "include_full": {"type": "boolean", "default": true},
+            "include_boundary": {"type": "boolean", "default": true},
+            "debug": {"type": "boolean", "default": false}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "timeout_ms": {"type": "integer", "minimum": 1},
+        "max_parent_depth": {"type": "integer", "minimum": 0},
+        "max_assign_depth": {"type": "integer", "minimum": 0},
+        "max_expr_depth": {"type": "integer", "minimum": 0},
+        "max_nodes": {"type": "integer", "minimum": 0},
+        "max_edges": {"type": "integer", "minimum": 0},
+        "max_api_results": {"type": "integer", "minimum": 0},
+        "max_rows": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "output": {"type": "object"}
+  },
+  "additionalProperties": true
+}

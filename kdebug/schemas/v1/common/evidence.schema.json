@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.evidence.v1",
+  "title": "kdebug evidence",
+  "type": "object",
+  "properties": {
+    "file": {"type": "string"},
+    "line": {"type": "integer"},
+    "module": {"type": "string"},
+    "signal": {"type": "string"},
+    "time": {"type": "string"},
+    "confidence": {"type": "string"}
+  },
+  "additionalProperties": true
+}

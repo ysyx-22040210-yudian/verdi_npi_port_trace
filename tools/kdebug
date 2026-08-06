@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher="${BASH_SOURCE[0]}"
+while [[ -L "$launcher" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher")" && pwd)"
+  launcher="$(readlink "$launcher")"
+  [[ "$launcher" == /* ]] || launcher="$launcher_dir/$launcher"
+done
+script_dir="$(cd -P "$(dirname "$launcher")" && pwd)"
+root="$(cd "$script_dir/.." && pwd)"
+export KVERIF_HOME="$root"
+
+fail() {
+  echo "ERROR: bundled kdebug: $*" >&2
+  exit 2
+}
+
+case "$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)" in
+  Linux/x86_64) ;;
+  *) fail "this release requires Linux x86_64 (glibc); see kdebug/BUNDLE_MANIFEST.json" ;;
+esac
+
+required_files=(
+  "$root/kdebug/kdebug"
+  "$root/kdebug/help.txt"
+  "$root/kdebug/BUNDLE_MANIFEST.json"
+  "$root/kdebug/libexec/kdebug-engine"
+  "$root/kdebug/libexec/tcl_engine/kdebug_engine.py"
+  "$root/kdebug/libexec/tcl_engine/kdebug_npi.tcl"
+  "$root/kdebug/libexec/tcl_engine/kdebug_port_trace.tcl"
+  "$root/kdebug/schemas/v1/actions/port.trace_batch.request.schema.json"
+  "$root/kdebug/schemas/v1/actions/port.trace_batch.response.schema.json"
+  "$root/LICENSES/kdebug-MIT.txt"
+  "$root/LICENSES/nlohmann-json-MIT.txt"
+)
+for path in "${required_files[@]}"; do
+  [[ -f "$path" ]] || fail "runtime file is missing: $path"
+done
+[[ -x "$root/kdebug/kdebug" ]] || fail "frontend is not executable: $root/kdebug/kdebug (run chmod +x)"
+[[ -x "$root/kdebug/libexec/kdebug-engine" ]] || fail "engine launcher is not executable: $root/kdebug/libexec/kdebug-engine (run chmod +x)"
+
+python_bin="${PYTHON:-python3}"
+command -v "$python_bin" >/dev/null 2>&1 || fail "Python 3 is required; set PYTHON to its executable path"
+"$python_bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' \
+  >/dev/null 2>&1 || fail "Python 3.6 or newer is required; set PYTHON to a compatible executable"
+
+configure_verdi_runtime() {
+  local verdi_bin="" candidate="" npi_tcl="" npi_lib="" resolved=""
+
+  if [[ -z "${VERDI_HOME:-}" ]]; then
+    verdi_bin="$(command -v verdi 2>/dev/null || true)"
+    if [[ -n "$verdi_bin" ]]; then
+      if command -v readlink >/dev/null 2>&1; then
+        resolved="$(readlink -f "$verdi_bin" 2>/dev/null || true)"
+        [[ -z "$resolved" ]] || verdi_bin="$resolved"
+      fi
+      candidate="$(cd "$(dirname "$verdi_bin")/.." 2>/dev/null && pwd -P || true)"
+      if [[ -f "$candidate/share/NPI/L1/TCL/npi_L1.tcl" ]]; then
+        export VERDI_HOME="$candidate"
+      fi
+    fi
+  fi
+
+  if [[ -n "${VERDI_HOME:-}" ]]; then
+    npi_tcl="$VERDI_HOME/share/NPI/L1/TCL"
+    if [[ -z "${NPIL1_PATH:-}" && -f "$npi_tcl/npi_L1.tcl" ]]; then
+      export NPIL1_PATH="$npi_tcl"
+    fi
+
+    npi_lib="$VERDI_HOME/share/NPI/lib/LINUX64"
+    if [[ ! -d "$npi_lib" ]]; then
+      npi_lib="$VERDI_HOME/share/NPI/lib/linux64"
+    fi
+    if [[ -d "$npi_lib" ]]; then
+      case ":${LD_LIBRARY_PATH:-}:" in
+        *":$npi_lib:"*) ;;
+        *) export LD_LIBRARY_PATH="$npi_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+      esac
+    fi
+  fi
+}
+
+if [[ "$#" -eq 1 && ( "$1" == "-h" || "$1" == "-help" ) ]]; then
+  cat "$root/kdebug/help.txt"
+  exit 0
+fi
+
+configure_verdi_runtime
+exec "$root/kdebug/kdebug" "$@"

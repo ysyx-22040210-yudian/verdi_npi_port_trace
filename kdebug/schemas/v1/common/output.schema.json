@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.output.v1",
+  "title": "kdebug output options",
+  "type": "object",
+  "properties": {
+    "verbosity": {"type": "string", "enum": ["compact", "full", "debug"]},
+    "pretty": {"type": "boolean"},
+    "include_suggestions": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

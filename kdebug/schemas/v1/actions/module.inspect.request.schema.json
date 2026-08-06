@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.module.inspect.request.v1",
+  "title": "module.inspect request",
+  "type": "object",
+  "required": ["api_version", "action", "target", "args"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string", "enum": ["module.inspect"]},
+    "target": {"type": "object", "additionalProperties": true},
+    "args": {
+      "type": "object",
+      "required": ["module"],
+      "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "continuous_assignments", "functions", "generate_scopes", "instances",
+              "instances_in_generate", "io", "language_interfaces", "nets", "parameters",
+              "ports", "primitives", "always_processes", "initial_processes", "tasks", "variables"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {"max_rows": {"type": "integer", "minimum": 1}},
+      "additionalProperties": true
+    },
+    "output": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

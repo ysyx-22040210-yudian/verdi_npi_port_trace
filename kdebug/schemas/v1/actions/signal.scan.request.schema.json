@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.signal.scan.request.v1",
+  "title": "signal.scan request",
+  "type": "object",
+  "required": [
+    "api_version",
+    "action",
+    "target",
+    "args"
+  ],
+  "properties": {
+    "api_version": {
+      "type": "string",
+      "enum": [
+        "kdebug.v1"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "signal.scan"
+      ]
+    },
+    "target": {
+      "type": "object"
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "signal": {
+          "type": "string"
+        },
+        "begin": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        },
+        "stop": {
+          "type": "string"
+        },
+        "time_range": {
+          "type": "object"
+        },
+        "format": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "signal"
+      ]
+    },
+    "limits": {
+      "type": "object"
+    },
+    "output": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.common.target.v1",
+  "title": "kdebug target",
+  "type": "object",
+  "properties": {
+    "daidir": {
+      "type": "string",
+      "description": "Design database path: a VCS simv.daidir directory or a kdb.elab++ directory imported with debImport -elab for design queries; vcs.summary uses the enclosing simv.daidir",
+      "examples": ["simv.daidir", "simv.daidir/kdb.elab++"]
+    },
+    "fsdb": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "design",
+        "waveform",
+        "combined"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

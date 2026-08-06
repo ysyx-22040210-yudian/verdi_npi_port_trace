@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kdebug.request.v1",
+  "title": "kdebug request envelope",
+  "type": "object",
+  "required": ["api_version", "action"],
+  "properties": {
+    "api_version": {"type": "string", "enum": ["kdebug.v1"]},
+    "request_id": {"type": "string"},
+    "action": {"type": "string"},
+    "target": {"type": "object"},
+    "args": {"type": "object"},
+    "limits": {"type": "object"},
+    "output": {"type": "object"}
+  },
+  "additionalProperties": true
+}

@@ -25,6 +25,11 @@ log_step() {
     echo "[trace_and_filter] $*" >&2
 }
 
+bound_runtime_path() {
+    "$PYTHON_BIN" "$SCRIPT_DIR/runtime_paths.py" \
+        --path="$1" --suffix="$2" --identity="$3"
+}
+
 setup_log_file() {
     if [ -z "$LOG_FILE" ]; then
         return
@@ -158,17 +163,23 @@ fi
 if [ -z "$OUTPUT" ]; then
     OUTPUT="${MODULE}_filtered.csv"
 fi
+REQUESTED_OUTPUT="$OUTPUT"
+case "$OUTPUT" in
+    *.csv) OUTPUT_SUFFIX=".csv" ;;
+    *) OUTPUT_SUFFIX="" ;;
+esac
+OUTPUT="$(bound_runtime_path "$OUTPUT" "$OUTPUT_SUFFIX" "$REQUESTED_OUTPUT")" || exit $?
 
 # Full trace output file (in current directory)
-FULL_TRACE="${MODULE}_full.csv"
-MODULE_TRACE="${MODULE}_module_connections.csv"
+FULL_TRACE="$(bound_runtime_path "${MODULE}_full.csv" "_full.csv" "$MODULE")" || exit $?
+MODULE_TRACE="$(bound_runtime_path "${MODULE}_module_connections.csv" "_module_connections.csv" "$MODULE")" || exit $?
 KEYWORDS_SAFE="$(printf '%s' "$KEYWORDS" | sed 's/[^A-Za-z0-9_.-][^A-Za-z0-9_.-]*/_/g; s/^[._]*//; s/[._]*$//')"
 if [ -z "$KEYWORDS_SAFE" ]; then
     KEYWORDS_SAFE="filter_modules"
 fi
-INSTANCE_LIST="${MODULE}_${KEYWORDS_SAFE}_instances.txt"
-BOUNDARY_FILTERED="${OUTPUT%.csv}_boundary.csv"
-FULL_FILTERED="${OUTPUT%.csv}_full_owner.csv"
+INSTANCE_LIST="$(bound_runtime_path "${MODULE}_${KEYWORDS_SAFE}_instances.txt" "_instances.txt" "${MODULE}:${KEYWORDS}")" || exit $?
+BOUNDARY_FILTERED="$(bound_runtime_path "${OUTPUT%.csv}_boundary.csv" "_boundary.csv" "${REQUESTED_OUTPUT}:boundary")" || exit $?
+FULL_FILTERED="$(bound_runtime_path "${OUTPUT%.csv}_full_owner.csv" "_full_owner.csv" "${REQUESTED_OUTPUT}:full_owner")" || exit $?
 
 log_step "script_dir=$SCRIPT_DIR"
 log_step "target_module=$MODULE"
@@ -221,7 +232,7 @@ log_step "command: ${FIND_CMD[*]}"
 
 if [ ! -s "$INSTANCE_LIST" ]; then
     echo "[ERROR] no instances found for filter modules: $KEYWORDS" >&2
-    rm -f "$INSTANCE_LIST"
+    rm -f -- "$INSTANCE_LIST"
     exit 1
 fi
 
@@ -259,7 +270,7 @@ log_step "command: ${TRACE_CMD[*]} > $FULL_TRACE"
 
 if [ ! -s "$FULL_TRACE" ]; then
     echo "[ERROR] Trace failed or produced no output" >&2
-    rm -f "$FULL_TRACE"
+    rm -f -- "$FULL_TRACE"
     exit 1
 fi
 

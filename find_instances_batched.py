@@ -3,7 +3,6 @@
 
 import argparse
 import os
-import re
 import signal
 import stat
 import subprocess
@@ -12,6 +11,8 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from runtime_paths import bounded_path, fixed_temp_prefix, sanitize_component
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -41,8 +42,30 @@ def split_csv_arg(text: str) -> List[str]:
 
 
 def safe_name(text: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
-    return text.strip("._") or "unnamed"
+    return sanitize_component(text)
+
+
+def bounded_generated_path(
+    requested: Path,
+    suffix: str,
+    identity: str,
+) -> Path:
+    bounded = bounded_path(requested, suffix=suffix, identity=identity)
+    if bounded != requested:
+        log_step(
+            f"filename_shortened original={requested.name} bounded={bounded.name} "
+            f"identity={identity}"
+        )
+    return bounded
+
+
+def error_output_path(path: Path) -> Path:
+    requested = path.with_name(f"{path.stem}_errors.log")
+    return bounded_generated_path(
+        requested,
+        suffix="_errors.log",
+        identity=f"{path.name}:errors",
+    )
 
 
 def read_instances(path: Path) -> List[str]:
@@ -80,7 +103,7 @@ def atomic_write_lines(
             output_mode = 0o666 & ~current_umask
     fd, temp_name = tempfile.mkstemp(
         dir=str(path.parent),
-        prefix=f".{path.name}.",
+        prefix=fixed_temp_prefix("instances"),
         suffix=".tmp",
     )
     temp_path = Path(temp_name)
@@ -102,7 +125,7 @@ def atomic_write_lines(
 
 
 def remove_stale_result_files(path: Path) -> None:
-    error_path = path.with_name(f"{path.stem}_errors.log")
+    error_path = error_output_path(path)
     for stale_path in (path, error_path):
         try:
             stale_path.unlink()
@@ -123,7 +146,7 @@ def write_errors(
     errors: Sequence[str],
     output_mode: Optional[int] = None,
 ) -> None:
-    error_path = path.with_name(f"{path.stem}_errors.log")
+    error_path = error_output_path(path)
     if not errors:
         try:
             error_path.unlink()
@@ -322,8 +345,13 @@ def split_batches(items: Sequence[str], batch_size: int) -> Iterable[List[str]]:
 
 
 def run_batch_with_retry(args, modules: Sequence[str], batch_id: str) -> Tuple[List[str], List[str]]:
-    batch_file = args.output.with_name(
+    requested_batch_file = args.output.with_name(
         f"{args.output.stem}__batch_{safe_name(batch_id)}{args.output.suffix}"
+    )
+    batch_file = bounded_generated_path(
+        requested_batch_file,
+        suffix=args.output.suffix,
+        identity=f"{args.output.name}:batch:{batch_id}",
     )
     try:
         instances = run_kdebug_find(args, modules, batch_id, batch_file)
@@ -413,10 +441,22 @@ def parse_args():
         parser.error(f"KDB not found: {lib}")
     args.lib = lib
     args.modules = modules
+    requested_output_text = args.output
     args.output = Path(args.output).expanduser()
     if not args.output.is_absolute():
         args.output = RUN_CWD / args.output
     args.output = args.output.resolve()
+    bounded_output = bounded_path(
+        args.output,
+        suffix=args.output.suffix,
+        identity=requested_output_text,
+    )
+    if bounded_output != args.output:
+        log_step(
+            f"filename_shortened original={args.output.name} "
+            f"bounded={bounded_output.name} identity={requested_output_text}"
+        )
+    args.output = bounded_output
     return args
 
 
@@ -432,7 +472,7 @@ def main() -> int:
     log_step(f"kdebug_bin={args.kdebug_bin or '<auto>'}")
     log_step(f"output={args.output}")
     output_mode = existing_file_mode(args.output)
-    error_output = args.output.with_name(f"{args.output.stem}_errors.log")
+    error_output = error_output_path(args.output)
     error_output_mode = existing_file_mode(error_output)
     remove_stale_result_files(args.output)
 

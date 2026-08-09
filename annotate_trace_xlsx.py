@@ -45,6 +45,13 @@ from find_instances_batched import (
     terminate_timed_out_process,
     timeout_with_cleanup_grace,
 )
+from runtime_paths import (
+    bounded_derived_path,
+    bounded_path,
+    derived_glob_prefixes,
+    fixed_temp_prefix,
+    sanitize_component,
+)
 
 try:
     import openpyxl
@@ -108,7 +115,7 @@ def atomic_save_workbook(
             output_mode = current_umask_file_mode()
     fd, temp_name = tempfile.mkstemp(
         dir=str(output.parent),
-        prefix=f".{output.stem}.",
+        prefix=fixed_temp_prefix("xlsx"),
         suffix=f".tmp{output.suffix}",
     )
     os.close(fd)
@@ -350,8 +357,7 @@ def split_csv_arg(text: str) -> List[str]:
 
 
 def safe_name(text: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
-    return text.strip("._") or "unnamed"
+    return sanitize_component(text)
 
 
 def cell_text(value: object) -> str:
@@ -734,7 +740,21 @@ def instances_from_param_rows(module: str, rows: Sequence[ParamRow]) -> List[Ins
 
 
 def split_output_path(output: Path, subsystem: str) -> Path:
-    return output.with_name(f"{output.stem}__subsys_{safe_name(subsystem)}{output.suffix}")
+    requested = output.with_name(
+        f"{output.stem}__subsys_{safe_name(subsystem)}{output.suffix}"
+    )
+    bounded = bounded_derived_path(
+        output,
+        "__subsys_",
+        subsystem,
+        readable_identity=safe_name(subsystem),
+    )
+    if bounded != requested:
+        log_step(
+            f"filename_shortened original={requested.name} bounded={bounded.name} "
+            f"identity={subsystem}"
+        )
+    return bounded
 
 
 def remove_intermediate_file(path: Path, reason: str) -> None:
@@ -750,11 +770,11 @@ def cleanup_subsystem_outputs(template: Path, output: Path) -> None:
     protected = template.resolve()
     candidates = [output]
     if output.parent.is_dir():
-        prefix = f"{output.stem}__subsys_"
+        prefixes = derived_glob_prefixes(output, "__subsys_")
         candidates.extend(
             candidate
             for candidate in output.parent.iterdir()
-            if candidate.name.startswith(prefix)
+            if candidate.name.startswith(prefixes)
             and candidate.name.endswith(output.suffix)
         )
 
@@ -773,11 +793,11 @@ def cleanup_subsystem_outputs(template: Path, output: Path) -> None:
 def collect_existing_output_modes(output: Path) -> Dict[Path, int]:
     candidates = [output]
     if output.parent.is_dir():
-        prefix = f"{output.stem}__subsys_"
+        prefixes = derived_glob_prefixes(output, "__subsys_")
         candidates.extend(
             candidate
             for candidate in output.parent.iterdir()
-            if candidate.name.startswith(prefix)
+            if candidate.name.startswith(prefixes)
             and candidate.name.endswith(output.suffix)
         )
 
@@ -1094,7 +1114,13 @@ def load_instances(path: Path) -> List[str]:
 
 
 def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
-    out_file = workdir / f"{safe_name(args.keywords)}_instances.txt"
+    requested = workdir / f"{safe_name(args.keywords)}_instances.txt"
+    out_file = bounded_path(requested, suffix="_instances.txt", identity=args.keywords)
+    if out_file != requested:
+        log_step(
+            f"filename_shortened original={requested.name} bounded={out_file.name} "
+            f"identity={args.keywords}"
+        )
     remove_intermediate_file(out_file, "stale keyword instance output")
     cmd: List[object] = [
         sys.executable,
@@ -1300,8 +1326,23 @@ def trace_module(
     workdir: Path,
     stop_instance_file: Optional[Path] = None,
 ) -> Tuple[Path, Path]:
-    full_csv = workdir / f"{safe_name(module)}_full.csv"
-    module_csv = workdir / f"{safe_name(module)}_module_connections.csv"
+    requested_full_csv = workdir / f"{safe_name(module)}_full.csv"
+    requested_module_csv = workdir / f"{safe_name(module)}_module_connections.csv"
+    full_csv = bounded_path(requested_full_csv, suffix="_full.csv", identity=module)
+    module_csv = bounded_path(
+        requested_module_csv,
+        suffix="_module_connections.csv",
+        identity=module,
+    )
+    for requested, bounded in (
+        (requested_full_csv, full_csv),
+        (requested_module_csv, module_csv),
+    ):
+        if bounded != requested:
+            log_step(
+                f"filename_shortened original={requested.name} bounded={bounded.name} "
+                f"identity={module}"
+            )
     remove_intermediate_file(full_csv, f"stale full trace output for {module}")
     remove_intermediate_file(module_csv, f"stale boundary trace output for {module}")
     cmd: List[object] = [
@@ -1708,7 +1749,17 @@ def main() -> None:
     args = parse_args()
     setup_log_file(args.log_file)
     template = Path(args.template).expanduser().resolve()
-    output = Path(args.output).expanduser().resolve()
+    requested_output = Path(args.output).expanduser().resolve()
+    output = bounded_path(
+        requested_output,
+        suffix=requested_output.suffix,
+        identity=args.output,
+    )
+    if output != requested_output:
+        log_step(
+            f"filename_shortened original={requested_output.name} "
+            f"bounded={output.name} identity={args.output}"
+        )
     existing_output_modes = collect_existing_output_modes(output)
     if args.subsystem_level:
         cleanup_subsystem_outputs(template, output)

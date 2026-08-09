@@ -24,6 +24,11 @@ log_step() {
     echo "[npi_trace] $*" >&2
 }
 
+bound_runtime_path() {
+    "$PYTHON_BIN" "$SCRIPT_DIR/runtime_paths.py" \
+        --path="$1" --suffix="$2" --identity="$3"
+}
+
 setup_log_file() {
     if [ -z "$LOG_FILE" ]; then
         return
@@ -167,22 +172,29 @@ if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
     exit 1
 fi
 
+if [ -z "$MODULE_OUT" ]; then
+    MODULE_OUT="${MODULE}_module_connections.csv"
+fi
+REQUESTED_MODULE_OUT="$MODULE_OUT"
+case "$MODULE_OUT" in
+    *.csv) MODULE_OUT_SUFFIX=".csv" ;;
+    *) MODULE_OUT_SUFFIX="" ;;
+esac
+MODULE_OUT="$(bound_runtime_path "$MODULE_OUT" "$MODULE_OUT_SUFFIX" "$REQUESTED_MODULE_OUT")" || exit $?
+
 TMPOUT="$(mktemp "$PWD/npi_trace_out.XXXXXX.csv")"
 VERDI_SESSION_FILE="$(mktemp "$PWD/npi_trace_session.XXXXXX")"
 VERDI_TIMEOUT_SENTINEL="$(mktemp "$PWD/npi_trace_timeout.XXXXXX")"
 KDEBUG_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/port-trace-kdebug.XXXXXX")"
 if [ -z "$KDEBUG_TMPDIR" ] || [ ! -d "$KDEBUG_TMPDIR" ]; then
     echo "[ERROR] could not create a private kdebug temp directory" >&2
-    rm -f "$TMPOUT" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+    rm -f -- "$TMPOUT" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
     exit 1
 fi
 export TMPDIR="$KDEBUG_TMPDIR"
 NPI_KDEBUG_RUN_TOKEN="port-trace:${KDEBUG_TMPDIR}:$$"
 export NPI_KDEBUG_RUN_TOKEN
 VERDI_RUNNER_PID=""
-if [ -z "$MODULE_OUT" ]; then
-    MODULE_OUT="${MODULE}_module_connections.csv"
-fi
 
 cleanup_kdebug_tmpdir() {
     if [ -z "$KDEBUG_TMPDIR" ] || [ ! -d "$KDEBUG_TMPDIR" ]; then
@@ -284,7 +296,7 @@ cleanup_kdebug_run_token() {
 }
 
 cleanup_failed_trace() {
-    rm -f "$TMPOUT" "$MODULE_OUT" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+    rm -f -- "$TMPOUT" "$MODULE_OUT" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
     cleanup_kdebug_tmpdir
 }
 
@@ -389,7 +401,7 @@ cleanup_verdi_session_on_exit() {
     if [ "$exit_rc" -ne 0 ]; then
         cleanup_failed_trace
     else
-        rm -f "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+        rm -f -- "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
         cleanup_kdebug_tmpdir
     fi
     exit "$exit_rc"
@@ -441,13 +453,13 @@ fi
 log_step "python_bin=$PYTHON_BIN"
 
 # Never leave a previous or partially-written module result looking current.
-rm -f "$MODULE_OUT"
+rm -f -- "$MODULE_OUT"
 
 BACKEND_CMD=("$PYTHON_BIN" "$BACKEND" trace
     --module "$MODULE"
     --lib "$LIB"
     --full-out "$TMPOUT"
-    --module-out "$MODULE_OUT"
+    "--module-out=$MODULE_OUT"
     --source-fallback "$CONST_SOURCE_FALLBACK"
     --max-parent-depth "$CONST_TRACE_DEPTH"
     --max-assign-depth "$ASSIGN_TRACE_DEPTH"
@@ -524,7 +536,7 @@ if [ "$VERDI_TIMEOUT_SEC" -gt 0 ]; then
 fi
 token_cleanup_rc=0
 cleanup_kdebug_run_token "$KDEBUG_TIMEOUT_CLEANUP_GRACE_SEC" || token_cleanup_rc=$?
-rm -f "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+rm -f -- "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
 
 verdi_failure_rc="$verdi_observed_rc"
 if [ "$session_cleanup_rc" -ne 0 ] && [ "$verdi_failure_rc" -eq 0 ]; then
@@ -572,5 +584,5 @@ if [ "$cat_rc" -ne 0 ]; then
     cleanup_failed_trace
     exit "$cat_rc"
 fi
-rm -f "$TMPOUT"
+rm -f -- "$TMPOUT"
 log_step "removed temp_full_trace=$TMPOUT"

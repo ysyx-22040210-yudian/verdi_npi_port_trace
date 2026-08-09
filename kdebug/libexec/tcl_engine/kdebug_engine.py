@@ -74,7 +74,7 @@ def session_dir(session_id):
 
 def socket_path(session_id):
     nominal = os.path.join(session_dir(session_id), "socket")
-    if len(nominal) < 104:
+    if len(os.fsencode(nominal)) < 104:
         return nominal
     return "/tmp/kdebug-%s-%s.sock" % (os.getuid(), fnv1a_hex(nominal))
 

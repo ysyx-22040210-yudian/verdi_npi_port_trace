@@ -9,7 +9,8 @@
     "subject": "Support native elab++ design databases"
   },
   "bundle_patches": [
-    "libexec/kdebug-engine pins KDEBUG_ENGINE_EXE to its executable launcher so session daemons do not depend on the Python file mode"
+    "libexec/kdebug-engine pins KDEBUG_ENGINE_EXE to its executable launcher so session daemons do not depend on the Python file mode",
+    "libexec/tcl_engine/kdebug_engine.py checks the AF_UNIX socket path by encoded bytes so multibyte HOME paths use the short fallback"
   ],
   "binary": {
     "path": "kdebug/kdebug",
@@ -47,8 +48,8 @@
     },
     {
       "path": "kdebug/libexec/tcl_engine/kdebug_engine.py",
-      "sha256": "9b268164d3e9cf4fe2f1eb4a18de3f3e04ce1087a14c72f7a0996c6461c7cefe",
-      "size_bytes": 143107,
+      "sha256": "b1d86b0e68f848151bc4eabf293d187a094615d993876a5fe7c1c5f610cb2615",
+      "size_bytes": 143120,
       "text_eol": "lf"
     },
     {

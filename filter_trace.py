@@ -16,7 +16,9 @@ given module's instantiated instances.
 import sys
 import csv
 import os
-import re
+from pathlib import Path
+
+from runtime_paths import bounded_derived_path, bounded_path, sanitize_component
 
 def log_step(message):
     print("[filter_trace] {}".format(message), file=sys.stderr)
@@ -193,9 +195,7 @@ def merge_csvs(output_file, input_files):
     log_step("merged_rows={} output={}".format(written, output_file))
 
 def safe_filename(text):
-    text = re.sub(r'[^A-Za-z0-9_.-]+', '_', text)
-    text = text.strip('._')
-    return text or "unnamed"
+    return sanitize_component(text)
 
 def split_csv_by_trace_instance(input_file):
     log_step("mode=split-by-trace-instance input={}".format(input_file))
@@ -221,7 +221,18 @@ def split_csv_by_trace_instance(input_file):
 
     outputs = []
     for inst in sorted(rows_by_inst):
-        out_file = "{}__{}{}".format(base, safe_filename(inst), ext)
+        requested_file = Path("{}__{}{}".format(base, safe_filename(inst), ext))
+        output_path = bounded_derived_path(
+            Path(base + ext),
+            "__",
+            inst,
+            suffix=ext,
+            readable_identity=safe_filename(inst),
+        )
+        out_file = str(output_path)
+        if output_path != requested_file:
+            log_step("filename_shortened original={} bounded={} identity={}".format(
+                requested_file.name, output_path.name, inst))
         log_step("writing split output: {} rows={} inst={}".format(
             out_file, len(rows_by_inst[inst]), inst))
         with open(out_file, 'w', encoding='utf-8', newline='') as outfile:
@@ -265,7 +276,20 @@ def main():
         sys.exit(1)
 
     input_file = sys.argv[1]
-    output_file = sys.argv[2]
+    requested_output_file = sys.argv[2]
+    requested_output_path = Path(requested_output_file)
+    output_path = bounded_path(
+        requested_output_path,
+        suffix=requested_output_path.suffix,
+        identity=requested_output_file,
+    )
+    output_file = str(output_path)
+    if output_path != requested_output_path:
+        log_step("filename_shortened original={} bounded={} identity={}".format(
+            requested_output_path.name,
+            output_path.name,
+            requested_output_file,
+        ))
 
     log_step("argv={}".format(" ".join(sys.argv)))
     log_step("input_file={}".format(input_file))

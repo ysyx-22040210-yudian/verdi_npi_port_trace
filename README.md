@@ -55,6 +55,7 @@ simv.daidir/kdb.elab++
 | `LICENSES/` | 内置 kdebug 及其随附 nlohmann/json 的许可证。 |
 | `kdebug_backend.py` | 公共 kdebug JSON API 适配器，负责设计库路径校验和透传、协议校验、batch trace、常量证据和兼容 CSV 发布。 |
 | `find_instances_batched.py` | 按 workload 分批调用公共 `module.find_instances`，失败时可二分重试，降低大项目故障影响范围。 |
+| `runtime_paths.py` | 统一限制运行时派生文件名的 UTF-8 字节长度；超长名称保留可读前缀并追加稳定哈希。 |
 | `npi_port_trace.tcl` / `npi_find_instances.tcl` / `npi_find_module_params.tcl` | 旧直接 NPI 后端的历史参考文件；当前主流程不执行这些 Tcl。 |
 | `filter_trace.py` | CSV 过滤、合并、按实例拆分。 |
 | `KDEBUG_BACKEND_MIGRATION.md` | kdebug 后端发现、JSON 契约、批处理、fail-closed 和 CSV 兼容说明。 |
@@ -1035,7 +1036,8 @@ export SNPSLMD_LICENSE_FILE=27000@IC_EDA
 export VERDI_LICENSE_FILE=27000@IC_EDA
 
 bash -n annotate_trace_xlsx.sh trace_and_filter.sh npi_trace.sh trace_gui.sh
-python3 -m py_compile annotate_trace_xlsx.py filter_trace.py find_instances_batched.py trace_gui.py
+python3 -m py_compile annotate_trace_xlsx.py filter_trace.py find_instances_batched.py runtime_paths.py trace_gui.py
+python3 -m unittest -v test_long_filename_paths.py
 
 bash run_all_features_trace_test.sh
 bash run_keyword_assign_driver_trace_test.sh
@@ -1102,6 +1104,7 @@ annotate_trace_xlsx.py
 annotate_trace_xlsx.sh
 filter_trace.py
 find_instances_batched.py
+runtime_paths.py
 npi_find_instances.tcl
 npi_find_module_params.tcl
 npi_port_trace.tcl

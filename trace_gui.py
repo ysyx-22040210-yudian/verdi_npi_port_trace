@@ -14,6 +14,8 @@ import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
+from runtime_paths import bounded_path, derived_glob_prefixes
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_VERSION = 1
@@ -1180,7 +1182,16 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
-        return cmd, str(cfg.get("raw_full_output", "")).strip()
+        requested_output = str(cfg.get("raw_full_output", "")).strip()
+        output_path = Path(requested_output).expanduser()
+        if not output_path.is_absolute():
+            output_path = (SCRIPT_DIR / output_path).resolve()
+        output_path = bounded_path(
+            output_path,
+            suffix=output_path.suffix,
+            identity=requested_output,
+        )
+        return cmd, str(output_path)
 
     raise ValueError(f"unknown mode: {mode}")
 
@@ -1193,17 +1204,29 @@ def command_preview(cmd: List[str], stdout_path: Optional[str]) -> str:
 
 
 def resolve_result_file(path_text: str) -> Tuple[Path, str]:
-    path = Path(path_text.strip())
+    requested_text = path_text.strip()
+    path = Path(requested_text).expanduser()
     if not path.is_absolute():
         path = (SCRIPT_DIR / path).resolve()
+    requested_path = path
+    path = bounded_path(path, suffix=path.suffix, identity=requested_text)
     if path.exists():
+        if path != requested_path:
+            return path, f"output filename was shortened: {path.name}"
         return path, ""
 
     # annotate_trace_xlsx.py writes split files when -subsystem-level is used:
     #   out.xlsx -> out__subsys_<name>.xlsx
     # filter_trace.py may also split CSV by target instance:
     #   out.csv -> out__<inst>.csv
-    candidates = sorted(path.parent.glob(f"{path.stem}__*{path.suffix}"))
+    prefixes = derived_glob_prefixes(path, "__")
+    candidates = sorted(
+        candidate
+        for candidate in path.parent.iterdir()
+        if candidate.is_file()
+        and candidate.name.startswith(prefixes)
+        and candidate.name.endswith(path.suffix)
+    ) if path.parent.is_dir() else []
     if candidates:
         return candidates[0], f"main output not found; opened split output: {candidates[0].name}"
 
@@ -1211,15 +1234,20 @@ def resolve_result_file(path_text: str) -> Tuple[Path, str]:
 
 
 def resolve_subsystem_result_file(path_text: str) -> Optional[Path]:
-    path = Path(path_text.strip())
+    requested_text = path_text.strip()
+    path = Path(requested_text).expanduser()
     if not path.is_absolute():
         path = (SCRIPT_DIR / path).resolve()
+    path = bounded_path(path, suffix=path.suffix, identity=requested_text)
 
+    prefixes = derived_glob_prefixes(path, "__subsys_")
     candidates = sorted(
         candidate
-        for candidate in path.parent.glob(f"{path.stem}__subsys_*{path.suffix}")
+        for candidate in path.parent.iterdir()
         if candidate.is_file()
-    )
+        and candidate.name.startswith(prefixes)
+        and candidate.name.endswith(path.suffix)
+    ) if path.parent.is_dir() else []
     return candidates[0] if candidates else None
 
 
@@ -1977,7 +2005,14 @@ class TraceGui:
                 return str(resolved)
             return path
         if mode == "raw":
-            return str(self._var("raw_full_output").get()).strip() or str(self._var("raw_module_output").get()).strip()
+            path = str(self._var("raw_full_output").get()).strip() or str(
+                self._var("raw_module_output").get()
+            ).strip()
+            if path:
+                resolved, _note = resolve_result_file(path)
+                if resolved.exists():
+                    return str(resolved)
+            return path
         return ""
 
     def _open_result_viewer(self) -> None:

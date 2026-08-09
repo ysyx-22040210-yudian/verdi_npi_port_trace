@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from runtime_paths import bounded_path, fixed_temp_prefix
+
 
 API_VERSION = "kdebug.v1"
 TRACE_HEADER = ["inst_full_name", "port_name", "port_dir", "role", "signal_full_name"]
@@ -659,10 +661,30 @@ def existing_mode(path: Path) -> Optional[int]:
         return None
 
 
+def runtime_output_path(path_text: str, label: str) -> Path:
+    requested = Path(path_text).expanduser()
+    bounded = bounded_path(
+        requested,
+        suffix=requested.suffix,
+        identity=path_text,
+    )
+    if bounded != requested:
+        log_step(
+            "filename_shortened label={} original={} bounded={}".format(
+                label,
+                requested.name,
+                bounded.name,
+            )
+        )
+    return bounded
+
+
 def atomic_write_csv(path: Path, header: Sequence[str], rows: Iterable[Sequence[Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = existing_mode(path)
-    fd, temp_name = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp")
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=fixed_temp_prefix("csv"), suffix=".tmp"
+    )
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
@@ -688,7 +710,7 @@ def _prepare_csv_temp(
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = existing_mode(path)
     fd, temp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp"
+        dir=str(path.parent), prefix=fixed_temp_prefix("csv"), suffix=".tmp"
     )
     temp_path = Path(temp_name)
     try:
@@ -747,7 +769,9 @@ def atomic_write_csv_pair(
                 backups[path] = None
                 continue
             fd, backup_name = tempfile.mkstemp(
-                dir=str(path.parent), prefix="." + path.name + ".", suffix=".rollback"
+                dir=str(path.parent),
+                prefix=fixed_temp_prefix("rollback"),
+                suffix=".rollback",
             )
             os.close(fd)
             backup_path = Path(backup_name)
@@ -1156,10 +1180,10 @@ def run_trace(args: argparse.Namespace) -> int:
             )
     validate_port_trace_constants(full_rows, boundary_rows, data.get("evidence"))
     atomic_write_csv_pair(
-        Path(args.full_out),
+        runtime_output_path(args.full_out, "full_trace"),
         TRACE_HEADER,
         full_rows,
-        Path(args.module_out),
+        runtime_output_path(args.module_out, "module_trace"),
         BOUNDARY_HEADER,
         boundary_rows,
     )
@@ -1182,10 +1206,14 @@ def run_find_instances(args: argparse.Namespace) -> int:
     definitions = split_csv_arg(args.definitions)
     found = find_instances(client, definitions)
     merged = sorted({instance for instances in found.values() for instance in instances})
-    output = Path(args.output)
+    output = runtime_output_path(args.output, "instances")
     output.parent.mkdir(parents=True, exist_ok=True)
     mode = existing_mode(output)
-    fd, temp_name = tempfile.mkstemp(dir=str(output.parent), prefix="." + output.name + ".", suffix=".tmp")
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(output.parent),
+        prefix=fixed_temp_prefix("instances"),
+        suffix=".tmp",
+    )
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
@@ -1251,7 +1279,7 @@ def run_find_parameters(args: argparse.Namespace) -> int:
             )
             info = str(obj.get("full_name") or obj.get("type") or "")
             rows.append([definition, instance, name, parameter_value(item), kind, info])
-    atomic_write_csv(Path(args.output), PARAM_HEADER, rows)
+    atomic_write_csv(runtime_output_path(args.output, "parameters"), PARAM_HEADER, rows)
     log_step(
         "find_parameters_done modules={} instances={} rows={}".format(
             len(definitions), len(all_instances), len(rows)

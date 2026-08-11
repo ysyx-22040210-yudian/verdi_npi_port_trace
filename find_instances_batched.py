@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from list_compat import read_name_list_file
 from runtime_paths import bounded_path, fixed_temp_prefix, sanitize_component
 
 
@@ -39,6 +40,18 @@ def timeout_with_cleanup_grace(timeout_sec: Optional[float]) -> Optional[float]:
 
 def split_csv_arg(text: str) -> List[str]:
     return [item.strip() for item in text.split(",") if item.strip()] if text else []
+
+
+def load_name_list(path_text: str) -> List[str]:
+    if not path_text:
+        return []
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = RUN_CWD / path
+    path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError("keyword file not found: {}".format(path))
+    return read_name_list_file(path)
 
 
 def safe_name(text: str) -> str:
@@ -279,15 +292,23 @@ def cleanup_completed_process_session(proc: subprocess.Popen) -> None:
 
 
 def run_kdebug_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -> List[str]:
-    modules_text = ",".join(modules)
+    requested_plan = outfile.with_name(
+        "{}__definitions.list".format(outfile.stem)
+    )
+    definition_plan = bounded_generated_path(
+        requested_plan,
+        suffix="__definitions.list",
+        identity="{}:definitions:{}".format(outfile.name, batch_id),
+    )
+    atomic_write_lines(definition_plan, modules)
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "kdebug_backend.py"),
         "find-instances",
         "--lib",
         str(args.lib),
-        "--definitions",
-        modules_text,
+        "--definitions-file",
+        str(definition_plan),
         "--output",
         str(outfile),
     ]
@@ -299,41 +320,48 @@ def run_kdebug_find(args, modules: Sequence[str], batch_id: str, outfile: Path) 
     if args.verdi_timeout_sec > 0:
         cmd.extend(["--timeout-sec", str(args.verdi_timeout_sec)])
     log_step(
-        "batch={} module_count={} modules={} outfile={}".format(
+        "batch={} module_count={} definitions_file={} outfile={}".format(
             batch_id,
             len(modules),
-            modules_text,
+            definition_plan,
             outfile,
         )
     )
     log_step("command: {}".format(" ".join(cmd)))
 
-    with outfile.open("w", encoding="utf-8"):
-        pass
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(RUN_CWD),
-        stdout=sys.stderr,
-        stderr=sys.stderr,
-        start_new_session=(os.name == "posix" and args.verdi_timeout_sec > 0),
-    )
     try:
-        command_timeout = timeout_with_cleanup_grace(args.verdi_timeout_sec)
-        if command_timeout is not None:
-            rc = proc.wait(timeout=command_timeout)
-        else:
-            rc = proc.wait()
-    except subprocess.TimeoutExpired as exc:
-        terminate_timed_out_process(proc)
-        raise subprocess.TimeoutExpired(cmd, args.verdi_timeout_sec) from exc
-    if args.verdi_timeout_sec > 0 and os.name == "posix":
-        cleanup_completed_process_session(proc)
-    if rc != 0:
-        raise subprocess.CalledProcessError(rc, cmd)
+        with outfile.open("w", encoding="utf-8"):
+            pass
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(RUN_CWD),
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            start_new_session=(os.name == "posix" and args.verdi_timeout_sec > 0),
+        )
+        try:
+            command_timeout = timeout_with_cleanup_grace(args.verdi_timeout_sec)
+            if command_timeout is not None:
+                rc = proc.wait(timeout=command_timeout)
+            else:
+                rc = proc.wait()
+        except subprocess.TimeoutExpired as exc:
+            terminate_timed_out_process(proc)
+            raise subprocess.TimeoutExpired(cmd, args.verdi_timeout_sec) from exc
+        if args.verdi_timeout_sec > 0 and os.name == "posix":
+            cleanup_completed_process_session(proc)
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, cmd)
 
-    instances = read_instances(outfile)
-    log_step(f"batch={batch_id} instances={len(instances)}")
-    return instances
+        instances = read_instances(outfile)
+        log_step(f"batch={batch_id} instances={len(instances)}")
+        return instances
+    finally:
+        if not getattr(args, "keep_batch_files", False):
+            try:
+                definition_plan.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def split_batches(items: Sequence[str], batch_size: int) -> Iterable[List[str]]:
@@ -389,7 +417,13 @@ def parse_args():
         description="Find instances for many -keywords modules through public kdebug JSON actions."
     )
     parser.add_argument("-lib", required=True, help="KDB path, for example kdb.elab++")
-    parser.add_argument("-keywords", required=True, help="comma-separated filter module names")
+    parser.add_argument("-keywords", default="", help="comma-separated filter module names")
+    parser.add_argument(
+        "--keywords-file",
+        "-keywords-file",
+        default="",
+        help="one filter module name per line",
+    )
     parser.add_argument("-output", required=True, help="merged instance output file")
     parser.add_argument(
         "--batch-size",
@@ -425,7 +459,12 @@ def parse_args():
     )
     args = parser.parse_args()
 
-    modules = split_csv_arg(args.keywords)
+    try:
+        modules = list(
+            dict.fromkeys(split_csv_arg(args.keywords) + load_name_list(args.keywords_file))
+        )
+    except (OSError, UnicodeError) as exc:
+        parser.error(str(exc))
     if not modules:
         parser.error("-keywords expects one or more module definition names.")
     if args.batch_size < 0:

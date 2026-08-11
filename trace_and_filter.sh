@@ -5,11 +5,13 @@
 #   ./trace_and_filter.sh -module <target_module> -lib <kdb.elab++> \
 #                         -keywords <filter_module[,filter_module...]> \
 #                         [-output <output.csv>] [-ports <port1,port2,...>] \
+#                         [-ports-file <ports.txt>] [-keywords-file <modules.txt>] \
 #                         [--keyword-batch-size <n>] \
 #                         [-const-source-fallback 0|1] [-const-trace-depth <N>] \
 #                         [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
 #                         [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>]
 #                         [-load-trace-api-list-limit <N>]
+#                         [-trace-max-rows <N>]
 #                         [-verdi-timeout-sec <N>]
 #                         [-trace-debug 0|1] [-log-file <run.log>]
 #
@@ -47,8 +49,10 @@ setup_log_file() {
 MODULE=""
 LIB=""
 KEYWORDS=""
+KEYWORDS_FILE=""
 OUTPUT=""
 PORTS=""
+PORTS_FILE=""
 FILELIST=""
 INCDIR=""
 TOP=""
@@ -62,6 +66,7 @@ ASSIGN_EXPR_TRACE_DEPTH="${NPI_ASSIGN_EXPR_TRACE_MAX_DEPTH:-1}"
 LOAD_TRACE_NODE_LIMIT="${NPI_LOAD_TRACE_NODE_LIMIT:-20000}"
 LOAD_TRACE_EDGE_LIMIT="${NPI_LOAD_TRACE_EDGE_LIMIT:-100000}"
 LOAD_TRACE_API_LIST_LIMIT="${NPI_LOAD_TRACE_API_LIST_LIMIT:-20000}"
+TRACE_MAX_ROWS="${NPI_TRACE_MAX_ROWS:-20000}"
 VERDI_TIMEOUT_SEC="${NPI_VERDI_TIMEOUT_SEC:-0}"
 TRACE_DEBUG="${NPI_TRACE_DEBUG:-0}"
 LOG_FILE=""
@@ -73,8 +78,10 @@ while [ $# -gt 0 ]; do
         -module)   MODULE="$2";   shift 2 ;;
         -lib)      LIB="$2";      shift 2 ;;
         -keywords) KEYWORDS="$2"; shift 2 ;;
+        -keywords-file|--keywords-file) KEYWORDS_FILE="$2"; shift 2 ;;
         -output)   OUTPUT="$2";   shift 2 ;;
         -ports)    PORTS="$2";    shift 2 ;;
+        -ports-file|--ports-file) PORTS_FILE="$2"; shift 2 ;;
         -filelist) FILELIST="$2"; shift 2 ;;
         -incdir)   INCDIR="$2";   shift 2 ;;
         -top)      TOP="$2";      shift 2 ;;
@@ -88,6 +95,7 @@ while [ $# -gt 0 ]; do
         -load-trace-node-limit|--load-trace-node-limit) LOAD_TRACE_NODE_LIMIT="$2"; shift 2 ;;
         -load-trace-edge-limit|--load-trace-edge-limit) LOAD_TRACE_EDGE_LIMIT="$2"; shift 2 ;;
         -load-trace-api-list-limit|--load-trace-api-list-limit) LOAD_TRACE_API_LIST_LIMIT="$2"; shift 2 ;;
+        -trace-max-rows|--trace-max-rows) TRACE_MAX_ROWS="$2"; shift 2 ;;
         -verdi-timeout-sec|--verdi-timeout-sec) VERDI_TIMEOUT_SEC="$2"; shift 2 ;;
         -kdebug-bin|--kdebug-bin) KDEBUG_BIN="$2"; shift 2 ;;
         -trace-debug|--trace-debug) TRACE_DEBUG="$2"; shift 2 ;;
@@ -99,7 +107,7 @@ done
 setup_log_file
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> -keywords <filter_module> [-output <out.csv>] [-ports <p1,p2,...>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>] [-load-trace-api-list-limit <N>] [-verdi-timeout-sec <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> (-keywords <module,...> | -keywords-file <modules.list>) [-output <out.csv>] [-ports <p1,p2,...>] [-ports-file <ports.list>] [--keyword-batch-size <n>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>] [-load-trace-api-list-limit <N>] [-trace-max-rows <N>] [-verdi-timeout-sec <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
     exit 1
 fi
 case "$CONST_SOURCE_FALLBACK" in
@@ -123,6 +131,9 @@ case "$LOAD_TRACE_EDGE_LIMIT" in
 esac
 case "$LOAD_TRACE_API_LIST_LIMIT" in
     ''|*[!0-9]*) echo "[ERROR] -load-trace-api-list-limit must be 0 or a positive integer, got: $LOAD_TRACE_API_LIST_LIMIT" >&2; exit 1 ;;
+esac
+case "$TRACE_MAX_ROWS" in
+    ''|*[!0-9]*) echo "[ERROR] -trace-max-rows must be 0 or a positive integer, got: $TRACE_MAX_ROWS" >&2; exit 1 ;;
 esac
 case "$VERDI_TIMEOUT_SEC" in
     ''|*[!0-9]*) echo "[ERROR] -verdi-timeout-sec must be 0 or a positive integer, got: $VERDI_TIMEOUT_SEC" >&2; exit 1 ;;
@@ -154,10 +165,25 @@ if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
     exit 1
 fi
 
-if [ -z "$KEYWORDS" ]; then
-    echo "[ERROR] -keywords parameter is required; pass one or more module names whose instances should own driver/load signals." >&2
+if [ -z "$KEYWORDS" ] && [ -z "$KEYWORDS_FILE" ]; then
+    echo "[ERROR] -keywords or -keywords-file is required; pass module names whose instances should own driver/load signals." >&2
     exit 1
 fi
+for list_var in KEYWORDS_FILE PORTS_FILE; do
+    list_path="${!list_var}"
+    if [ -z "$list_path" ]; then
+        continue
+    fi
+    case "$list_path" in
+        /*) ;;
+        *) list_path="$PWD/$list_path" ;;
+    esac
+    if [ ! -f "$list_path" ]; then
+        echo "[ERROR] ${list_var} does not exist: $list_path" >&2
+        exit 1
+    fi
+    printf -v "$list_var" '%s' "$list_path"
+done
 
 # Default output filename
 if [ -z "$OUTPUT" ]; then
@@ -173,21 +199,27 @@ OUTPUT="$(bound_runtime_path "$OUTPUT" "$OUTPUT_SUFFIX" "$REQUESTED_OUTPUT")" ||
 # Full trace output file (in current directory)
 FULL_TRACE="$(bound_runtime_path "${MODULE}_full.csv" "_full.csv" "$MODULE")" || exit $?
 MODULE_TRACE="$(bound_runtime_path "${MODULE}_module_connections.csv" "_module_connections.csv" "$MODULE")" || exit $?
-KEYWORDS_SAFE="$(printf '%s' "$KEYWORDS" | sed 's/[^A-Za-z0-9_.-][^A-Za-z0-9_.-]*/_/g; s/^[._]*//; s/[._]*$//')"
+KEYWORDS_IDENTITY="${KEYWORDS:-$KEYWORDS_FILE}"
+KEYWORDS_SAFE="$(printf '%s' "$KEYWORDS_IDENTITY" | sed 's/[^A-Za-z0-9_.-][^A-Za-z0-9_.-]*/_/g; s/^[._]*//; s/[._]*$//')"
 if [ -z "$KEYWORDS_SAFE" ]; then
     KEYWORDS_SAFE="filter_modules"
 fi
-INSTANCE_LIST="$(bound_runtime_path "${MODULE}_${KEYWORDS_SAFE}_instances.txt" "_instances.txt" "${MODULE}:${KEYWORDS}")" || exit $?
+INSTANCE_LIST="$(bound_runtime_path "${MODULE}_${KEYWORDS_SAFE}_instances.txt" "_instances.txt" "${MODULE}:${KEYWORDS_IDENTITY}")" || exit $?
 BOUNDARY_FILTERED="$(bound_runtime_path "${OUTPUT%.csv}_boundary.csv" "_boundary.csv" "${REQUESTED_OUTPUT}:boundary")" || exit $?
 FULL_FILTERED="$(bound_runtime_path "${OUTPUT%.csv}_full_owner.csv" "_full_owner.csv" "${REQUESTED_OUTPUT}:full_owner")" || exit $?
 
 log_step "script_dir=$SCRIPT_DIR"
 log_step "target_module=$MODULE"
-log_step "filter_modules=$KEYWORDS"
+log_step "filter_modules=${KEYWORDS:-<file>}"
+log_step "filter_modules_file=${KEYWORDS_FILE:-<none>}"
 log_step "load_mode=lib lib=$LIB"
 if [ -n "$PORTS" ]; then
     log_step "port_filter=$PORTS"
-else
+fi
+if [ -n "$PORTS_FILE" ]; then
+    log_step "port_filter_file=$PORTS_FILE"
+fi
+if [ -z "$PORTS" ] && [ -z "$PORTS_FILE" ]; then
     log_step "port_filter=<all ports>"
 fi
 log_step "full_trace=$FULL_TRACE"
@@ -203,6 +235,7 @@ log_step "assign_expr_trace_depth=$ASSIGN_EXPR_TRACE_DEPTH"
 log_step "load_trace_node_limit=$LOAD_TRACE_NODE_LIMIT"
 log_step "load_trace_edge_limit=$LOAD_TRACE_EDGE_LIMIT"
 log_step "load_trace_api_list_limit=$LOAD_TRACE_API_LIST_LIMIT"
+log_step "trace_max_rows=$TRACE_MAX_ROWS"
 log_step "verdi_timeout_sec=$VERDI_TIMEOUT_SEC"
 log_step "trace_debug=$TRACE_DEBUG"
 log_step "python_bin=$PYTHON_BIN"
@@ -214,9 +247,14 @@ log_step "final_output=$OUTPUT"
 log_step "step 1/5: find instances of filter module"
 FIND_CMD=("$PYTHON_BIN" "$SCRIPT_DIR/find_instances_batched.py"
     -lib "$LIB"
-    -keywords "$KEYWORDS"
     -output "$INSTANCE_LIST"
     --batch-size "$KEYWORD_BATCH_SIZE")
+if [ -n "$KEYWORDS" ]; then
+    FIND_CMD+=(-keywords "$KEYWORDS")
+fi
+if [ -n "$KEYWORDS_FILE" ]; then
+    FIND_CMD+=(--keywords-file "$KEYWORDS_FILE")
+fi
 if [ "$KEYWORD_CONTINUE_ON_ERROR" -eq 1 ]; then
     FIND_CMD+=(--continue-on-error)
 fi
@@ -231,7 +269,7 @@ log_step "command: ${FIND_CMD[*]}"
 "${FIND_CMD[@]}"
 
 if [ ! -s "$INSTANCE_LIST" ]; then
-    echo "[ERROR] no instances found for filter modules: $KEYWORDS" >&2
+    echo "[ERROR] no instances found for filter modules: ${KEYWORDS:-$KEYWORDS_FILE}" >&2
     rm -f -- "$INSTANCE_LIST"
     exit 1
 fi
@@ -253,11 +291,15 @@ TRACE_CMD=("$SCRIPT_DIR/npi_trace.sh"
     -load-trace-node-limit "$LOAD_TRACE_NODE_LIMIT"
     -load-trace-edge-limit "$LOAD_TRACE_EDGE_LIMIT"
     -load-trace-api-list-limit "$LOAD_TRACE_API_LIST_LIMIT"
+    -trace-max-rows "$TRACE_MAX_ROWS"
     -load-stop-instance-file "$INSTANCE_LIST"
     -verdi-timeout-sec "$VERDI_TIMEOUT_SEC"
     -trace-debug "$TRACE_DEBUG")
 if [ -n "$PORTS" ]; then
     TRACE_CMD+=(-ports "$PORTS")
+fi
+if [ -n "$PORTS_FILE" ]; then
+    TRACE_CMD+=(-ports-file "$PORTS_FILE")
 fi
 if [ -n "$KDEBUG_BIN" ]; then
     TRACE_CMD+=(--kdebug-bin "$KDEBUG_BIN")

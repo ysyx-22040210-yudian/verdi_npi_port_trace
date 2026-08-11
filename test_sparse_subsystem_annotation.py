@@ -316,6 +316,7 @@ class ArtifactIsolationTest(unittest.TestCase):
             load_trace_node_limit=20000,
             load_trace_edge_limit=100000,
             load_trace_api_list_limit=20000,
+            trace_max_rows=20000,
             verdi_timeout_sec=7,
             trace_debug=0,
         )
@@ -563,7 +564,7 @@ class ArtifactIsolationTest(unittest.TestCase):
     def test_keyword_failure_discards_stale_and_current_partial_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            output = root / "Key_instances.txt"
+            output = root / "keyword_instances.txt"
             output.write_text("top.stale.u_key\n", encoding="utf-8")
             args = SimpleNamespace(
                 keywords="Key",

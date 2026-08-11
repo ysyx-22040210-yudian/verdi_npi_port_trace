@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./npi_trace.sh -module <target_module> -lib <kdb.elab++> [-ports <port1,port2,...>]
-#                  [-module-out <module_connections.csv>]
+#                  [-module-out <module_connections.csv>] [-ports-file <ports.txt>]
 #                  [-const-source-fallback 0|1] [-const-trace-depth <N>]
 #                  [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>]
 #                  [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>]
@@ -49,6 +49,7 @@ TOP=""
 MODULE=""
 SRCFILE=""
 PORTS=""
+PORTS_FILE=""
 LIB=""
 MODULE_OUT=""
 CONST_SOURCE_FALLBACK="${NPI_CONST_SOURCE_FALLBACK:-1}"
@@ -75,6 +76,7 @@ while [ $# -gt 0 ]; do
         -module)   MODULE="$2";   shift 2 ;;
         -srcfile)  SRCFILE="$2";  shift 2 ;;
         -ports)    PORTS="$2";    shift 2 ;;
+        -ports-file|--ports-file) PORTS_FILE="$2"; shift 2 ;;
         -lib)      LIB="$2";      shift 2 ;;
         -module-out) MODULE_OUT="$2"; shift 2 ;;
         -const-source-fallback|--const-source-fallback) CONST_SOURCE_FALLBACK="$2"; shift 2 ;;
@@ -97,7 +99,7 @@ done
 setup_log_file
 
 if [ -z "$MODULE" ]; then
-    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-module-out <csv>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>] [-load-trace-api-list-limit <N>] [-load-stop-instance-file <instances.txt>] [-trace-max-rows <N>] [-verdi-timeout-sec <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
+    echo "Usage: $0 -module <mod> -lib <kdb.elab++> [-srcfile <src.v>] [-ports <p1,p2,...>] [-ports-file <ports.txt>] [-module-out <csv>] [-const-source-fallback 0|1] [-const-trace-depth <N>] [-assign-trace-depth <N>] [-assign-expr-trace-depth <N>] [-load-trace-node-limit <N>] [-load-trace-edge-limit <N>] [-load-trace-api-list-limit <N>] [-load-stop-instance-file <instances.txt>] [-trace-max-rows <N>] [-verdi-timeout-sec <N>] [-trace-debug 0|1] [-log-file <run.log>]" >&2
     echo "  -srcfile is optional and is passed to kdebug as the source-fallback hint." >&2
     echo "  -module-out writes driver/load entries that stop at module boundaries." >&2
     exit 1
@@ -138,6 +140,16 @@ if [ -n "$LOAD_STOP_INSTANCE_FILE" ]; then
     esac
     if [ ! -f "$LOAD_STOP_INSTANCE_FILE" ]; then
         echo "[ERROR] -load-stop-instance-file does not exist: $LOAD_STOP_INSTANCE_FILE" >&2
+        exit 1
+    fi
+fi
+if [ -n "$PORTS_FILE" ]; then
+    case "$PORTS_FILE" in
+        /*) ;;
+        *) PORTS_FILE="$PWD/$PORTS_FILE" ;;
+    esac
+    if [ ! -f "$PORTS_FILE" ]; then
+        echo "[ERROR] -ports-file does not exist: $PORTS_FILE" >&2
         exit 1
     fi
 fi
@@ -418,7 +430,11 @@ log_step "module=$MODULE"
 log_step "load_mode=lib lib=$LIB"
 if [ -n "$PORTS" ]; then
     log_step "port_filter=$PORTS"
-else
+fi
+if [ -n "$PORTS_FILE" ]; then
+    log_step "port_filter_file=$PORTS_FILE"
+fi
+if [ -z "$PORTS" ] && [ -z "$PORTS_FILE" ]; then
     log_step "port_filter=<all ports>"
 fi
 log_step "temp_full_trace=$TMPOUT"
@@ -471,6 +487,9 @@ BACKEND_CMD=("$PYTHON_BIN" "$BACKEND" trace
     --trace-debug "$TRACE_DEBUG")
 if [ -n "$PORTS" ]; then
     BACKEND_CMD+=(--ports "$PORTS")
+fi
+if [ -n "$PORTS_FILE" ]; then
+    BACKEND_CMD+=(--ports-file "$PORTS_FILE")
 fi
 if [ -n "$SRCFILE" ]; then
     BACKEND_CMD+=(--source "$SRCFILE")

@@ -27,7 +27,6 @@
         "module": {"type": "string", "minLength": 1},
         "ports": {
           "type": "array",
-          "maxItems": 4096,
           "uniqueItems": true,
           "items": {
             "type": "string",

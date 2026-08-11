@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from csv_compat import configure_csv_field_size_limit
+from list_compat import read_name_list_file
 from find_instances_batched import (
     cleanup_completed_process_session,
     terminate_timed_out_process,
@@ -67,11 +69,18 @@ except ImportError as exc:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_CWD = Path.cwd()
+CSV_FIELD_SIZE_LIMIT = configure_csv_field_size_limit()
 
 MODULE_COL = 1
 INSTANCE_COL = 2
 PARAMETER_COL = 3
 PORT_START_COL = 4
+EXCEL_CELL_TEXT_LIMIT = 32767
+EXCEL_CELL_LIMIT_MARKER = "XLSX_CELL_LIMIT_REACHED:full_result_in_trace_csv"
+EXCEL_MAX_ROWS = 1048576
+EXCEL_MAX_COLUMNS = 16384
+EXCEL_MAX_DATA_ROWS = EXCEL_MAX_ROWS - 1
+EXCEL_MAX_PORT_COLUMNS = EXCEL_MAX_COLUMNS - PORT_START_COL + 1
 
 
 class TeeStream:
@@ -356,6 +365,46 @@ def split_csv_arg(text: str) -> List[str]:
     return [item.strip() for item in text.split(",") if item.strip()] if text else []
 
 
+def validate_xlsx_capacity(row_count: int, ports: Sequence[str]) -> None:
+    port_count = len(ports)
+    if port_count > EXCEL_MAX_PORT_COLUMNS:
+        raise ValueError(
+            "XLSX_COLUMN_LIMIT: {} ports exceed the {} columns available from "
+            "column {}; use the raw CSV output for the complete result".format(
+                port_count,
+                EXCEL_MAX_PORT_COLUMNS,
+                PORT_START_COL,
+            )
+        )
+    if row_count > EXCEL_MAX_DATA_ROWS:
+        raise ValueError(
+            "XLSX_ROW_LIMIT: {} result rows exceed the {} data rows available; "
+            "use the raw CSV output for the complete result".format(
+                row_count,
+                EXCEL_MAX_DATA_ROWS,
+            )
+        )
+
+
+def name_list_log_summary(values: Sequence[str], preview_limit: int = 10) -> str:
+    preview = ",".join(values[:preview_limit])
+    if len(values) > preview_limit:
+        preview += ",...(+{})".format(len(values) - preview_limit)
+    return "count={} preview={}".format(len(values), preview or "<none>")
+
+
+def load_name_list(path_text: str) -> List[str]:
+    if not path_text:
+        return []
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = RUN_CWD / path
+    path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError("list file not found: {}".format(path))
+    return read_name_list_file(path)
+
+
 def safe_name(text: str) -> str:
     return sanitize_component(text)
 
@@ -416,6 +465,7 @@ def create_minimal_template(
     ports: Sequence[str],
     sheet_name: Optional[str],
 ) -> None:
+    validate_xlsx_capacity(len(modules), ports)
     log_step(f"template missing; create minimal template: {template_path}")
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -556,6 +606,7 @@ def prepare_instance_axes(
     entries: Sequence[InstanceEntry],
     ports: Sequence[str],
 ) -> TemplateAxes:
+    validate_xlsx_capacity(len(entries), ports)
     if not template_has_instance_column(sheet):
         sheet.insert_cols(INSTANCE_COL, 1)
     axes = prepare_template_axes(sheet, [entry.module for entry in entries], ports)
@@ -635,10 +686,27 @@ def set_parameter_cell(sheet, axes: TemplateAxes, row_key: str, result: str) -> 
         sheet.column_dimensions["C"].width = 48
 
 
+def bounded_excel_cell_text(result: str) -> str:
+    if len(result) <= EXCEL_CELL_TEXT_LIMIT:
+        return result
+    suffix = "; " + EXCEL_CELL_LIMIT_MARKER
+    return result[: EXCEL_CELL_TEXT_LIMIT - len(suffix)] + suffix
+
+
 def set_result_cell(sheet, axes: TemplateAxes, row_key: str, port: str, result: str) -> None:
     row = axes.row_by_module[row_key]
     col = axes.col_by_port[port]
-    cell = sheet.cell(row=row, column=col, value=result)
+    bounded_result = bounded_excel_cell_text(result)
+    if bounded_result != result:
+        log_step(
+            "xlsx_cell_truncated row_key={} port={} original_chars={} marker={}".format(
+                row_key,
+                port,
+                len(result),
+                EXCEL_CELL_LIMIT_MARKER,
+            )
+        )
+    cell = sheet.cell(row=row, column=col, value=bounded_result)
     copy_cell_style(cell, axes.body_style_cell)
 
 
@@ -1133,7 +1201,7 @@ def load_instances(path: Path) -> List[str]:
 
 
 def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
-    requested = workdir / f"{safe_name(args.keywords)}_instances.txt"
+    requested = workdir / "keyword_instances.txt"
     out_file = bounded_path(requested, suffix="_instances.txt", identity=args.keywords)
     if out_file != requested:
         log_step(
@@ -1141,13 +1209,18 @@ def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
             f"identity={args.keywords}"
         )
     remove_intermediate_file(out_file, "stale keyword instance output")
+    keyword_file = workdir / "requested_keywords.list"
+    keyword_file.write_text(
+        "".join("{}\n".format(value) for value in split_csv_arg(args.keywords)),
+        encoding="utf-8",
+    )
     cmd: List[object] = [
         sys.executable,
         SCRIPT_DIR / "find_instances_batched.py",
         "-lib",
         args.lib,
-        "-keywords",
-        args.keywords,
+        "--keywords-file",
+        keyword_file,
         "-output",
         out_file,
         "--batch-size",
@@ -1171,7 +1244,12 @@ def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
 
     instances = load_instances(out_file)
     if not instances:
-        raise RuntimeError(f"no instances found for filter modules: {args.keywords}")
+        requested_keywords = split_csv_arg(args.keywords)
+        raise RuntimeError(
+            "no instances found for filter modules ({})".format(
+                name_list_log_summary(requested_keywords)
+            )
+        )
     return instances, out_file
 
 
@@ -1373,7 +1451,12 @@ def trace_module(
     ]
     cmd.extend(["-lib", args.lib])
     if ports:
-        cmd.extend(["-ports", ",".join(ports)])
+        port_file = workdir / "requested_ports.list"
+        port_file.write_text(
+            "".join("{}\n".format(value) for value in ports),
+            encoding="utf-8",
+        )
+        cmd.extend(["-ports-file", port_file])
     cmd.extend(
         [
             "-const-source-fallback",
@@ -1390,6 +1473,8 @@ def trace_module(
             str(args.load_trace_edge_limit),
             "-load-trace-api-list-limit",
             str(args.load_trace_api_list_limit),
+            "-trace-max-rows",
+            str(getattr(args, "trace_max_rows", 20000)),
             "-verdi-timeout-sec",
             str(args.verdi_timeout_sec),
             "-trace-debug",
@@ -1530,8 +1615,14 @@ def parse_args():
     parser.add_argument("-output", required=True, help="output annotated XLSX")
     parser.add_argument(
         "-keywords",
-        required=True,
+        default="",
         help="comma-separated filter module definition names",
+    )
+    parser.add_argument(
+        "-keywords-file",
+        "--keywords-file",
+        default="",
+        help="one filter module definition name per line",
     )
     parser.add_argument(
         "-module",
@@ -1542,6 +1633,12 @@ def parse_args():
         "-ports",
         default="",
         help="comma-separated target ports; defaults to the template port columns",
+    )
+    parser.add_argument(
+        "-ports-file",
+        "--ports-file",
+        default="",
+        help="one target port or bit-select per line",
     )
     parser.add_argument("-lib", required=True, help="KDB path, for example kdb.elab++")
     parser.add_argument(
@@ -1689,6 +1786,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "-trace-max-rows",
+        "--trace-max-rows",
+        type=int,
+        default=20000,
+        help=(
+            "global full/boundary row budget. Reaching it fails closed; "
+            "use 0 for an unlimited row budget"
+        ),
+    )
+    parser.add_argument(
         "-trace-debug",
         "--trace-debug",
         type=int,
@@ -1735,6 +1842,21 @@ def parse_args():
     )
     args = parser.parse_args()
 
+    try:
+        args.keywords = ",".join(
+            dict.fromkeys(split_csv_arg(args.keywords) + load_name_list(args.keywords_file))
+        )
+        args.ports = ",".join(
+            dict.fromkeys(split_csv_arg(args.ports) + load_name_list(args.ports_file))
+        )
+    except (OSError, UnicodeError) as exc:
+        parser.error(str(exc))
+
+    try:
+        validate_xlsx_capacity(len(split_csv_arg(args.module)), split_csv_arg(args.ports))
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if sys.version_info < (3, 8):
         parser.error("Python 3.8 or newer is required.")
     if args.filelist or args.top or args.incdir:
@@ -1759,6 +1881,8 @@ def parse_args():
         parser.error("-load-trace-edge-limit must be 0 or a positive integer.")
     if args.load_trace_api_list_limit < 0:
         parser.error("-load-trace-api-list-limit must be 0 or a positive integer.")
+    if args.trace_max_rows < 0:
+        parser.error("-trace-max-rows must be 0 or a positive integer.")
     if args.verdi_timeout_sec < 0:
         parser.error("-verdi-timeout-sec must be 0 or a positive integer.")
     return args
@@ -1834,16 +1958,18 @@ def main() -> None:
     log_step(f"load_trace_node_limit={args.load_trace_node_limit}")
     log_step(f"load_trace_edge_limit={args.load_trace_edge_limit}")
     log_step(f"load_trace_api_list_limit={args.load_trace_api_list_limit}")
+    log_step(f"trace_max_rows={args.trace_max_rows}")
     log_step(f"verdi_timeout_sec={args.verdi_timeout_sec}")
 
     try:
         workbook, sheet = load_workbook(template, args.sheet)
         try:
             modules, ports = extract_modules_and_ports(sheet, args.module, args.ports)
+            validate_xlsx_capacity(len(modules), ports)
         finally:
             workbook.close()
-        log_step(f"modules={','.join(modules)}")
-        log_step(f"ports={','.join(ports)}")
+        log_step("modules_{}".format(name_list_log_summary(modules)))
+        log_step("ports_{}".format(name_list_log_summary(ports)))
 
         filter_instances, instance_file = find_filter_instances(args, workdir)
         log_step(f"filter_instance_file={instance_file}")

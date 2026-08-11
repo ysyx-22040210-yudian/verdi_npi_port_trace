@@ -25,6 +25,8 @@ INTERNAL_API_VERSION = "kdebug.internal.v1"
 PUBLIC_API_VERSION = "kdebug.v1"
 TOOL_VERSION = "0.1.0-tcl"
 FILE_RPC_VERSION = "kdebug-file-rpc-v1"
+DEFAULT_NPI_TIMEOUT_MS = 120000
+SOCKET_READ_CHUNK_BYTES = 65536
 
 
 def home_dir():
@@ -802,8 +804,6 @@ def prepare_port_trace_environment(args, limits, target, tmpdir):
     ports = args.get("ports", [])
     if not isinstance(ports, list):
         raise ValueError("args.ports must be an array")
-    if len(ports) > 4096:
-        raise ValueError("args.ports must contain at most 4096 items")
     port_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(\[[0-9]+(:[0-9]+)?\])?$")
     for index, port in enumerate(ports):
         if not isinstance(port, str) or not port_pattern.match(port):
@@ -1100,7 +1100,7 @@ def run_tcl_npi(request, state):
 
     cmd = [verdi, "-batch", "-nologo", "-play", tcl_script_path()]
     cmd.extend(design_cli_args)
-    timeout_sec = max(0.001, parse_timeout_ms(request, 120000) / 1000.0)
+    timeout_sec = max(0.001, parse_timeout_ms(request, DEFAULT_NPI_TIMEOUT_MS) / 1000.0)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, cwd=verdi_cwd, universal_newlines=True,
@@ -3280,7 +3280,7 @@ def file_exchange_send(record, request, timeout_ms):
 
 
 def route_to_session(record, request):
-    timeout_ms = parse_timeout_ms(request, 30000)
+    timeout_ms = parse_timeout_ms(request, DEFAULT_NPI_TIMEOUT_MS)
     transport = record.get("transport") or "uds"
     rpc = dict(request)
     rpc["api_version"] = INTERNAL_API_VERSION
@@ -3333,17 +3333,19 @@ def handle_one_shot_query():
 
 
 def read_line(conn):
-    chunks = []
+    data_buffer = bytearray()
     while True:
-        data = conn.recv(1)
+        data = conn.recv(SOCKET_READ_CHUNK_BYTES)
         if not data:
             break
-        if data == b"\n":
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data_buffer.extend(data[:newline])
             break
-        chunks.append(data)
-    if not chunks:
+        data_buffer.extend(data)
+    if not data_buffer:
         return ""
-    return b"".join(chunks).decode("utf-8")
+    return bytes(data_buffer).decode("utf-8")
 
 
 def handle_server_request(request, state):

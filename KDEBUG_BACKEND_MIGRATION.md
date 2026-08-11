@@ -99,7 +99,9 @@ KDEBUG_BIN=/home/host/kverif/tools/kdebug ./npi_trace.sh ...
 
 `--keyword-batch-size` 仍是本工具对 keyword module 搜索 workload 的分组与二分重试边界，不等同于 `port.trace_batch` 的端口数组。
 
-`args.stop_instances` 是同一趟 loader trace 的完整 cut-set，不能按数量截断，也不能拆成多次 trace 后合并，否则 stop-point 语义会改变。该数组没有 4096 项的人为上限，并由一次 `port.trace_batch` 请求完整传递；engine 通过 TSV plan 交接，Tcl 按信号层次前缀做哈希查询。`args.ports` 仍保留 4096 项上限。
+`args.stop_instances` 是同一趟 loader trace 的完整 cut-set，不能按数量截断，也不能拆成多次 trace 后合并，否则 stop-point 语义会改变。`args.stop_instances` 和 `args.ports` 都没有 4096 项的人为上限，并由一次 `port.trace_batch` 请求完整传递。engine 通过 TSV plan 把两个列表交给 Tcl；Tcl 分别建立 stop 层次前缀索引和 port 名集合，通过哈希查询避免大列表线性扫描。
+
+CLI 提供 `-ports-file` / `--ports-file` 和 `-keywords-file` / `--keywords-file`，避免把大列表展开成单个 shell 参数后触发 Linux `MAX_ARG_STRLEN`。`npi_trace.sh` 支持 ports 文件；`trace_and_filter.sh`、`annotate_trace_xlsx.py` 同时支持 ports 和 keywords 文件。内联值与文件值会合并、按首次出现顺序去重；上层反标调用内部子进程时也使用 list 文件。
 
 ## 5. JSON 协议与 fail-closed
 
@@ -123,6 +125,7 @@ KDEBUG_BIN=/home/host/kverif/tools/kdebug ./npi_trace.sh ...
 | 常量证据未验证、混有 net 或互相矛盾 | kdebug 抑制常量并发布 `TRACE_LIMIT_REACHED:constant_*` marker |
 | 常量 row 缺少 effective evidence / `const_full_path` | 整个 action 失败，不发布新 CSV |
 | 截断但结果中没有 `TRACE_LIMIT_REACHED:*` marker | 整个 action 失败，不发布新 CSV |
+| 出现 `TRACE_LIMIT_REACHED:row_limit` | 返回 `KDEBUG_ROW_LIMIT_REACHED`，不发布部分 full/boundary CSV；增大 `max_rows` 或设为 `0` 后重跑 |
 | row、error、evidence 或 envelope 不合法 | 整个 action 失败，不发布新 CSV |
 
 只有完整 trace 确实没有 endpoint 时才生成 `NO_DRIVER` 或 `NO_LOAD`。CSV 通过同目录临时文件和原子替换发布；失败路径删除临时结果，避免旧文件或半截文件看起来像本次成功结果。
@@ -171,6 +174,12 @@ module,inst_full_name,param_name,param_value,param_kind,param_info
 
 `filter_trace.py`、`annotate_trace_xlsx.py` 和 GUI 仍读取这些稳定文件。后端 JSON 字段不直接泄露给 CSV/XLSX 消费方。
 
+这些 Python CSV 消费端会把标准库默认 131072 字节字段上限提升到当前平台可接受的最大值。超长层次路径和聚合证据不再因为 Python 默认值而读取失败；这不改变 CSV 表头或字段内容。
+
+`filter_trace.py` 预先建立 keyword instance 及其可见层次后缀的哈希集合，然后只检查每条 signal 的有限层次前缀，避免原来的 `rows x instances` 线性扫描。`TRACE_LIMIT_REACHED:*` 仍作为 fail-closed 证据保留。
+
+XLSX 不是完整证据的无损载体：Excel 单元格有 32767 字符硬上限。反标聚合文本超过该值时会显式截成合法长度，在单元格末尾写入 `XLSX_CELL_LIMIT_REACHED:full_result_in_trace_csv`，并记录 `xlsx_cell_truncated` 日志；完整逐行证据仍位于对应 trace CSV，不能用被截断的 XLSX 单元格替代 CSV 审计。
+
 ## 8. 参数映射
 
 以下旧参数名仍由 shell/GUI 接受，以免已有命令立即失效：
@@ -183,12 +192,30 @@ module,inst_full_name,param_name,param_value,param_kind,param_info
 - `-load-trace-edge-limit`
 - `-load-trace-api-list-limit`
 - `-load-stop-instance-file`
+- `-ports-file`
+- `-keywords-file`
 - `-srcfile`
 - `-trace-max-rows`
 
-映射关系为：`const/assign/assign-expr` depth 对应 `max_parent_depth/max_assign_depth/max_expr_depth`，三个 loader limit 对应 `max_nodes/max_edges/max_api_results`，`-trace-max-rows` 对应 `max_rows`，stop-instance 文件解析为 `args.stop_instances`，`-srcfile` 对应 `args.source`。`NPI_TRACE_MAX_ROWS` 是新增的环境变量，默认值为 `20000`；其他参数继续读取原有 `NPI_*` 环境变量。
+映射关系为：`const/assign/assign-expr` depth 对应 `max_parent_depth/max_assign_depth/max_expr_depth`，三个 loader limit 对应 `max_nodes/max_edges/max_api_results`，`-trace-max-rows` 对应 `max_rows`，ports 文件合并进 `args.ports`，stop-instance 文件解析为 `args.stop_instances`，keywords 文件用于 `module.find_instances` workload，`-srcfile` 对应 `args.source`。`NPI_TRACE_MAX_ROWS` 默认值为 `20000`，值 `0` 表示不启用全局行预算；其他参数继续读取原有 `NPI_*` 环境变量。
 
-## 9. 最小验收项
+## 9. 扩展性边界
+
+本轮审计没有把所有预算改成无限。删除的是会拒绝合法大设计的固定数量上限；防止递归、fanout 或单次 API 返回失控的资源预算继续保留，并必须给出可观察结果。
+
+| 边界 | 当前契约 |
+| --- | --- |
+| ports / stop 数量 | 无 4096 项人为上限；单次 action 完整处理，通过 list/plan 文件规避参数长度问题 |
+| loader nodes | 默认 `20000`；命中时保留 `TRACE_LIMIT_REACHED:node_limit_*` |
+| loader edges | 默认 `100000`；命中时保留 `TRACE_LIMIT_REACHED:edge_limit_*` |
+| 单次 loader API list | 默认 `20000`；命中时保留 `TRACE_LIMIT_REACHED:api_list_limit_*` |
+| 全局 trace rows | 默认 `20000`；命中时 fail-closed，不发布部分 CSV；`0` 表示不启用 |
+| `module.find_instances` / `module.inspect*` rows | 继续使用每次调用 1000000 行的公共 API 资源预算，不把它误当成 ports/stop 数量限制 |
+| parent/assign/expression depth | 继续显式配置；不能仅因 depth 计数到 0 就声称截断，只有证明仍有下一跳时才可产生 limit 结论 |
+| CSV 单字段 | 提升到平台可接受最大值，不再沿用 Python 默认 131072 字节 |
+| XLSX 单元格 | Excel 32767 字符硬上限保留；显式 marker 指向完整 trace CSV |
+
+## 10. 最小验收项
 
 迁移版本至少应验证：
 
@@ -199,4 +226,7 @@ module,inst_full_name,param_name,param_value,param_kind,param_info
 5. 精确 bit 常量不会同时发布 `1'b0` 和 `1'b1`，日志包含 `evidence_source` 和 `const_full_path`。
 6. kdebug 非零退出、非法 JSON、`ok=false`、truncated 和 timeout 均不发布半截 CSV。
 7. full、boundary、parameter CSV 表头及 XLSX 消费流程与迁移前兼容。
-8. 5000 个以上 stop instances 仍由一次请求完整传入，且 XLSX 全部 module trace 失败时保留首个 kdebug/Verdi 错误。
+8. 5000 个以上 stop instances 和 ports 分别仍由一次请求完整传入，且 XLSX 全部 module trace 失败时保留首个 kdebug/Verdi 错误。
+9. ports/keywords 文件可承载超过单参数长度的集合；50000 个 keyword instances 的过滤走哈希前缀索引，并与旧归属谓词保持语义一致。
+10. `row_limit` 命中返回 `KDEBUG_ROW_LIMIT_REACHED`，已有正式 CSV 不被部分结果覆盖；`max_rows=0` 可运行不受该行预算限制的对照。
+11. 超过 131072 字节的 CSV 字段可读取；超过 32767 字符的 XLSX 聚合单元格含显式 marker，完整结果可在 trace CSV 中复核。

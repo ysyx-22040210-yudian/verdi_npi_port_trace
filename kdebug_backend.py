@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from list_compat import read_name_list_file
 from runtime_paths import bounded_path, fixed_temp_prefix
 
 
@@ -845,6 +846,22 @@ def read_instance_file(path_text: str) -> List[str]:
     return sorted(set(instances))
 
 
+def read_cli_name_file(path_text: str, label: str, missing_code: str) -> List[str]:
+    if not path_text:
+        return []
+    path = Path(path_text).expanduser().resolve()
+    if not path.is_file():
+        raise KDebugError(
+            "{} does not exist: {}".format(label, path),
+            missing_code,
+        )
+    return list(dict.fromkeys(read_name_list_file(path)))
+
+
+def read_port_file(path_text: str) -> List[str]:
+    return read_cli_name_file(path_text, "port file", "PORT_FILE_NOT_FOUND")
+
+
 def normalize_port_trace_rows(items: Any, surface: str) -> List[List[str]]:
     if not isinstance(items, list):
         raise KDebugError(
@@ -1094,7 +1111,9 @@ def run_trace(args: argparse.Namespace) -> int:
     design_input = normalize_design_input(Path(args.lib))
     binary = resolve_kdebug(args.kdebug_bin)
     client = KDebugClient(binary, design_input, args.timeout_sec, bool(args.trace_debug))
-    requested_ports = unique_csv_arg(args.ports)
+    requested_ports = list(
+        dict.fromkeys(unique_csv_arg(args.ports) + read_port_file(args.ports_file))
+    )
     action_args: Dict[str, Any] = {
         "module": args.module,
         "ports": requested_ports,
@@ -1170,8 +1189,15 @@ def run_trace(args: argparse.Namespace) -> int:
                 "KDEBUG_PROTOCOL_ERROR",
                 unexpected_rows[:3],
             )
+    endpoints = [row[4] for row in full_rows + boundary_rows]
+    if any(endpoint == "TRACE_LIMIT_REACHED:row_limit" for endpoint in endpoints):
+        raise KDebugError(
+            "port.trace_batch reached the global row budget; rerun with a larger "
+            "--max-rows value or 0 for an unlimited row budget",
+            "KDEBUG_ROW_LIMIT_REACHED",
+            response,
+        )
     if _response_truncated(response):
-        endpoints = [row[4] for row in full_rows + boundary_rows]
         if not any(endpoint.startswith("TRACE_LIMIT_REACHED:") for endpoint in endpoints):
             raise KDebugError(
                 "port.trace_batch returned truncated data without a limit marker",
@@ -1203,7 +1229,19 @@ def run_trace(args: argparse.Namespace) -> int:
 def run_find_instances(args: argparse.Namespace) -> int:
     design_input = normalize_design_input(Path(args.lib))
     client = KDebugClient(resolve_kdebug(args.kdebug_bin), design_input, args.timeout_sec, args.debug)
-    definitions = split_csv_arg(args.definitions)
+    definitions = list(dict.fromkeys(
+        split_csv_arg(args.definitions)
+        + read_cli_name_file(
+            args.definitions_file,
+            "definitions file",
+            "DEFINITIONS_FILE_NOT_FOUND",
+        )
+    ))
+    if not definitions:
+        raise KDebugError(
+            "find-instances requires --definitions or --definitions-file",
+            "DEFINITIONS_REQUIRED",
+        )
     found = find_instances(client, definitions)
     merged = sorted({instance for instances in found.values() for instance in instances})
     output = runtime_output_path(args.output, "instances")
@@ -1298,6 +1336,7 @@ def build_parser() -> argparse.ArgumentParser:
     trace.add_argument("--lib", required=True)
     trace.add_argument("--module", required=True)
     trace.add_argument("--ports", default="")
+    trace.add_argument("--ports-file", default="")
     trace.add_argument("--source", "--srcfile", default="")
     trace.add_argument(
         "--source-fallback",
@@ -1362,7 +1401,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     instances = subparsers.add_parser("find-instances")
     instances.add_argument("--lib", required=True)
-    instances.add_argument("--definitions", required=True)
+    instances.add_argument("--definitions", default="")
+    instances.add_argument("--definitions-file", default="")
     instances.add_argument("--output", required=True)
     instances.add_argument("--kdebug-bin")
     instances.add_argument("--timeout-sec", type=int, default=0)

@@ -18,7 +18,10 @@ import csv
 import os
 from pathlib import Path
 
+from csv_compat import configure_csv_field_size_limit
 from runtime_paths import bounded_derived_path, bounded_path, sanitize_component
+
+configure_csv_field_size_limit()
 
 def log_step(message):
     print("[filter_trace] {}".format(message), file=sys.stderr)
@@ -71,24 +74,50 @@ def is_direct_instance_node(rest):
     # hierarchy like child_inst.child_module.signal belongs to the child instance.
     return rest.count(".") <= 1
 
-def signal_belongs_to_instance(signal_name, instances):
-    if not signal_name or signal_name.startswith("Const:"):
-        return False
-    if signal_name.startswith("TRACE_LIMIT_REACHED:"):
-        return True
+def candidate_signal_prefixes(signal_name):
+    start = 0
+    while True:
+        dot = signal_name.find(".", start)
+        slash = signal_name.find("/", start)
+        positions = [pos for pos in (dot, slash) if pos != -1]
+        if not positions:
+            break
+        pos = min(positions)
+        if pos > 0:
+            yield signal_name[:pos]
+        start = pos + 1
+    if signal_name:
+        yield signal_name
 
-    for inst in instances:
-        if is_direct_instance_node(strip_instance_prefix(signal_name, inst)):
+
+class InstanceMatcher:
+    """Match trace endpoints against instance paths through hashed prefixes."""
+
+    def __init__(self, instances):
+        self.prefixes = set()
+        for inst in instances:
+            self.prefixes.add(inst)
+            parts = inst.split(".")
+            for idx in range(1, len(parts)):
+                self.prefixes.add(".".join(parts[idx:]))
+
+    def belongs(self, signal_name):
+        if not signal_name or signal_name.startswith("Const:"):
+            return False
+        if signal_name.startswith("TRACE_LIMIT_REACHED:"):
             return True
 
-        # npi_port_trace.tcl may remove a common top prefix for readability.
-        parts = inst.split(".")
-        for idx in range(1, len(parts)):
-            suffix = ".".join(parts[idx:])
-            if is_direct_instance_node(strip_instance_prefix(signal_name, suffix)):
+        for prefix in candidate_signal_prefixes(signal_name):
+            if prefix not in self.prefixes:
+                continue
+            if is_direct_instance_node(strip_instance_prefix(signal_name, prefix)):
                 return True
+        return False
 
-    return False
+
+def signal_belongs_to_instance(signal_name, instances):
+    matcher = instances if isinstance(instances, InstanceMatcher) else InstanceMatcher(instances)
+    return matcher.belongs(signal_name)
 
 def get_signal_column(header):
     if "signal_full_name" in header:
@@ -127,6 +156,8 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
     matched_count = 0
     total_count = 0
     instances = load_instances(instance_file)
+    matcher = InstanceMatcher(instances)
+    log_step("indexed_instance_prefixes={}".format(len(matcher.prefixes)))
 
     log_step("opening input CSV: {}".format(input_file))
     log_step("opening output CSV: {}".format(output_file))
@@ -154,7 +185,7 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
                 role = row[role_idx] if len(row) > role_idx else ""
                 if not role_matches_port_direction(port_dir, role):
                     continue
-            if len(row) > signal_idx and signal_belongs_to_instance(row[signal_idx], instances):
+            if len(row) > signal_idx and signal_belongs_to_instance(row[signal_idx], matcher):
                 writer.writerow(row)
                 matched_count += 1
 

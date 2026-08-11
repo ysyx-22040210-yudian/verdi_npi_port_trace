@@ -14,11 +14,14 @@ import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
+from csv_compat import configure_csv_field_size_limit
+from list_compat import read_name_list_file, split_name_list_text
 from runtime_paths import bounded_path, derived_glob_prefixes
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_VERSION = 1
+CSV_FIELD_SIZE_LIMIT = configure_csv_field_size_limit()
 
 DEFAULT_CONFIG = {
     "version": CONFIG_VERSION,
@@ -26,7 +29,9 @@ DEFAULT_CONFIG = {
     "lib": "",
     "module": "",
     "keywords": "",
+    "keywords_file": "",
     "ports": "",
+    "ports_file": "",
     "log_file": "",
     "template": "",
     "xlsx_output": "",
@@ -49,6 +54,7 @@ DEFAULT_CONFIG = {
     "load_trace_node_limit": "20000",
     "load_trace_edge_limit": "100000",
     "load_trace_api_list_limit": "20000",
+    "trace_max_rows": "20000",
     "verdi_timeout_sec": "0",
     "trace_debug": False,
     "csv_output": "",
@@ -115,21 +121,11 @@ UI_FONT_SIZE_MONO = -12
 
 
 def split_list_text(text: str) -> List[str]:
-    items: List[str] = []
-    for line in text.splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        for item in re.split(r"[\s,;\uFF0C\uFF1B]+", line):
-            item = item.strip()
-            if item:
-                items.append(item)
-    return items
+    return split_name_list_text(text)
 
 
 def read_list_file(path: str) -> str:
-    data = Path(path).read_text(encoding="utf-8-sig")
-    return ",".join(split_list_text(data))
+    return ",".join(read_name_list_file(Path(path)))
 
 
 def csv_text(text: str) -> str:
@@ -1084,7 +1080,9 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     lib = str(cfg.get("lib", "")).strip()
     module = csv_text(str(cfg.get("module", "")))
     keywords = csv_text(str(cfg.get("keywords", "")))
+    keywords_file = str(cfg.get("keywords_file", "")).strip()
     ports = csv_text(str(cfg.get("ports", "")))
+    ports_file = str(cfg.get("ports_file", "")).strip()
     const_fallback = as_bool(cfg.get("const_source_fallback", True))
     const_depth = str(cfg.get("const_trace_depth", "16")).strip()
     assign_depth = str(cfg.get("assign_trace_depth", "2")).strip()
@@ -1092,6 +1090,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     load_node_limit = str(cfg.get("load_trace_node_limit", "20000")).strip()
     load_edge_limit = str(cfg.get("load_trace_edge_limit", "100000")).strip()
     load_api_list_limit = str(cfg.get("load_trace_api_list_limit", "20000")).strip()
+    trace_max_rows = str(cfg.get("trace_max_rows", "20000")).strip()
     verdi_timeout_sec = str(cfg.get("verdi_timeout_sec", "0")).strip()
     log_file = str(cfg.get("log_file", "")).strip()
 
@@ -1102,19 +1101,23 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
     require_uint(load_node_limit, "load node limit")
     require_uint(load_edge_limit, "load edge limit")
     require_uint(load_api_list_limit, "load api list limit")
+    require_uint(trace_max_rows, "trace max rows")
     require_uint(verdi_timeout_sec, "Verdi timeout seconds")
 
     if mode == "xlsx":
         require(cfg, "template", "template XLSX")
         require(cfg, "xlsx_output", "output XLSX")
-        require({"keywords": keywords}, "keywords", "keywords")
+        if not keywords and not keywords_file:
+            raise ValueError("keywords or keywords list file is required")
         cmd = script_command("annotate_trace_xlsx.sh")
         add_value(cmd, "-template", cfg.get("template", ""))
         add_value(cmd, "-output", cfg.get("xlsx_output", ""))
         add_value(cmd, "-lib", lib)
         add_value(cmd, "-keywords", keywords)
+        add_value(cmd, "-keywords-file", keywords_file)
         add_value(cmd, "-module", module)
         add_value(cmd, "-ports", ports)
+        add_value(cmd, "-ports-file", ports_file)
         add_value(cmd, "-sheet", cfg.get("sheet", ""))
         add_value(cmd, "-workdir", cfg.get("workdir", ""))
         add_value(cmd, "-subsystem-level", cfg.get("subsystem_level", "0"))
@@ -1130,6 +1133,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-load-trace-node-limit", load_node_limit)
         add_value(cmd, "-load-trace-edge-limit", load_edge_limit)
         add_value(cmd, "-load-trace-api-list-limit", load_api_list_limit)
+        add_value(cmd, "-trace-max-rows", trace_max_rows)
         add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
@@ -1141,13 +1145,16 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
 
     if mode == "csv":
         require({"module": module}, "module", "module")
-        require({"keywords": keywords}, "keywords", "keywords")
+        if not keywords and not keywords_file:
+            raise ValueError("keywords or keywords list file is required")
         cmd = script_command("trace_and_filter.sh")
         add_value(cmd, "-module", module)
         add_value(cmd, "-lib", lib)
         add_value(cmd, "-keywords", keywords)
+        add_value(cmd, "-keywords-file", keywords_file)
         add_value(cmd, "-output", cfg.get("csv_output", ""))
         add_value(cmd, "-ports", ports)
+        add_value(cmd, "-ports-file", ports_file)
         add_value(cmd, "--keyword-batch-size", cfg.get("keyword_batch_size", "8"))
         add_bool(cmd, "--keyword-continue-on-error", as_bool(cfg.get("keyword_continue_on_error", False)))
         add_bool(cmd, "--keyword-log-instances", as_bool(cfg.get("keyword_log_instances", False)))
@@ -1158,6 +1165,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-load-trace-node-limit", load_node_limit)
         add_value(cmd, "-load-trace-edge-limit", load_edge_limit)
         add_value(cmd, "-load-trace-api-list-limit", load_api_list_limit)
+        add_value(cmd, "-trace-max-rows", trace_max_rows)
         add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
@@ -1170,6 +1178,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-module", module)
         add_value(cmd, "-lib", lib)
         add_value(cmd, "-ports", ports)
+        add_value(cmd, "-ports-file", ports_file)
         add_value(cmd, "-srcfile", cfg.get("srcfile", ""))
         add_value(cmd, "-module-out", cfg.get("raw_module_output", ""))
         add_int_bool(cmd, "-const-source-fallback", const_fallback)
@@ -1179,6 +1188,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-load-trace-node-limit", load_node_limit)
         add_value(cmd, "-load-trace-edge-limit", load_edge_limit)
         add_value(cmd, "-load-trace-api-list-limit", load_api_list_limit)
+        add_value(cmd, "-trace-max-rows", trace_max_rows)
         add_value(cmd, "-verdi-timeout-sec", verdi_timeout_sec)
         add_int_bool(cmd, "-trace-debug", as_bool(cfg.get("trace_debug", False)))
         add_value(cmd, "-log-file", log_file)
@@ -1666,8 +1676,10 @@ class TraceGui:
         self._path_row(common, 0, "KDB/elab++", "lib", "dir")
         self._text_row(common, 1, "module", "module", self._load_module_list)
         self._text_row(common, 2, "keywords", "keywords", self._load_keyword_list)
-        self._text_row(common, 3, "ports", "ports", self._load_ports_list)
-        self._path_row(common, 4, "log file", "log_file", "save_log")
+        self._path_row(common, 3, "keywords list", "keywords_file", "file")
+        self._text_row(common, 4, "ports", "ports", self._load_ports_list)
+        self._path_row(common, 5, "ports list", "ports_file", "file")
+        self._path_row(common, 6, "log file", "log_file", "save_log")
 
         mode_card = RoundedSection(self.tk, self.ttk, outer, "", padding=10)
         mode_card.pack(fill="x", pady=(10, 0))
@@ -1768,10 +1780,11 @@ class TraceGui:
         self._entry_row(parent, 10, "load node limit", "load_trace_node_limit")
         self._entry_row(parent, 11, "load edge limit", "load_trace_edge_limit")
         self._entry_row(parent, 12, "load api list limit", "load_trace_api_list_limit")
-        self._entry_row(parent, 13, "Verdi timeout sec", "verdi_timeout_sec")
+        self._entry_row(parent, 13, "trace max rows", "trace_max_rows")
+        self._entry_row(parent, 14, "Verdi timeout sec", "verdi_timeout_sec")
         self._check_row(
             parent,
-            14,
+            15,
             [
                 ("stream", "stream"),
                 ("no params", "no_params"),
@@ -1781,7 +1794,7 @@ class TraceGui:
         )
         self._check_row(
             parent,
-            15,
+            16,
             [
                 ("RegCombo as keyword", "regcombo_as_keyword"),
                 ("const source fallback", "const_source_fallback"),
@@ -1800,10 +1813,11 @@ class TraceGui:
         self._entry_row(parent, 5, "load node limit", "load_trace_node_limit")
         self._entry_row(parent, 6, "load edge limit", "load_trace_edge_limit")
         self._entry_row(parent, 7, "load api list limit", "load_trace_api_list_limit")
-        self._entry_row(parent, 8, "Verdi timeout sec", "verdi_timeout_sec")
+        self._entry_row(parent, 8, "trace max rows", "trace_max_rows")
+        self._entry_row(parent, 9, "Verdi timeout sec", "verdi_timeout_sec")
         self._check_row(
             parent,
-            9,
+            10,
             [
                 ("const source fallback", "const_source_fallback"),
                 ("trace debug", "trace_debug"),
@@ -1822,8 +1836,9 @@ class TraceGui:
         self._entry_row(parent, 6, "load node limit", "load_trace_node_limit")
         self._entry_row(parent, 7, "load edge limit", "load_trace_edge_limit")
         self._entry_row(parent, 8, "load api list limit", "load_trace_api_list_limit")
-        self._entry_row(parent, 9, "Verdi timeout sec", "verdi_timeout_sec")
-        self._check_row(parent, 10, [("const source fallback", "const_source_fallback"), ("trace debug", "trace_debug")])
+        self._entry_row(parent, 9, "trace max rows", "trace_max_rows")
+        self._entry_row(parent, 10, "Verdi timeout sec", "verdi_timeout_sec")
+        self._check_row(parent, 11, [("const source fallback", "const_source_fallback"), ("trace debug", "trace_debug")])
 
     def _path_row(self, parent, row: int, label: str, key: str, kind: str) -> None:
         ttk = self.ttk
@@ -1879,12 +1894,19 @@ class TraceGui:
         if path:
             self._var(key).set(path)
 
-    def _load_list_into(self, key: str) -> None:
+    def _load_list_into(self, key: str, file_key: str = "") -> None:
         path = self.filedialog.askopenfilename(initialdir=str(SCRIPT_DIR), filetypes=[("List/Text", "*.txt *.list *.f"), ("All files", "*")])
         if not path:
             return
         try:
-            self._var(key).set(read_list_file(path))
+            if file_key:
+                # Validate readability now, but retain the file path so large lists
+                # never become one oversized process argument.
+                read_list_file(path)
+                self._var(file_key).set(str(Path(path).resolve()))
+                self._var(key).set("")
+            else:
+                self._var(key).set(read_list_file(path))
         except Exception as exc:
             self.messagebox.showerror("Load Failed", str(exc))
 
@@ -1892,10 +1914,10 @@ class TraceGui:
         self._load_list_into("module")
 
     def _load_keyword_list(self) -> None:
-        self._load_list_into("keywords")
+        self._load_list_into("keywords", "keywords_file")
 
     def _load_ports_list(self) -> None:
-        self._load_list_into("ports")
+        self._load_list_into("ports", "ports_file")
 
     def _mode_changed(self) -> None:
         if self.suspend_preview:
@@ -1938,6 +1960,11 @@ class TraceGui:
     def _apply_config(self, cfg: Dict[str, object]) -> None:
         self.suspend_preview = True
         try:
+            # Older configs predate list-file fields. Clear hidden paths so a
+            # previously loaded list cannot leak into the newly loaded config.
+            for key in ("keywords_file", "ports_file"):
+                if key not in cfg:
+                    self._var(key).set("")
             for key, value in cfg.items():
                 if key not in self.vars:
                     continue

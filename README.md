@@ -31,10 +31,13 @@ simv.daidir/kdb.elab++
 - 支持 driver 方向的拼接表达式继续展开，例如 `assign A = {b0, b1}`。
 - 支持 loader 方向的 fanout / slice / 拼接继续展开，例如 `assign B0 = A[10:0]`、`assign B = {C, A, D}`。
 - 支持 `-ports A[7]` 这种单 bit 端口追踪。
+- `ports` 和 `stop_instances` 不再有 4096 项的人为数量上限；大列表可通过 `-ports-file`、`-keywords-file` 和 `-load-stop-instance-file` 传入。
 - 支持 XLSX 反标、CSV 过滤、Raw Trace 三种命令行入口。
 - 通过公共 `port.trace_batch` 在一次 KDB 导入中生成 full/boundary 结果；该 action 不可用或失败时直接报错，不回退到浅层 `trace.driver` / `trace.load`。
 - 常量 driver/load 日志包含 `evidence_source` 和目标信号到常量的 `const_full_path`，便于复核证据来源。
 - 对截断、批内单项错误、矛盾常量和无法按 bit 投影的常量采用 fail-closed 结果，不把不完整证据误写成 `NO_DRIVER` / `NO_LOAD`。
+- 全局 trace 行预算耗尽时返回 `KDEBUG_ROW_LIMIT_REACHED`，不发布部分 full/boundary CSV；`-trace-max-rows 0` 表示不启用该预算。
+- Python CSV 消费端不再受标准库默认 131072 字节字段上限约束；超过 Excel 32767 字符硬上限的单元格会写入显式 marker，完整结果保留在 trace CSV。
 - 支持 `-log-file` 将脚本步骤、kdebug 诊断和 trace debug 日志保存到文件，Raw Trace 的 CSV stdout 保持独立。
 - 提供 Tkinter GUI，保留全部命令行能力。
 
@@ -55,11 +58,13 @@ simv.daidir/kdb.elab++
 | `LICENSES/` | 内置 kdebug 及其随附 nlohmann/json 的许可证。 |
 | `kdebug_backend.py` | 公共 kdebug JSON API 适配器，负责设计库路径校验和透传、协议校验、batch trace、常量证据和兼容 CSV 发布。 |
 | `find_instances_batched.py` | 按 workload 分批调用公共 `module.find_instances`，失败时可二分重试，降低大项目故障影响范围。 |
+| `csv_compat.py` | 把 Python CSV 字段上限从标准库默认值提升到当前平台可接受的最大值，供过滤、反标和 GUI 查看统一使用。 |
 | `runtime_paths.py` | 统一限制运行时派生文件名的 UTF-8 字节长度；超长名称保留可读前缀并追加稳定哈希。 |
 | `npi_port_trace.tcl` / `npi_find_instances.tcl` / `npi_find_module_params.tcl` | 旧直接 NPI 后端的历史参考文件；当前主流程不执行这些 Tcl。 |
-| `filter_trace.py` | CSV 过滤、合并、按实例拆分。 |
+| `filter_trace.py` | CSV 过滤、合并、按实例拆分；实例归属使用层次前缀哈希索引，避免逐行线性扫描全部 keyword instances。 |
 | `KDEBUG_BACKEND_MIGRATION.md` | kdebug 后端发现、JSON 契约、批处理、fail-closed 和 CSV 兼容说明。 |
 | `XIANGSHAN_STOP_LIMIT_STRESS_REPORT_20260812.md` | 5001 stop cut-set 的真实 XiangShan elab++ 压测、资源对照、常量证据与结果哈希。 |
+| `XIANGSHAN_SCALE_LIMIT_STRESS_REPORT_20260812.md` | ports、参数长度、CSV/XLSX 和过滤规模边界的审计，以及本轮 XiangShan VM 压测记录。 |
 | `multi_module_trace_template.xlsx` | 多 module 测试模板。 |
 | `all_features_trace_test.v` | 单一 RTL 场景覆盖多 module、多 keywords、parameter、常数、悬空、Reg endpoint、assign 透传/拼接/切片、单 bit 端口、loader fanout、子系统拆分。 |
 | `all_features_modules.list` / `all_features_keywords.list` / `all_features_ports.list` | 全特性回归使用的 module、keywords、ports 列表文件。 |
@@ -194,9 +199,11 @@ cd verdi_npi_port_trace
 
 `-lib` 兼容原有 `kdb.elab++` 写法，并把该完整路径原样写入 kdebug 的 `target.daidir`；不会再静默改写为父目录。直接传 `simv.daidir` 仍保持兼容。路径不存在返回 `KDB_NOT_FOUND`，既不是 `.daidir` 也不是 `.elab++` 目录的输入返回 `INVALID_KDB_PATH`。
 
-`npi_trace.sh` 会把既有的 `-const-trace-depth`、`-assign-trace-depth`、`-assign-expr-trace-depth`、三个 loader limit、`-load-stop-instance-file`、`-srcfile` 和 `-const-source-fallback` 逐项传给 `port.trace_batch`。输出行预算可用 `-trace-max-rows N` 或环境变量 `NPI_TRACE_MAX_ROWS` 设置，默认 `20000`；`0` 沿用旧语义，表示不启用该行数保护。
+`npi_trace.sh` 会把既有的 `-const-trace-depth`、`-assign-trace-depth`、`-assign-expr-trace-depth`、三个 loader limit、`-load-stop-instance-file`、`-srcfile` 和 `-const-source-fallback` 逐项传给 `port.trace_batch`。输出行预算可用 `-trace-max-rows N` 或环境变量 `NPI_TRACE_MAX_ROWS` 设置，默认 `20000`；`0` 表示不启用该行数保护。全局预算命中 `TRACE_LIMIT_REACHED:row_limit` 时，适配器返回 `KDEBUG_ROW_LIMIT_REACHED`，不会发布部分 full/boundary CSV，也不会覆盖已有正式 CSV。
 
-`-load-stop-instance-file` 表示一趟 loader trace 的完整 cut-set，不能截断或拆成多次 trace 后合并。`stop_instances` 没有 4096 项的人为数量上限；适配器始终以单个 `port.trace_batch` 请求传入去重后的完整列表，kdebug engine 通过 TSV plan 交给 Tcl，Tcl 使用层次前缀索引匹配，避免按“信号数 x stop 数”线性扫描。端口数组仍保留 4096 项上限。
+`-load-stop-instance-file` 表示一趟 loader trace 的完整 cut-set，不能截断或拆成多次 trace 后合并。`ports` 和 `stop_instances` 都没有 4096 项的人为数量上限；适配器仍以单个 `port.trace_batch` 请求传入去重后的完整列表，kdebug engine 通过 TSV plan 交给 Tcl。Tcl 对 stop 和显式 port 过滤都使用哈希索引，避免按“信号数 x 列表项数”做线性扫描。
+
+大端口或 keyword 集合不要展开成一个超长 shell 参数。Raw Trace 使用 `-ports-file`；CSV Filter 和 XLSX Annotate 同时支持 `-ports-file` 与 `-keywords-file`。上层反标流程也会把合并、去重后的列表写入工作文件再交给内部子进程，避免 Linux 单参数长度限制。
 
 XLSX subsystem 模式允许个别 module trace 失败后继续使用其他 module 的有效拓扑；如果所有 module 都失败且没有任何 subsystem 拓扑，则最终错误保留首个真实 trace 异常，不再用 `no subsystem instances found` 覆盖 kdebug/Verdi 根因。
 
@@ -292,6 +299,16 @@ o_ready o_valid
 A[7]
 ```
 
+命令行可以直接引用 list 文件，不需要先把大列表展开成一个参数：
+
+| 入口 | ports 文件 | keywords 文件 |
+| --- | --- | --- |
+| `npi_trace.sh` | `-ports-file ports.list` | 不使用 keywords |
+| `trace_and_filter.sh` | `-ports-file ports.list` | `-keywords-file keywords.list` |
+| `annotate_trace_xlsx.sh` | `-ports-file ports.list` | `-keywords-file keywords.list` |
+
+内联的 `-ports` / `-keywords` 可以与文件入口同时使用；工具按首次出现顺序合并并去重。loader cut-set 继续使用 `-load-stop-instance-file instances.list`，其语义是一趟 trace 的完整 stop 集合。
+
 ## GUI 模式一：XLSX Annotate
 
 `XLSX Annotate` 调用：
@@ -322,6 +339,7 @@ A[7]
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个目标端口 loader 递归最多访问多少个信号节点。超过后停止该端口 loader 追踪，并在 CSV/XLSX 中写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个目标端口 loader 递归最多展开多少条连接边。用于限制超宽 fanout 或跨层 alias 环导致的指数级扩散。超过后写入 `TRACE_LIMIT_REACHED:*`。`0` 表示关闭该保护。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表最多消费多少个 handle。大 fanout net 返回过大列表时会截断并写入 `TRACE_LIMIT_REACHED:*`，避免单次 API 结果拖垮脚本。`0` 表示关闭该保护。 |
+| `trace max rows` | `trace_max_rows` | `-trace-max-rows` | `20000` | 一次 `port.trace_batch` 的全局输出行预算。命中后整次 trace fail-closed，返回 `KDEBUG_ROW_LIMIT_REACHED` 且不发布部分 CSV。`0` 表示不启用该预算。 |
 | `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | kdebug action / 兼容 wrapper 的墙钟超时秒数。`0` 表示 wrapper 不另设上限；公共请求仍带 `KDEBUG_ACTION_TIMEOUT_MS`，默认 3600000 ms。超时会终止适配器进程组。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开后记录公共 kdebug request、warning/stderr、常量证据和协议诊断。大项目常规运行建议关闭。 |
 | `stream` | `stream` | `--stream` | `true` | 启用流式聚合反标。Python 端边读 CSV 边聚合，配合匹配缓存降低大项目运行内存压力。大项目建议打开。 |
@@ -354,6 +372,7 @@ A[7]
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个端口 loader 递归节点上限，超过后结果中出现 `TRACE_LIMIT_REACHED:*`。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个端口 loader 连接展开上限，用于限制大 fanout 或环路扩散。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表消费上限，防止一个超宽 net 一次返回过多 handle。 |
+| `trace max rows` | `trace_max_rows` | `-trace-max-rows` | `20000` | 全局 trace 行预算；命中后不发布部分 CSV。`0` 表示不启用该预算。 |
 | `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 kdebug trace 兼容流程的 wrapper 超时秒数，`0` 表示 wrapper 不另设上限。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开公共 kdebug request、warning/stderr、常量证据和协议诊断日志。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
@@ -401,6 +420,7 @@ CSV 模式常见输出：
 | `load node limit` | `load_trace_node_limit` | `-load-trace-node-limit` | `20000` | 单个端口 loader 递归节点上限。 |
 | `load edge limit` | `load_trace_edge_limit` | `-load-trace-edge-limit` | `100000` | 单个端口 loader 连接展开上限。 |
 | `load api list limit` | `load_trace_api_list_limit` | `-load-trace-api-list-limit` | `20000` | 单次 NPI loader API 返回列表消费上限。 |
+| `trace max rows` | `trace_max_rows` | `-trace-max-rows` | `20000` | 全局 trace 行预算；命中后 Raw Trace 失败且不发布部分 full/boundary CSV。`0` 表示不启用该预算。 |
 | `Verdi timeout sec` | `verdi_timeout_sec` | `-verdi-timeout-sec` | `0` | 单次 kdebug trace 兼容流程的 wrapper 超时秒数。 |
 | `trace debug` | `trace_debug` | `-trace-debug 0/1` | `false` | 打开 Raw Trace 的详细诊断日志，用于定位 module port 跨层、源码上下文和 assign fanout 是否成功。 |
 | `const source fallback` | `const_source_fallback` | `-const-source-fallback 0/1` | `true` | 是否启用源码 fallback 补充识别常数 tie。 |
@@ -469,6 +489,7 @@ CSV 模式常见输出：
 | `load_trace_node_limit` | `load node limit` | string/integer | `20000` | 单个端口 loader 递归节点上限，`0` 表示关闭。 |
 | `load_trace_edge_limit` | `load edge limit` | string/integer | `100000` | 单个端口 loader 连接展开上限，`0` 表示关闭。 |
 | `load_trace_api_list_limit` | `load api list limit` | string/integer | `20000` | 单次 NPI loader API 返回列表消费上限，`0` 表示关闭。 |
+| `trace_max_rows` | `trace max rows` | string/integer | `20000` | `port.trace_batch` 全局输出行预算，`0` 表示不启用；命中时不发布部分 CSV。 |
 | `verdi_timeout_sec` | `Verdi timeout sec` | string/integer | `0` | kdebug 兼容 wrapper 超时秒数，`0` 表示不另设上限。 |
 | `trace_debug` | `trace debug` | boolean | `false` | 是否打开 trace 详细诊断日志。打开后日志会包含 `DEBUG collect_load_rec_enter`、`DEBUG source_module_port_load_probe`、`DEBUG source_assign_load_probe`、`DEBUG source_assign_load_empty` 等信息。 |
 | `csv_output` | `output csv` | string | 空 | CSV Filter 输出路径。仅 CSV 模式使用。 |
@@ -511,6 +532,7 @@ Load Config -> trace_gui_demo_xlsx.json -> Generate Command -> Run
   -load-trace-node-limit 5000 \
   -load-trace-edge-limit 20000 \
   -load-trace-api-list-limit 5000 \
+  -trace-max-rows 20000 \
   -verdi-timeout-sec 7200 \
   --match-cache-size 200000 \
   --keyword-batch-size 1
@@ -555,9 +577,9 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -template trace_template.xlsx \
   -output annotated.xlsx \
   -lib build/simv.daidir/kdb.elab++ \
-  -keywords KeyModA,KeyModB \
+  -keywords-file keywords.list \
   -module TargetModA,TargetModB \
-  -ports clk,rst,we,waddr,wdata \
+  -ports-file ports.list \
   -subsystem-level 2 \
   --stream \
   --keyword-batch-size 1 \
@@ -568,6 +590,7 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -load-trace-node-limit 5000 \
   -load-trace-edge-limit 20000 \
   -load-trace-api-list-limit 5000 \
+  -trace-max-rows 20000 \
   -verdi-timeout-sec 7200 \
   -trace-debug 0 \
   -log-file annotate_run.log
@@ -579,8 +602,8 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
 ./trace_and_filter.sh \
   -module TargetMod \
   -lib build/simv.daidir/kdb.elab++ \
-  -keywords KeyModA,KeyModB \
-  -ports clk,rst,we,waddr,wdata \
+  -keywords-file keywords.list \
+  -ports-file ports.list \
   -output target_from_keywords.csv \
   --keyword-batch-size 4 \
   -const-source-fallback 0 \
@@ -590,6 +613,7 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -load-trace-node-limit 5000 \
   -load-trace-edge-limit 20000 \
   -load-trace-api-list-limit 5000 \
+  -trace-max-rows 20000 \
   -verdi-timeout-sec 7200 \
   -trace-debug 0 \
   -log-file filter_run.log
@@ -601,7 +625,7 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
 ./npi_trace.sh \
   -module TargetMod \
   -lib build/simv.daidir/kdb.elab++ \
-  -ports clk,rst \
+  -ports-file ports.list \
   -module-out target_module_connections.csv \
   -const-source-fallback 0 \
   -const-trace-depth 4 \
@@ -610,6 +634,7 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
   -load-trace-node-limit 5000 \
   -load-trace-edge-limit 20000 \
   -load-trace-api-list-limit 5000 \
+  -trace-max-rows 20000 \
   -verdi-timeout-sec 7200 \
   -trace-debug 1 \
   -log-file raw_trace_run.log \
@@ -617,6 +642,24 @@ GUI 不影响传统命令行入口，三类命令仍可直接运行。
 ```
 
 `-log-file` 只保存日志流。`npi_trace.sh` 的完整 CSV 仍然从 stdout 输出，所以 Raw Trace 仍然要用 `>` 指定 `target_full.csv`。
+
+## 大列表与长结果边界
+
+`ports` 和 `stop_instances` 已移除过去的 4096 项 schema/engine 人为上限。数量较大时仍应使用 list 文件，原因不是 action 数量限制，而是 Linux 对单个命令行参数有独立长度限制。ports、stop cut-set 都保持在一次 `port.trace_batch` 中处理，不通过拆批改变 trace 语义；engine 到 Tcl 的大列表使用 plan 文件交接。
+
+`filter_trace.py` 会预先建立 keyword instance 层次前缀的哈希集合，再按每条 signal 的有限候选前缀查询。这样 50000 个 instance 的过滤不会退化成“CSV 行数 x instance 数”的线性扫描。`TRACE_LIMIT_REACHED:*` 行仍无条件保留，避免资源预算命中被误解释成没有 keyword 命中。
+
+Python 标准库 `csv` 默认只接受 131072 字节的单字段。过滤、XLSX 反标和 GUI CSV 查看入口现在统一把该上限提升到平台可接受的最大值，因此超长层次路径或聚合证据不会因为默认值而报 `field larger than field limit`。
+
+Excel 文件格式本身仍限制单元格文本最多 32767 个字符，这个硬上限不能取消。反标内容超过上限时，单元格末尾会包含：
+
+```text
+XLSX_CELL_LIMIT_REACHED:full_result_in_trace_csv
+```
+
+运行日志同时记录 `xlsx_cell_truncated`、row key、port 和原始字符数。XLSX 用于汇总查看，完整逐行证据保留在 workdir 的 `<module>_full.csv` / `<module>_module_connections.csv` 等 trace CSV 中。
+
+资源保护没有被一并删除：`max_nodes`、`max_edges` 和 `max_api_results` 仍分别由三个 loader limit 控制，命中后发布对应 `TRACE_LIMIT_REACHED:node_limit_*`、`edge_limit_*` 或 `api_list_limit_*` marker。全局 `max_rows` 不同：它可能让后续端口完全没有行，因此命中 `row_limit` 时必须整次失败并停止发布结果。需要在可控环境中取消该全局预算时显式使用 `-trace-max-rows 0`。
 
 ## 历史直接 Tcl 调试（非当前主流程）
 
@@ -741,9 +784,9 @@ verdi -batch -nologo -play ./npi_find_module_params.tcl 2>&1 | tee npi_find_para
   -template trace_template.xlsx \
   -output annotated.xlsx \
   -lib build/simv.daidir/kdb.elab++ \
-  -keywords KeyModA,KeyModB,KeyModC \
+  -keywords-file keywords.list \
   -module TargetModA,TargetModB \
-  -ports clk,rst,we,waddr,wdata \
+  -ports-file ports.list \
   --stream \
   --keyword-batch-size 1 \
   -const-source-fallback 0 \
@@ -753,6 +796,7 @@ verdi -batch -nologo -play ./npi_find_module_params.tcl 2>&1 | tee npi_find_para
   -load-trace-node-limit 5000 \
   -load-trace-edge-limit 20000 \
   -load-trace-api-list-limit 5000 \
+  -trace-max-rows 20000 \
   -verdi-timeout-sec 7200
 ```
 
@@ -765,6 +809,7 @@ verdi -batch -nologo -play ./npi_find_module_params.tcl 2>&1 | tee npi_find_para
 - `-const-trace-depth 4` 先小深度验证流程，再按需要增大。
 - `-assign-trace-depth 2` 和 `-assign-expr-trace-depth 1` 先保守开启，避免复杂 assign 网络无限扩散。
 - `-load-trace-node-limit 5000`、`-load-trace-edge-limit 20000` 和 `-load-trace-api-list-limit 5000` 用来限制单个端口 loader 追踪的递归节点数、展开边数和单次 NPI 返回列表大小。超大工程先用较小值保命；如果结果中出现 `TRACE_LIMIT_REACHED:*`，再针对目标端口逐步调大。
+- `-trace-max-rows 20000` 是整次 action 的全局行预算。命中后本轮失败且不发布部分 CSV；确认磁盘和内存余量充足后，可增大该值或用 `0` 取消这项预算。
 - `-verdi-timeout-sec 7200` 是 Verdi 进程级保险。超时会报错退出，不会把半截 CSV 当成完整结果。
 - 若 parameter 采集阶段不稳定，可先开 `--no-params` 确认端口反标流程。
 

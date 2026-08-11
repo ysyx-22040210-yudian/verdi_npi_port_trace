@@ -69,7 +69,7 @@ proc get_instance_path {hdl} {
 # legacy trace state explicit so each batch request can reset it deterministically.
 set target_mod ""
 set srcfile ""
-set port_filter {}
+set port_filter_set [dict create]
 set port_filter_select_map {}
 set const_trace_max_depth 16
 set const_source_fallback 1
@@ -5837,6 +5837,31 @@ proc selected_port_names { portname } {
     return [list $portname]
 }
 
+proc configure_port_trace_ports { ports } {
+    global port_filter_set port_filter_select_map
+
+    set port_filter_set [dict create]
+    set port_filter_select_map [dict create]
+    foreach port $ports {
+        set port [string trim $port]
+        if { $port eq "" } {continue}
+        set parsed [split_port_filter_spec $port]
+        set base [lindex $parsed 0]
+        set select [lindex $parsed 1]
+        dict set port_filter_set $base 1
+        dict lappend port_filter_select_map $base $select
+    }
+}
+
+proc port_trace_port_selected { portname } {
+    global port_filter_set
+
+    if { [dict size $port_filter_set] == 0 } {
+        return 1
+    }
+    return [dict exists $port_filter_set $portname]
+}
+
 proc exact_port_select_is_resolvable { port_hdl portname select width declared_range } {
     if { $select eq "" } {
         return 1
@@ -5883,7 +5908,7 @@ proc exact_port_select_is_resolvable { port_hdl portname select width declared_r
 # -----------------------------------------------------------------------
 # Process one instance: emit CSV rows for all its ports
 # -----------------------------------------------------------------------
-proc process_instance { inst_path parent_path instname port_filter outfh module_outfh } {
+proc process_instance { inst_path parent_path instname outfh module_outfh } {
     global target_mod srcfile const_trace_max_depth assign_trace_max_depth assign_expr_trace_max_depth
     global current_trace_instance current_trace_port current_trace_port_path
     global current_trace_role current_const_driver_evidence_seen
@@ -5965,7 +5990,7 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { $portname eq "" } { continue }
 
         # Skip if port filter is active and this port is not in the list
-        if { [llength $port_filter] > 0 && [lsearch -exact $port_filter $portname] < 0 } {
+        if { ![port_trace_port_selected $portname] } {
             log_step "skip_port port=$portname reason=not_in_filter instance=$inst_path"
             continue
         }
@@ -6589,7 +6614,7 @@ proc kdebug_port_trace_run {
     max_parent_depth max_assign_depth max_expr_depth max_nodes max_edges
     max_api_results max_rows debug_enabled
 } {
-    global target_mod srcfile port_filter port_filter_select_map
+    global target_mod srcfile port_filter_set port_filter_select_map
     global const_trace_max_depth const_source_fallback
     global assign_trace_max_depth assign_expr_trace_max_depth trace_debug_enabled
     global load_trace_node_limit load_trace_edge_limit load_trace_api_list_limit
@@ -6611,18 +6636,7 @@ proc kdebug_port_trace_run {
     set const_source_fallback [expr {$source_fallback ? 1 : 0}]
     set trace_debug_enabled [expr {$debug_enabled ? 1 : 0}]
     configure_load_trace_stop_instances $stop_instances
-    set port_filter {}
-    set port_filter_select_map {}
-    foreach port $ports {
-        set port [string trim $port]
-        if { $port eq "" } {continue}
-        set parsed [split_port_filter_spec $port]
-        set base [lindex $parsed 0]
-        set select [lindex $parsed 1]
-        lappend port_filter $base
-        dict lappend port_filter_select_map $base $select
-    }
-    set port_filter [lsort -unique $port_filter]
+    configure_port_trace_ports $ports
 
     set kdebug_port_trace_full_rows {}
     set kdebug_port_trace_boundary_rows {}
@@ -6676,8 +6690,7 @@ proc kdebug_port_trace_run {
         set instname [lindex $parts end]
         set parent_path [join [lrange $parts 0 end-1] "."]
         if { [catch {
-            process_instance $inst_path $parent_path $instname $port_filter \
-                $full_fh $boundary_fh
+            process_instance $inst_path $parent_path $instname $full_fh $boundary_fh
         } instance_error] } {
             lappend kdebug_port_trace_errors [dict create \
                 scope instance code INSTANCE_TRACE_FAILED message $instance_error \

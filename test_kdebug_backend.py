@@ -568,17 +568,18 @@ class KDebugBackendContractTest(unittest.TestCase):
         args_schema = schema["properties"]["args"]["properties"]
         self.assertNotIn("maxItems", args_schema["stop_instances"])
         self.assertTrue(args_schema["stop_instances"]["uniqueItems"])
-        self.assertEqual(args_schema["ports"]["maxItems"], 4096)
+        self.assertNotIn("maxItems", args_schema["ports"])
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             daidir = root / "simv.daidir"
             daidir.mkdir()
             plan_dir = root / "plans"
             plan_dir.mkdir()
+            ports = ["port_{}".format(index) for index in range(50000)]
             stops = ["top.tile{}.u_stop".format(index) for index in range(50000)]
             args = {
                 "module": "Target",
-                "ports": ["a"],
+                "ports": ports,
                 "stop_instances": stops,
                 "options": {},
             }
@@ -586,7 +587,12 @@ class KDebugBackendContractTest(unittest.TestCase):
                 args, {}, {"daidir": str(daidir)}, str(plan_dir)
             )
             stop_plan = Path(environment["KDEBUG_TCL_STOP_INSTANCE_PLAN"])
+            port_plan = Path(environment["KDEBUG_TCL_PORT_PLAN"])
+            encoded_ports = port_plan.read_text(encoding="utf-8").splitlines()
             encoded_rows = stop_plan.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(encoded_ports), 50000)
+            self.assertEqual(bytes.fromhex(encoded_ports[0]).decode("utf-8"), ports[0])
+            self.assertEqual(bytes.fromhex(encoded_ports[-1]).decode("utf-8"), ports[-1])
             self.assertEqual(len(encoded_rows), 50000)
             self.assertEqual(bytes.fromhex(encoded_rows[0]).decode("utf-8"), stops[0])
             self.assertEqual(bytes.fromhex(encoded_rows[-1]).decode("utf-8"), stops[-1])
@@ -605,14 +611,12 @@ class KDebugBackendContractTest(unittest.TestCase):
                     empty_args, {}, {"daidir": str(daidir)}, str(plan_dir)
                 )
 
-            too_many_ports_args = dict(args)
-            too_many_ports_args["ports"] = [
-                "p{}".format(index) for index in range(4097)
-            ]
-            too_many_ports_args["stop_instances"] = []
-            with self.assertRaisesRegex(ValueError, "at most 4096 items"):
+            duplicate_ports_args = dict(args)
+            duplicate_ports_args["ports"] = ["p0", "p0"]
+            duplicate_ports_args["stop_instances"] = []
+            with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
                 engine.prepare_port_trace_environment(
-                    too_many_ports_args, {}, {"daidir": str(daidir)}, str(plan_dir)
+                    duplicate_ports_args, {}, {"daidir": str(daidir)}, str(plan_dir)
                 )
 
     @unittest.skipUnless(

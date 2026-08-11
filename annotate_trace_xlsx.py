@@ -709,6 +709,25 @@ def trace_failure_marker(exc: BaseException) -> str:
     return f"TRACE_FAILED:{type(exc).__name__}"
 
 
+def require_subsystem_topology(
+    subsystems: Set[str],
+    first_trace_failure: Optional[BaseException],
+    empty_message: str,
+) -> None:
+    if subsystems:
+        return
+    if first_trace_failure is not None:
+        log_step(
+            "subsystem_topology=none action=propagate_first_trace_failure "
+            "error_type={} error={}".format(
+                type(first_trace_failure).__name__,
+                first_trace_failure,
+            )
+        )
+        raise first_trace_failure
+    raise RuntimeError(empty_message)
+
+
 def split_trace_rows_by_instance(rows: Sequence[TraceRow]) -> Dict[str, List[TraceRow]]:
     by_instance: Dict[str, List[TraceRow]] = {}
     for row in rows:
@@ -1865,6 +1884,7 @@ def main() -> None:
             module_port_results: Dict[str, Dict[str, Dict[str, str]]] = {}
             module_errors: Dict[str, str] = {}
             module_port_results_by_subsystem: Dict[str, Dict[str, Dict[str, Dict[str, str]]]] = {}
+            first_trace_failure: Optional[BaseException] = None
 
             if args.subsystem_level:
                 filter_instances_by_subsystem = split_instances_by_subsystem(
@@ -1931,6 +1951,8 @@ def main() -> None:
                         module_port_results[module] = results
                         log_step(f"stream loaded trace rows for {module}: {total_rows}")
                 except (subprocess.SubprocessError, TraceOutputError) as exc:
+                    if first_trace_failure is None:
+                        first_trace_failure = exc
                     marker = trace_failure_marker(exc)
                     module_errors[module] = marker
                     log_step(
@@ -1951,8 +1973,11 @@ def main() -> None:
                                 module, error
                             )
                         )
-                if not subsystems:
-                    raise RuntimeError("no subsystem instances found in streamed trace rows")
+                require_subsystem_topology(
+                    subsystems,
+                    first_trace_failure,
+                    "no subsystem instances found in streamed trace rows",
+                )
                 for subsystem in sorted(subsystems):
                     log_step(f"write subsystem workbook: {subsystem}")
                     subsystem_modules = select_subsystem_modules(
@@ -2033,6 +2058,7 @@ def main() -> None:
 
         module_traces: Dict[str, ModuleTrace] = {}
         rows_by_module_subsystem: Dict[str, Dict[str, List[TraceRow]]] = {}
+        first_trace_failure = None
         for module in modules:
             log_step(f"trace module: {module}")
             try:
@@ -2057,6 +2083,8 @@ def main() -> None:
                         )
                     )
             except (subprocess.SubprocessError, TraceOutputError) as exc:
+                if first_trace_failure is None:
+                    first_trace_failure = exc
                 marker = trace_failure_marker(exc)
                 module_traces[module] = ModuleTrace(rows=[], error=marker)
                 log_step(
@@ -2078,8 +2106,11 @@ def main() -> None:
                             module, trace.error
                         )
                     )
-            if not subsystems:
-                raise RuntimeError("no subsystem instances found in full trace rows")
+            require_subsystem_topology(
+                subsystems,
+                first_trace_failure,
+                "no subsystem instances found in full trace rows",
+            )
             filter_instances_by_subsystem = split_instances_by_subsystem(
                 filter_instances,
                 args.subsystem_level,

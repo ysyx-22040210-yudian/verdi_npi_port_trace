@@ -83,6 +83,7 @@ set load_trace_edge_count 0
 set load_trace_limit_hit 0
 set load_trace_limit_reason ""
 set load_trace_stop_instances {}
+set load_trace_stop_instance_set [dict create]
 set kdebug_port_trace_full_rows {}
 set kdebug_port_trace_boundary_rows {}
 set kdebug_port_trace_evidence {}
@@ -3576,13 +3577,40 @@ proc is_immediate_signal_under_instance { signal_name inst } {
     return 1
 }
 
+proc configure_load_trace_stop_instances { stop_instances } {
+    global load_trace_stop_instances load_trace_stop_instance_set
+
+    set load_trace_stop_instance_set [dict create]
+    foreach inst $stop_instances {
+        set inst [string trim $inst]
+        if { $inst ne "" } {
+            dict set load_trace_stop_instance_set $inst 1
+        }
+    }
+    set load_trace_stop_instances [dict keys $load_trace_stop_instance_set]
+}
+
+proc stop_instance_candidate_matches { signal_name inst } {
+    global load_trace_stop_instance_set current_trace_instance
+
+    if { $inst eq "" || ![dict exists $load_trace_stop_instance_set $inst] } {
+        return 0
+    }
+    if { [info exists current_trace_instance] &&
+         $current_trace_instance ne "" &&
+         $inst eq $current_trace_instance } {
+        return 0
+    }
+    return [is_direct_instance_node [strip_instance_prefix $signal_name $inst]]
+}
+
 proc signal_belongs_to_stop_instance { signal_name } {
-    global load_trace_stop_instances current_trace_instance
+    global load_trace_stop_instance_set current_trace_instance
 
     set signal_name [strip_signal_selects [normalize_signal_name $signal_name]]
     if { $signal_name eq "" ||
          [is_const_literal_name $signal_name] ||
-         [llength $load_trace_stop_instances] == 0 } {
+         [dict size $load_trace_stop_instance_set] == 0 } {
         return 0
     }
     if { [info exists current_trace_instance] &&
@@ -3591,17 +3619,17 @@ proc signal_belongs_to_stop_instance { signal_name } {
         return 0
     }
 
-    foreach inst $load_trace_stop_instances {
-        set inst [string trim $inst]
-        if { $inst eq "" } {
+    if { [stop_instance_candidate_matches $signal_name $signal_name] } {
+        return 1
+    }
+    set name_length [string length $signal_name]
+    for {set index 0} {$index < $name_length} {incr index} {
+        set separator [string index $signal_name $index]
+        if { $separator ne "." && $separator ne "/" } {
             continue
         }
-        if { [info exists current_trace_instance] &&
-             $current_trace_instance ne "" &&
-             $inst eq $current_trace_instance } {
-            continue
-        }
-        if { [is_direct_instance_node [strip_instance_prefix $signal_name $inst]] } {
+        set inst [string range $signal_name 0 [expr {$index - 1}]]
+        if { [stop_instance_candidate_matches $signal_name $inst] } {
             return 1
         }
     }
@@ -6582,7 +6610,7 @@ proc kdebug_port_trace_run {
     set kdebug_port_trace_max_rows [kdebug_port_trace_int $max_rows 0]
     set const_source_fallback [expr {$source_fallback ? 1 : 0}]
     set trace_debug_enabled [expr {$debug_enabled ? 1 : 0}]
-    set load_trace_stop_instances [lsort -unique $stop_instances]
+    configure_load_trace_stop_instances $stop_instances
     set port_filter {}
     set port_filter_select_map {}
     foreach port $ports {

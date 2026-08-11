@@ -4,13 +4,12 @@
   "version": "0.1.0-tcl",
   "source": {
     "repository": "https://github.com/ysyx-22040210-yudian/kverif.git",
-    "commit": "05e08de4f319415f17e2455331b21cacc08891d1",
-    "commit_date": "2026-08-06T02:08:24+08:00",
-    "subject": "Support native elab++ design databases"
+    "commit": "4567dd22433efc19e23a9dd885d3598b5561aca6",
+    "commit_date": "2026-08-12T00:32:00+08:00",
+    "subject": "Support large port trace stop cut sets"
   },
   "bundle_patches": [
-    "libexec/kdebug-engine pins KDEBUG_ENGINE_EXE to its executable launcher so session daemons do not depend on the Python file mode",
-    "libexec/tcl_engine/kdebug_engine.py checks the AF_UNIX socket path by encoded bytes so multibyte HOME paths use the short fallback"
+    "libexec/kdebug-engine pins KDEBUG_ENGINE_EXE to its executable launcher so session daemons do not depend on the Python file mode"
   ],
   "binary": {
     "path": "kdebug/kdebug",
@@ -48,8 +47,8 @@
     },
     {
       "path": "kdebug/libexec/tcl_engine/kdebug_engine.py",
-      "sha256": "b1d86b0e68f848151bc4eabf293d187a094615d993876a5fe7c1c5f610cb2615",
-      "size_bytes": 143120,
+      "sha256": "9a5b8710560e8421984bc9473d91dd47ff7d5682dd54ee1553bb53143fb09b0d",
+      "size_bytes": 143005,
       "text_eol": "lf"
     },
     {
@@ -60,15 +59,15 @@
     },
     {
       "path": "kdebug/libexec/tcl_engine/kdebug_port_trace.tcl",
-      "sha256": "26256ecafc34acc9be07f69187ac6f21f97db32fb7735422a84fa3c78885d760",
-      "size_bytes": 253598,
+      "sha256": "47d51f74171558cf080a3deb62051a7cfa9075194e022a1291dd07ab2690321b",
+      "size_bytes": 254624,
       "text_eol": "lf"
     }
   ],
   "schemas": {
     "path": "kdebug/schemas/v1",
     "file_count": 228,
-    "tree_sha256": "35c3342057fc3cdb3385dd9d32912c212c32bb56d4228d1ff1258f242fcae881",
+    "tree_sha256": "097f506322c46d59841f59483727e8276d9c07e09dfa19c7d7c461e78bc6a96a",
     "tree_sha256_algorithm": "SHA-256 over sorted POSIX relative path, NUL, LF-normalized bytes, NUL"
   },
   "licenses": [

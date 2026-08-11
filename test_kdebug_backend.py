@@ -1,9 +1,11 @@
 import contextlib
 import csv
 import hashlib
+import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -15,6 +17,24 @@ from types import SimpleNamespace
 from unittest import mock
 
 import kdebug_backend as backend
+
+
+def load_bundled_kdebug_engine():
+    engine_path = (
+        Path(__file__).resolve().parent
+        / "kdebug"
+        / "libexec"
+        / "tcl_engine"
+        / "kdebug_engine.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "bundled_kdebug_engine_for_test", str(engine_path)
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load bundled kdebug engine: {}".format(engine_path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def make_fake_kdebug_bundle(root: Path, omit=(), executable: bool = True) -> Path:
@@ -473,6 +493,194 @@ class KDebugBackendContractTest(unittest.TestCase):
                     "max_rows": 14,
                 },
             )
+
+    def test_trace_sends_5000_deduplicated_stop_instances_in_one_request(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            kdb = root / "simv.daidir" / "kdb.elab++"
+            kdb.mkdir(parents=True)
+            unique_stops = ["top.tile{}.u_stop".format(index) for index in range(5000)]
+            stops = root / "stops.txt"
+            stops.write_text(
+                "\n".join(list(reversed(unique_stops)) + unique_stops[:100]) + "\n",
+                encoding="utf-8",
+            )
+            full = root / "full.csv"
+            boundary = root / "boundary.csv"
+            args = backend.build_parser().parse_args(
+                [
+                    "trace", "--lib", str(kdb), "--module", "Target",
+                    "--ports", "a", "--stop-instance-file", str(stops),
+                    "--full-out", str(full), "--module-out", str(boundary),
+                ]
+            )
+            response = {
+                "meta": {"truncated": False},
+                "summary": {"truncated": False},
+                "data": {
+                    "module": "Target",
+                    "requested_ports": ["a"],
+                    "traced_ports": ["a"],
+                    "selection_mode": "explicit",
+                    "full_rows": [{
+                        "inst_full_name": "top.u0",
+                        "port_name": "a",
+                        "port_dir": "input",
+                        "role": "driver",
+                        "signal_full_name": "NO_DRIVER",
+                    }],
+                    "boundary_rows": [],
+                    "evidence": [],
+                    "errors": [],
+                    "truncated": False,
+                    "stats": {"processed_instances": 1},
+                },
+            }
+            with mock.patch.object(
+                backend, "resolve_kdebug", return_value="fake"
+            ), mock.patch.object(
+                backend.KDebugClient, "request", return_value=response
+            ) as request:
+                backend.run_trace(args)
+
+            self.assertEqual(request.call_count, 1)
+            action, action_args, _ = request.call_args[0]
+            self.assertEqual(action, "port.trace_batch")
+            self.assertEqual(action_args["stop_instances"], sorted(unique_stops))
+            self.assertEqual(len(action_args["stop_instances"]), 5000)
+            self.assertEqual(request.call_args[1], {"allow_truncated": True})
+            self.assertFalse(response["data"]["truncated"])
+            self.assertFalse(backend._response_truncated(response))
+            self.assertTrue(full.is_file())
+            self.assertTrue(boundary.is_file())
+
+    def test_bundled_engine_accepts_large_stop_plan_without_weakening_validation(self):
+        engine = load_bundled_kdebug_engine()
+        schema_path = (
+            Path(__file__).resolve().parent
+            / "kdebug"
+            / "schemas"
+            / "v1"
+            / "actions"
+            / "port.trace_batch.request.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        args_schema = schema["properties"]["args"]["properties"]
+        self.assertNotIn("maxItems", args_schema["stop_instances"])
+        self.assertTrue(args_schema["stop_instances"]["uniqueItems"])
+        self.assertEqual(args_schema["ports"]["maxItems"], 4096)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            daidir = root / "simv.daidir"
+            daidir.mkdir()
+            plan_dir = root / "plans"
+            plan_dir.mkdir()
+            stops = ["top.tile{}.u_stop".format(index) for index in range(50000)]
+            args = {
+                "module": "Target",
+                "ports": ["a"],
+                "stop_instances": stops,
+                "options": {},
+            }
+            environment = engine.prepare_port_trace_environment(
+                args, {}, {"daidir": str(daidir)}, str(plan_dir)
+            )
+            stop_plan = Path(environment["KDEBUG_TCL_STOP_INSTANCE_PLAN"])
+            encoded_rows = stop_plan.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(encoded_rows), 50000)
+            self.assertEqual(bytes.fromhex(encoded_rows[0]).decode("utf-8"), stops[0])
+            self.assertEqual(bytes.fromhex(encoded_rows[-1]).decode("utf-8"), stops[-1])
+
+            duplicate_args = dict(args)
+            duplicate_args["stop_instances"] = ["top.u_stop", "top.u_stop"]
+            with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+                engine.prepare_port_trace_environment(
+                    duplicate_args, {}, {"daidir": str(daidir)}, str(plan_dir)
+                )
+
+            empty_args = dict(args)
+            empty_args["stop_instances"] = [""]
+            with self.assertRaisesRegex(ValueError, "must be a non-empty string"):
+                engine.prepare_port_trace_environment(
+                    empty_args, {}, {"daidir": str(daidir)}, str(plan_dir)
+                )
+
+            too_many_ports_args = dict(args)
+            too_many_ports_args["ports"] = [
+                "p{}".format(index) for index in range(4097)
+            ]
+            too_many_ports_args["stop_instances"] = []
+            with self.assertRaisesRegex(ValueError, "at most 4096 items"):
+                engine.prepare_port_trace_environment(
+                    too_many_ports_args, {}, {"daidir": str(daidir)}, str(plan_dir)
+                )
+
+    @unittest.skipUnless(
+        os.name == "posix" and shutil.which("tclsh") is not None,
+        "large stop-instance semantics require POSIX tclsh",
+    )
+    def test_bundled_tcl_indexes_50000_stop_instances_with_stable_semantics(self):
+        root = Path(__file__).resolve().parent
+        trace_tcl = root / "kdebug" / "libexec" / "tcl_engine" / "kdebug_port_trace.tcl"
+        script = r'''
+source $::env(KDEBUG_PORT_TRACE_TCL)
+
+proc assert_stop_match {label expected signal_name} {
+    set actual [signal_belongs_to_stop_instance $signal_name]
+    if {$actual != $expected} {
+        puts stderr "FAILED $label signal={$signal_name} expected=$expected actual=$actual"
+        exit 2
+    }
+}
+
+set stops {}
+for {set index 0} {$index < 50000} {incr index} {
+    lappend stops "Top.tile${index}.u_stop"
+}
+configure_load_trace_stop_instances $stops
+if {[dict size $load_trace_stop_instance_set] != 50000} {
+    puts stderr "FAILED configured stop count"
+    exit 2
+}
+
+set current_trace_instance Top.tile7.u_stop
+assert_stop_match exact 1 Top.tile0.u_stop
+assert_stop_match exact_last 1 Top.tile49999.u_stop
+assert_stop_match direct 1 Top.tile0.u_stop.out
+assert_stop_match direct_child_port 1 Top.tile0.u_stop.child.out
+assert_stop_match deep 0 Top.tile0.u_stop.child.deep.out
+assert_stop_match slash 1 Top.tile0.u_stop/net/deep
+assert_stop_match current_exact 0 Top.tile7.u_stop
+assert_stop_match current_direct 0 Top.tile7.u_stop.out
+assert_stop_match current_deep 0 Top.tile7.u_stop.child.out
+assert_stop_match bit_select 1 {Top.tile0.u_stop.out[3]}
+assert_stop_match missing 0 Top.missing.u_stop.out
+assert_stop_match constant 0 {Const:1'b0}
+
+set started [clock milliseconds]
+for {set index 0} {$index < 2000} {incr index} {
+    if {[signal_belongs_to_stop_instance "Top.missing${index}.net"]} {
+        puts stderr "FAILED scaled miss query index=$index"
+        exit 2
+    }
+}
+puts "OK stops=50000 misses=2000 elapsed_ms=[expr {[clock milliseconds] - $started}]"
+'''
+        env = dict(os.environ)
+        env["KDEBUG_PORT_TRACE_TCL"] = str(trace_tcl)
+        completed = subprocess.run(
+            [shutil.which("tclsh")],
+            input=script,
+            cwd=str(root),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("OK stops=50000 misses=2000", completed.stdout)
 
     def test_missing_requested_port_is_nonfatal_and_publishes_empty_csv(self):
         with tempfile.TemporaryDirectory() as tmpdir:

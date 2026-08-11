@@ -29,6 +29,7 @@ from annotate_trace_xlsx import (
     find_filter_instances,
     find_module_parameters,
     run_checked,
+    require_subsystem_topology,
     select_subsystem_modules,
     split_output_path,
     trace_failure_marker,
@@ -138,6 +139,25 @@ class SparseSubsystemAnnotationTest(unittest.TestCase):
             ),
             "TRACE_FAILED:rc=137",
         )
+
+    def test_empty_subsystem_topology_propagates_first_trace_failure(self) -> None:
+        first = subprocess.CalledProcessError(1, ["npi_trace.sh", "-module", "Only0"])
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            require_subsystem_topology(
+                set(),
+                first,
+                "no subsystem instances found in streamed trace rows",
+            )
+        self.assertIs(raised.exception, first)
+
+    def test_empty_subsystem_topology_without_trace_failure_keeps_message(self) -> None:
+        message = "no subsystem instances found in full trace rows"
+        with self.assertRaisesRegex(RuntimeError, message):
+            require_subsystem_topology(set(), None, message)
+
+    def test_existing_subsystem_topology_keeps_partial_failure_tolerance(self) -> None:
+        failure = subprocess.CalledProcessError(1, ["npi_trace.sh"])
+        require_subsystem_topology({self.subsystem0}, failure, "unused")
 
     def test_stream_and_nonstream_writers_omit_absent_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

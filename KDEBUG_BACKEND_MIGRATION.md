@@ -99,6 +99,8 @@ KDEBUG_BIN=/home/host/kverif/tools/kdebug ./npi_trace.sh ...
 
 `--keyword-batch-size` 仍是本工具对 keyword module 搜索 workload 的分组与二分重试边界，不等同于 `port.trace_batch` 的端口数组。
 
+`args.stop_instances` 是同一趟 loader trace 的完整 cut-set，不能按数量截断，也不能拆成多次 trace 后合并，否则 stop-point 语义会改变。该数组没有 4096 项的人为上限，并由一次 `port.trace_batch` 请求完整传递；engine 通过 TSV plan 交接，Tcl 按信号层次前缀做哈希查询。`args.ports` 仍保留 4096 项上限。
+
 ## 5. JSON 协议与 fail-closed
 
 每次 action 都检查：
@@ -197,3 +199,4 @@ module,inst_full_name,param_name,param_value,param_kind,param_info
 5. 精确 bit 常量不会同时发布 `1'b0` 和 `1'b1`，日志包含 `evidence_source` 和 `const_full_path`。
 6. kdebug 非零退出、非法 JSON、`ok=false`、truncated 和 timeout 均不发布半截 CSV。
 7. full、boundary、parameter CSV 表头及 XLSX 消费流程与迁移前兼容。
+8. 5000 个以上 stop instances 仍由一次请求完整传入，且 XLSX 全部 module trace 失败时保留首个 kdebug/Verdi 错误。

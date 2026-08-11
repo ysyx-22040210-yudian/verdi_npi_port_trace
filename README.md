@@ -195,6 +195,10 @@ cd verdi_npi_port_trace
 
 `npi_trace.sh` 会把既有的 `-const-trace-depth`、`-assign-trace-depth`、`-assign-expr-trace-depth`、三个 loader limit、`-load-stop-instance-file`、`-srcfile` 和 `-const-source-fallback` 逐项传给 `port.trace_batch`。输出行预算可用 `-trace-max-rows N` 或环境变量 `NPI_TRACE_MAX_ROWS` 设置，默认 `20000`；`0` 沿用旧语义，表示不启用该行数保护。
 
+`-load-stop-instance-file` 表示一趟 loader trace 的完整 cut-set，不能截断或拆成多次 trace 后合并。`stop_instances` 没有 4096 项的人为数量上限；适配器始终以单个 `port.trace_batch` 请求传入去重后的完整列表，kdebug engine 通过 TSV plan 交给 Tcl，Tcl 使用层次前缀索引匹配，避免按“信号数 x stop 数”线性扫描。端口数组仍保留 4096 项上限。
+
+XLSX subsystem 模式允许个别 module trace 失败后继续使用其他 module 的有效拓扑；如果所有 module 都失败且没有任何 subsystem 拓扑，则最终错误保留首个真实 trace 异常，不再用 `no subsystem instances found` 覆盖 kdebug/Verdi 根因。
+
 方向判断规则：
 
 | 目标端口方向 | 反标判断端点 |

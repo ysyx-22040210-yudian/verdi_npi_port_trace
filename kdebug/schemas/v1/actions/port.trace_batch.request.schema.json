@@ -37,7 +37,6 @@
         "source": {"type": "string", "minLength": 1},
         "stop_instances": {
           "type": "array",
-          "maxItems": 4096,
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1}
         },

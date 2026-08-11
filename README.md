@@ -59,6 +59,7 @@ simv.daidir/kdb.elab++
 | `npi_port_trace.tcl` / `npi_find_instances.tcl` / `npi_find_module_params.tcl` | 旧直接 NPI 后端的历史参考文件；当前主流程不执行这些 Tcl。 |
 | `filter_trace.py` | CSV 过滤、合并、按实例拆分。 |
 | `KDEBUG_BACKEND_MIGRATION.md` | kdebug 后端发现、JSON 契约、批处理、fail-closed 和 CSV 兼容说明。 |
+| `XIANGSHAN_STOP_LIMIT_STRESS_REPORT_20260812.md` | 5001 stop cut-set 的真实 XiangShan elab++ 压测、资源对照、常量证据与结果哈希。 |
 | `multi_module_trace_template.xlsx` | 多 module 测试模板。 |
 | `all_features_trace_test.v` | 单一 RTL 场景覆盖多 module、多 keywords、parameter、常数、悬空、Reg endpoint、assign 透传/拼接/切片、单 bit 端口、loader fanout、子系统拆分。 |
 | `all_features_modules.list` / `all_features_keywords.list` / `all_features_ports.list` | 全特性回归使用的 module、keywords、ports 列表文件。 |

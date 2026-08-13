@@ -43,6 +43,9 @@
 shallow trace：48.41 秒、32 个实例、full/boundary 192/128、0 error。该响应与上游
 Python 3.6/3.8 基线逐字节一致，SHA-256 为
 `9dce1f0711069d6a5b2defea78f2237b9a26a40de8ceded9a7d67ee1fd6828e5`。
+最后通过主工具 `kdebug_backend.py trace` 直接提交 Dispatch `[08]/[09]`，Python 3.6
+端到端 rc=0、94.15 秒，发布 6 条 full 和 2 条 boundary 数据；CSV 端口名全部规范为
+`[8]/[9]`，日志中没有 octal、instance trace 或 module lookup 错误。
 
 ## 结论
 

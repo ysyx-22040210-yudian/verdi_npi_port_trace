@@ -59,6 +59,34 @@ session name 的 64 字符和 Unix socket 的约 104 字节路径也不属于 JS
 `01a40f9557b7f92f217a04ca954361195dfa6d5b`；最低符号版本仍为 GLIBC 2.14、
 GLIBCXX 3.4.19、CXXABI 1.3.2。
 
+### 最新 bundle 经主工具 adapter 的 50000 stop-set 门禁
+
+为避免只验证底层 action、本轮又从主工具提交 `2a62513` 的干净 archive
+`/root/verdi-trace-2a62513-clean` 调用 `kdebug_backend.py trace`。命令没有传
+`--kdebug-bin`、`KDEBUG_BIN` 或 `KVERIF_HOME`，因此实际使用仓库随包
+`tools/kdebug`；后端由 VM 的 Python 3.6.8 启动。输入仍是真实 XiangShan
+`kdb.elab++`，目标为 32 个 MSHR 实例的 `io_id[0]`。
+
+该门禁使用 50000 个互不重复的不匹配 stop instance，列表为 50000 行、2200000
+字节。为把工作量集中在大 cut-set 传输、Tcl plan、结果解析、常量证据校验和 CSV 原子
+发布，`source_fallback`、parent/assign/expression 扩展均显式关闭；这是一项容量门禁，
+不替代下文默认完整语义的常量证据基线。结果如下：
+
+| 指标 | 结果 |
+| --- | --- |
+| adapter / kdebug rc | 0 / 0 |
+| trace 摘要 | `trace_done module=MSHR instances=32 ports=1 full_rows=192 boundary_rows=128` |
+| full / boundary 文件行数 | 193 / 129（各含 1 行 header） |
+| 墙钟 / 峰值 RSS | 47.15 秒 / 1394712 KiB |
+| full SHA-256 | `dac1fb56378a7568bf0072cf6f75ab6c25c5d41832de2f8f73edf407c109a75b` |
+| boundary SHA-256 | `cce7499d11a26e560689e8d7e8b0ca9162e5a40829135e764951e59d46fa2d62` |
+
+日志中 `INVALID_ARGUMENT`、`PORT_TRACE_FAILED`、`MODULE_NOT_FOUND`、
+`INSTANCE_TRACE_FAILED` 和 `invalid octal` 的命中数均为 0。32 条常量 driver 日志中
+`0=16`、`1=16`；32/32 均含目标端口到常量的 `const_full_path`，source file 均为
+`/root/XiangShan-build/build/rtl/MSHRCtl.sv`。运行结束后未发现 Verdi、kdebug、Xvfb、
+`npi_trace` 进程或 `/tmp/port-trace-kdebug.*`、`kdebug-*.sock` 残留。
+
 ## 2026-08-14 故障隔离补充压测
 
 针对现场出现的

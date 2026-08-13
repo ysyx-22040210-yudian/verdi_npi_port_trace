@@ -27,6 +27,37 @@ proc debug_step {msg} {
     }
 }
 
+proc normalize_decimal_uint { value } {
+    set value [string trim $value]
+    if { ![regexp {^[0-9]+$} $value] } {
+        return ""
+    }
+
+    # Tcl expr treats a leading zero as an octal prefix.  HDL indices, ranges,
+    # widths, and unsized decimal literals are decimal text, so canonicalize
+    # them before any comparison, arithmetic, shift, incr, or lsort -integer.
+    set value [string trimleft $value 0]
+    if { $value eq "" } {
+        return 0
+    }
+    return $value
+}
+
+proc compare_decimal_uint { left right } {
+    set left [normalize_decimal_uint $left]
+    set right [normalize_decimal_uint $right]
+    if { $left eq "" || $right eq "" } {
+        error "decimal unsigned integer comparison requires canonical values"
+    }
+    if { $left < $right } {
+        return -1
+    }
+    if { $left > $right } {
+        return 1
+    }
+    return 0
+}
+
 proc split_port_filter_spec { spec } {
     set spec [string trim $spec]
     if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)(\[[0-9]+(:[0-9]+)?\])$} $spec -> base select _] } {
@@ -84,6 +115,8 @@ set load_trace_limit_hit 0
 set load_trace_limit_reason ""
 set load_trace_stop_instances {}
 set load_trace_stop_instance_set [dict create]
+set driver_trace_depth_limit_markers {}
+set load_trace_depth_limit_markers {}
 set kdebug_port_trace_full_rows {}
 set kdebug_port_trace_boundary_rows {}
 set kdebug_port_trace_evidence {}
@@ -202,13 +235,17 @@ proc get_handle_size { hdl } {
     }
 
     set size ""
-    if { ![catch { set size [::npi_L1::npi_nl_get npiNlSize $hdl] }] &&
-         [string is integer -strict $size] && $size > 0 } {
-        return $size
+    if { ![catch { set size [::npi_L1::npi_nl_get npiNlSize $hdl] }] } {
+        set size [normalize_decimal_uint $size]
+        if { $size ne "" && $size > 0 } {
+            return $size
+        }
     }
-    if { ![catch { set size [npi_nl_get -property npiNlSize -object $hdl] }] &&
-         [string is integer -strict $size] && $size > 0 } {
-        return $size
+    if { ![catch { set size [npi_nl_get -property npiNlSize -object $hdl] }] } {
+        set size [normalize_decimal_uint $size]
+        if { $size ne "" && $size > 0 } {
+            return $size
+        }
     }
     return ""
 }
@@ -375,11 +412,23 @@ proc canonicalize_generated_always_input { name } {
 proc normalize_signal_name { name } {
     set name [string trim $name]
     if { [regexp {^(.+)#\[([0-9]+):([0-9]+)\]$} $name -> base hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         regsub {\[[0-9]+:[0-9]+\]$} $base "" base
         return "${base}\[$hi:$lo\]"
     }
     if { [regexp {^(.+)#\[([0-9]+)\]$} $name -> base bit] } {
+        set bit [normalize_decimal_uint $bit]
         regsub {\[[0-9]+:[0-9]+\]$} $base "" base
+        return "${base}\[$bit\]"
+    }
+    if { [regexp {^(.+)\[([0-9]+):([0-9]+)\]$} $name -> base hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
+        return "${base}\[$hi:$lo\]"
+    }
+    if { [regexp {^(.+)\[([0-9]+)\]$} $name -> base bit] } {
+        set bit [normalize_decimal_uint $bit]
         return "${base}\[$bit\]"
     }
     if { [is_const_literal_name $name] && ![string match "Const:*" $name] } {
@@ -399,11 +448,15 @@ proc const_literal_raw { value } {
 proc const_bit_from_based_literal { width base digits bit } {
     set digits [string trim $digits]
     regsub -all {_} $digits "" digits
-    if { $digits eq "" || $bit eq "" || ![string is integer -strict $bit] || $bit < 0 } {
+    set bit [normalize_decimal_uint $bit]
+    if { $digits eq "" || $bit eq "" } {
         return ""
     }
-    if { $width ne "" && [string is integer -strict $width] && $bit >= $width } {
-        return ""
+    if { $width ne "" } {
+        set width [normalize_decimal_uint $width]
+        if { $width eq "" || $bit >= $width } {
+            return ""
+        }
     }
 
     set base [string tolower $base]
@@ -436,7 +489,8 @@ proc const_bit_from_based_literal { width base digits bit } {
             set bits [concat $bits $triad]
         }
     } elseif { $base eq "d" } {
-        if { ![regexp {^[0-9]+$} $digits] } {
+        set digits [normalize_decimal_uint $digits]
+        if { $digits eq "" } {
             return ""
         }
         return [expr {($digits >> $bit) & 1}]
@@ -466,6 +520,10 @@ proc project_const_literal_to_bit { value bit } {
     if { $bit eq "" } {
         return [normalize_signal_name $value]
     }
+    set bit [normalize_decimal_uint $bit]
+    if { $bit eq "" } {
+        return ""
+    }
 
     set bit_val ""
     if { [regexp {^'([01xXzZ?])$} $raw -> fill] } {
@@ -475,7 +533,11 @@ proc project_const_literal_to_bit { value bit } {
     } elseif { [regexp {^'[sS]?([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$} $raw -> base digits] } {
         set bit_val [const_bit_from_based_literal "" $base $digits $bit]
     } elseif { [regexp {^-?[0-9]+$} $raw] } {
-        if { $raw < 0 } {
+        if { [string index $raw 0] eq "-" } {
+            return ""
+        }
+        set raw [normalize_decimal_uint $raw]
+        if { $raw eq "" } {
             return ""
         }
         set bit_val [expr {($raw >> $bit) & 1}]
@@ -740,7 +802,7 @@ proc signal_leaf_name { signame } {
 proc signal_bit_index { signame } {
     set signame [normalize_signal_name $signame]
     if { [regexp {\[([0-9]+)\]$} $signame -> bit] } {
-        return $bit
+        return [normalize_decimal_uint $bit]
     }
     return ""
 }
@@ -748,9 +810,11 @@ proc signal_bit_index { signame } {
 proc signal_selected_bits { signame } {
     set signame [normalize_signal_name $signame]
     if { [regexp {\[([0-9]+)\]$} $signame -> bit] } {
-        return [list $bit]
+        return [list [normalize_decimal_uint $bit]]
     }
     if { [regexp {\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         set bits {}
         if { $hi >= $lo } {
             for {set bit $lo} {$bit <= $hi} {incr bit} {
@@ -807,6 +871,8 @@ proc select_bits_from_signal { signame } {
     set signame [normalize_signal_name $signame]
     if { [regexp {#\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] ||
          [regexp {\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         set bits {}
         if { $hi >= $lo } {
             for {set bit $lo} {$bit <= $hi} {incr bit} {
@@ -821,7 +887,7 @@ proc select_bits_from_signal { signame } {
     }
     if { [regexp {#\[([0-9]+)\]$} $signame -> bit] ||
          [regexp {\[([0-9]+)\]$} $signame -> bit] } {
-        return [list $bit]
+        return [list [normalize_decimal_uint $bit]]
     }
     return {}
 }
@@ -1219,10 +1285,17 @@ proc lhs_select_contains_bit { select bit } {
     if { $bit eq "" } {
         return 1
     }
+    set bit [normalize_decimal_uint $bit]
+    if { $bit eq "" } {
+        return 0
+    }
     if { [regexp {^\[([0-9]+)\]$} $select -> idx] } {
+        set idx [normalize_decimal_uint $idx]
         return [expr {$bit == $idx}]
     }
     if { [regexp {^\[([0-9]+):([0-9]+)\]$} $select -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         if { $hi >= $lo } {
             return [expr {$bit <= $hi && $bit >= $lo}]
         }
@@ -1236,15 +1309,22 @@ proc lhs_select_rhs_bit_for_target { select bit } {
         return ""
     }
     if { $select eq "" } {
-        return $bit
+        return [normalize_decimal_uint $bit]
+    }
+    set bit [normalize_decimal_uint $bit]
+    if { $bit eq "" } {
+        return ""
     }
     if { [regexp {^\[([0-9]+)\]$} $select -> idx] } {
+        set idx [normalize_decimal_uint $idx]
         if { $bit == $idx } {
             return 0
         }
         return ""
     }
     if { [regexp {^\[([0-9]+):([0-9]+)\]$} $select -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         if { $hi >= $lo } {
             if { $bit <= $hi && $bit >= $lo } {
                 return [expr {abs($bit - $lo)}]
@@ -1263,15 +1343,22 @@ proc lhs_select_bit_from_rhs_offset { select offset } {
         return ""
     }
     if { $select eq "" } {
-        return $offset
+        return [normalize_decimal_uint $offset]
+    }
+    set offset [normalize_decimal_uint $offset]
+    if { $offset eq "" } {
+        return ""
     }
     if { [regexp {^\[([0-9]+)\]$} $select -> idx] } {
+        set idx [normalize_decimal_uint $idx]
         if { $offset == 0 } {
             return $idx
         }
         return ""
     }
     if { [regexp {^\[([0-9]+):([0-9]+)\]$} $select -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         if { $hi >= $lo } {
             set bit [expr {$lo + $offset}]
             if { $bit <= $hi } {
@@ -1293,14 +1380,22 @@ proc rhs_references_signal_bit { rhs leaf bit } {
     if { $bit eq "" } {
         return [regexp [format {(^|[^A-Za-z0-9_$])%s([^A-Za-z0-9_$]|$)} $leaf] $rhs_no_space]
     }
+    set bit [normalize_decimal_uint $bit]
+    if { $bit eq "" } {
+        return 0
+    }
 
-    set bit_pattern [format {(^|[^A-Za-z0-9_$])%s\[%s\]([^A-Za-z0-9_$]|$)} $leaf $bit]
-    if { [regexp $bit_pattern $rhs_no_space] } {
-        return 1
+    set bit_pattern [format {(^|[^A-Za-z0-9_$])%s\[([0-9]+)\]([^A-Za-z0-9_$]|$)} $leaf]
+    foreach {_ _ rhs_bit _} [regexp -all -inline $bit_pattern $rhs_no_space] {
+        if { [normalize_decimal_uint $rhs_bit] eq $bit } {
+            return 1
+        }
     }
 
     set range_pattern [format {%s\[([0-9]+):([0-9]+)\]} $leaf]
     foreach {_ hi lo} [regexp -all -inline $range_pattern $rhs_no_space] {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         if { $hi >= $lo } {
             if { $bit <= $hi && $bit >= $lo } {
                 return 1
@@ -1326,12 +1421,27 @@ proc rhs_has_unselected_signal_reference { rhs leaf } {
 proc rhs_item_offsets_for_signal_bit { item leaf bit } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
+    if { $bit eq "" } {
+        if { [regexp [format {^%s$} $leaf] $item] } {
+            return [list $bit]
+        }
+        return {}
+    }
+    set bit [normalize_decimal_uint $bit]
+    if { $bit eq "" } {
+        return {}
+    }
 
-    if { [regexp [format {^%s\[%s\]$} $leaf $bit] $item] } {
-        return [list 0]
+    if { [regexp [format {^%s\[([0-9]+)\]$} $leaf] $item -> item_bit] } {
+        if { [normalize_decimal_uint $item_bit] eq $bit } {
+            return [list 0]
+        }
+        return {}
     }
 
     if { [regexp [format {^%s\[([0-9]+):([0-9]+)\]$} $leaf] $item -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         if { $hi >= $lo } {
             if { $bit <= $hi && $bit >= $lo } {
                 return [list [expr {abs($bit - $lo)}]]
@@ -1914,6 +2024,8 @@ proc parse_signal_width_text { text } {
         set width 1
         if { [regexp {\[([^\]]+)\]} $rest -> range] } {
             if { [regexp {^\s*([0-9]+)\s*:\s*([0-9]+)\s*$} $range -> hi lo] } {
+                set hi [normalize_decimal_uint $hi]
+                set lo [normalize_decimal_uint $lo]
                 if { $hi >= $lo } {
                     set width [expr {$hi - $lo + 1}]
                 } else {
@@ -1957,6 +2069,8 @@ proc parse_signal_range_text { text } {
 
         set select ""
         if { [regexp {\[\s*([0-9]+)\s*:\s*([0-9]+)\s*\]} $rest -> left right] } {
+            set left [normalize_decimal_uint $left]
+            set right [normalize_decimal_uint $right]
             set select "\[$left:$right\]"
         }
         regsub -all {\[[^\]]+\]} $rest " " rest
@@ -2740,10 +2854,30 @@ proc source_assign_direct_load_fanouts { sig_hdl signame {srcfile_hint ""} {scop
     return $fanouts
 }
 
+proc source_assign_load_expr_fanouts_core { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
+    set direct_fanouts {}
+    foreach fanout_sig [source_assign_load_fanouts_core $sig_hdl $signame 0 $srcfile_hint $scope_hint] {
+        append_unique_signal direct_fanouts $fanout_sig
+    }
+
+    set expr_fanouts {}
+    foreach fanout_sig [source_assign_load_fanouts_core $sig_hdl $signame 1 $srcfile_hint $scope_hint] {
+        set fanout_sig [normalize_signal_name $fanout_sig]
+        if { $fanout_sig ne "" && [lsearch -exact $direct_fanouts $fanout_sig] < 0 } {
+            append_unique_signal expr_fanouts $fanout_sig
+        }
+    }
+    return $expr_fanouts
+}
+
 proc source_assign_load_fanouts { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
     global assign_expr_trace_max_depth
 
     if { $assign_expr_trace_max_depth <= 0 } {
+        set expr_fanouts [source_assign_load_expr_fanouts_core $sig_hdl $signame $srcfile_hint $scope_hint]
+        if { [llength $expr_fanouts] > 0 } {
+            mark_trace_depth_limit load expr $signame [lindex $expr_fanouts 0]
+        }
         return {}
     }
 
@@ -2909,9 +3043,11 @@ proc expr_item_width { item {width_map {}} } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
     if { [regexp {^([0-9]+)'} $item -> width] } {
-        return $width
+        return [normalize_decimal_uint $width]
     }
     if { [regexp {\[([0-9]+):([0-9]+)\]$} $item -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         if { $hi >= $lo } {
             return [expr {$hi - $lo + 1}]
         }
@@ -2950,6 +3086,12 @@ proc expr_item_source_signal { item prefix } {
 proc expr_item_source_signal_for_bit { item bit prefix width_map range_map } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
+    if { $bit ne "" } {
+        set bit [normalize_decimal_uint $bit]
+        if { $bit eq "" } {
+            return ""
+        }
+    }
 
     set const_sig [const_literal_to_signal $item]
     if { $const_sig ne "" } {
@@ -2976,8 +3118,8 @@ proc expr_item_source_signal_for_bit { item bit prefix width_map range_map } {
                 }
                 set source_select "\[$source_bit\]"
             } elseif { [dict exists $width_map $name] } {
-                set width [dict get $width_map $name]
-                if { ![string is integer -strict $width] } {
+                set width [normalize_decimal_uint [dict get $width_map $name]]
+                if { $width eq "" } {
                     return ""
                 }
                 if { $width != 1 || $bit != 0 } {
@@ -3027,6 +3169,10 @@ proc expr_item_source_signals { item prefix } {
 proc rhs_driver_sources_for_bit { rhs bit prefix width_map range_map } {
     set rhs [string trim $rhs]
     regsub -all {\s+} $rhs "" rhs_no_space
+    set bit [normalize_decimal_uint $bit]
+    if { $bit eq "" } {
+        return {}
+    }
 
     set ternary [split_top_level_ternary $rhs_no_space]
     if { [llength $ternary] == 3 } {
@@ -3398,10 +3544,26 @@ proc source_assign_driver_combo_stop_expr { sig_hdl signame {srcfile_hint ""} {s
     return ""
 }
 
+proc source_assign_driver_expr_sources_core { sig_hdl signame {srcfile_hint ""} {scope_hint ""} } {
+    set direct_sources {}
+    foreach source_sig [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 0 $scope_hint] {
+        append_unique_signal direct_sources $source_sig
+    }
+
+    set expr_sources {}
+    foreach source_sig [source_assign_driver_sources_core $sig_hdl $signame $srcfile_hint 1 $scope_hint] {
+        set source_sig [normalize_signal_name $source_sig]
+        if { $source_sig ne "" && [lsearch -exact $direct_sources $source_sig] < 0 } {
+            append_unique_signal expr_sources $source_sig
+        }
+    }
+    return $expr_sources
+}
+
 proc source_assign_const_chain { signame srcfile depth visited_var {scope_hint ""} } {
     upvar 1 $visited_var visited
 
-    if { $depth <= 0 || $srcfile eq "" } {
+    if { $srcfile eq "" } {
         return {}
     }
     set signame [normalize_signal_name $signame]
@@ -3409,6 +3571,19 @@ proc source_assign_const_chain { signame srcfile depth visited_var {scope_hint "
         return {}
     }
     if { [lsearch -exact $visited $signame] >= 0 } {
+        return {}
+    }
+    if { $depth <= 0 } {
+        foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile 1 $scope_hint] {
+            set source_sig [normalize_signal_name $source_sig]
+            if { $source_sig eq "" || $source_sig eq $signame ||
+                 (![is_const_literal_name $source_sig] &&
+                  [lsearch -exact $visited $source_sig] >= 0) } {
+                continue
+            }
+            mark_trace_depth_limit driver expr $signame $source_sig
+            break
+        }
         return {}
     }
     lappend visited $signame
@@ -3454,6 +3629,10 @@ proc source_assign_driver_sources { sig_hdl signame {srcfile_hint ""} {scope_hin
     global assign_expr_trace_max_depth
 
     if { $assign_expr_trace_max_depth <= 0 } {
+        set expr_sources [source_assign_driver_expr_sources_core $sig_hdl $signame $srcfile_hint $scope_hint]
+        if { [llength $expr_sources] > 0 } {
+            mark_trace_depth_limit driver expr $signame [lindex $expr_sources 0]
+        }
         return {}
     }
 
@@ -3652,9 +3831,11 @@ proc load_trace_stop_at_endpoint { signame {why ""} } {
 proc select_selected_bits { select } {
     set select [string trim $select]
     if { [regexp {^\[([0-9]+)\]$} $select -> bit] } {
-        return [list $bit]
+        return [list [normalize_decimal_uint $bit]]
     }
     if { [regexp {^\[([0-9]+):([0-9]+)\]$} $select -> hi lo] } {
+        set hi [normalize_decimal_uint $hi]
+        set lo [normalize_decimal_uint $lo]
         set bits {}
         if { $hi >= $lo } {
             for {set bit $lo} {$bit <= $hi} {incr bit} {
@@ -3675,7 +3856,15 @@ proc bits_to_select_suffix { bits } {
         return ""
     }
 
-    set sorted [lsort -integer -unique $bits]
+    set normalized_bits {}
+    foreach bit $bits {
+        set bit [normalize_decimal_uint $bit]
+        if { $bit eq "" } {
+            return ""
+        }
+        lappend normalized_bits $bit
+    }
+    set sorted [lsort -command compare_decimal_uint -unique $normalized_bits]
     if { [llength $sorted] == 1 } {
         return "\[[lindex $sorted 0]\]"
     }
@@ -3737,8 +3926,48 @@ proc get_high_conn_sigs_for_port_hdl { inst_path target_port_hdl } {
     return {}
 }
 
+proc parent_port_trace_has_next_hop { current_inst current_name {visited {}} } {
+    set current_name [normalize_signal_name $current_name]
+    if { $current_inst eq "" || $current_name eq "" ||
+         [is_const_literal_name $current_name] } {
+        return 0
+    }
+    if { [lsearch -exact $visited "${current_inst}|${current_name}"] >= 0 } {
+        return 0
+    }
+    set port_hdl [get_inst_port_handle_by_signal $current_inst $current_name]
+    if { $port_hdl eq "" || $port_hdl == 0 } {
+        return 0
+    }
+    set high_sigs [get_high_conn_sigs_for_port_hdl $current_inst $port_hdl]
+    if { [llength $high_sigs] == 0 } {
+        return 0
+    }
+
+    set current_select [signal_select_suffix $current_name]
+    foreach high_hdl $high_sigs {
+        set high_name [hdl_to_selected_name $high_hdl $current_select]
+        if { [is_const_literal_name $high_name] } {
+            return 1
+        }
+    }
+    if { [llength $high_sigs] != 1 } {
+        return 0
+    }
+    set high_name [hdl_to_selected_name [lindex $high_sigs 0] $current_select]
+    if { $high_name eq "" || $high_name eq $current_name ||
+         [is_const_literal_name $high_name] } {
+        return 0
+    }
+    set next_inst [parent_instance_path $current_inst]
+    return [expr {[lsearch -exact $visited "${next_inst}|${high_name}"] < 0}]
+}
+
 proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
     if { $max_depth <= 0 } {
+        if { [parent_port_trace_has_next_hop $start_inst $signame] } {
+            mark_trace_depth_limit driver parent $signame $start_inst
+        }
         return ""
     }
 
@@ -3821,7 +4050,12 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
         incr depth
     }
 
-    log_step "const_parent_port_trace_stop reason=max_depth signal=$current_name inst=$current_inst depth=$max_depth"
+    if { [parent_port_trace_has_next_hop $current_inst $current_name $visited] } {
+        mark_trace_depth_limit driver parent $current_name $current_inst
+        log_step "const_parent_port_trace_stop reason=max_depth signal=$current_name inst=$current_inst depth=$max_depth"
+    } else {
+        debug_step "const_parent_port_trace_stop reason=no_next_hop_after_budget signal=$current_name inst=$current_inst depth=$max_depth"
+    }
     return ""
 }
 
@@ -4165,29 +4399,7 @@ proc exact_literal_handle_for_driver { hdl } {
     return ""
 }
 
-proc expand_exact_assign_driver_handle { hdl depth visited_var } {
-    upvar 1 $visited_var visited
-
-    if { $hdl eq "" || $hdl == 0 } {
-        return [list $hdl]
-    }
-    # Keyword instances are trace endpoints.  Expanding their output handles
-    # first can replace the endpoint with an implementation literal.
-    if { [signal_belongs_to_stop_instance [hdl_to_name $hdl]] } {
-        return [list $hdl]
-    }
-    set literal_hdl [exact_literal_handle_for_driver $hdl]
-    if { $literal_hdl ne "" } {
-        return [list $literal_hdl]
-    }
-    if { $depth <= 0 } {
-        return [list $hdl]
-    }
-    if { [lsearch -exact $visited $hdl] >= 0 } {
-        return {}
-    }
-    lappend visited $hdl
-
+proc exact_assign_driver_candidates { hdl } {
     set candidates {}
     set pass_hdl ""
     if { [info commands ::npi_L1::npi_nl_pass_assign_cell] ne "" &&
@@ -4209,6 +4421,46 @@ proc expand_exact_assign_driver_handle { hdl depth visited_var } {
             }
         }
     }
+    return $candidates
+}
+
+proc expand_exact_assign_driver_handle { hdl depth visited_var } {
+    upvar 1 $visited_var visited
+
+    if { $hdl eq "" || $hdl == 0 } {
+        return [list $hdl]
+    }
+    # Keyword instances are trace endpoints.  Expanding their output handles
+    # first can replace the endpoint with an implementation literal.
+    if { [signal_belongs_to_stop_instance [hdl_to_name $hdl]] } {
+        return [list $hdl]
+    }
+    set literal_hdl [exact_literal_handle_for_driver $hdl]
+    if { $literal_hdl ne "" } {
+        return [list $literal_hdl]
+    }
+    if { $depth <= 0 } {
+        if { [lsearch -exact $visited $hdl] < 0 } {
+            foreach candidate [exact_assign_driver_candidates $hdl] {
+                if { $candidate ne "" && $candidate != 0 && $candidate ne $hdl &&
+                     [lsearch -exact $visited $candidate] < 0 } {
+                    set signal_name [hdl_to_name $hdl]
+                    if { $signal_name eq "" } {
+                        set signal_name $hdl
+                    }
+                    mark_trace_depth_limit driver assign $signal_name [hdl_evidence_name $candidate]
+                    break
+                }
+            }
+        }
+        return [list $hdl]
+    }
+    if { [lsearch -exact $visited $hdl] >= 0 } {
+        return {}
+    }
+    lappend visited $hdl
+
+    set candidates [exact_assign_driver_candidates $hdl]
 
     if { [llength $candidates] == 0 } {
         return [list $hdl]
@@ -4571,11 +4823,19 @@ proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
 
+    set pairs [module_port_high_conn_pairs $hdl $signame driver $srcfile_hint]
     if { $net_depth <= 0 && $expr_depth <= 0 } {
+        set pair_names {}
+        foreach pair $pairs {
+            lappend pair_names [lindex $pair 1]
+        }
+        if { [trace_probe_names_have_next $pair_names $signame $visited {}] } {
+            mark_trace_depth_limit driver assign $signame [lindex $pair_names 0]
+        }
         return
     }
 
-    foreach pair [module_port_high_conn_pairs $hdl $signame driver $srcfile_hint] {
+    foreach pair $pairs {
         set high_hdl [lindex $pair 0]
         set high_sig [lindex $pair 1]
         append_unique_signal all_drivers $high_sig
@@ -4616,13 +4876,20 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
         debug_step "load_module_port_high_skip signal=$signame reason=generated_logic"
         return
     }
-    if { $net_depth <= 0 && $expr_depth <= 0 } {
-        debug_step "load_module_port_high_skip signal=$signame reason=depth_exhausted net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
-        return
-    }
-
     set query_signame [scoped_signal_for_query $signame $scope_hint]
     set pairs [module_port_high_conn_pairs $hdl $query_signame load $srcfile_hint]
+    if { $net_depth <= 0 && $expr_depth <= 0 } {
+        set pair_names {}
+        foreach pair $pairs {
+            lappend pair_names [lindex $pair 1]
+        }
+        if { [trace_probe_names_have_next $pair_names $query_signame $visited {}] } {
+            mark_trace_depth_limit load assign $query_signame [lindex $pair_names 0]
+        } else {
+            debug_step "load_module_port_high_skip signal=$signame reason=depth_exhausted_no_next_hop net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
+        }
+        return
+    }
     if { [llength $pairs] == 0 } {
         debug_step "load_module_port_high_empty signal=$signame query=$query_signame scope_hint=$scope_hint net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint"
     }
@@ -4717,6 +4984,237 @@ proc append_unique_signal { list_var signame } {
 
     lappend values $signame
     return 1
+}
+
+proc reset_trace_depth_limit_markers {} {
+    global driver_trace_depth_limit_markers load_trace_depth_limit_markers
+    set driver_trace_depth_limit_markers {}
+    set load_trace_depth_limit_markers {}
+}
+
+proc trace_depth_limit_value { kind } {
+    global const_trace_max_depth assign_trace_max_depth assign_expr_trace_max_depth
+    if { $kind eq "parent" } {
+        return $const_trace_max_depth
+    }
+    if { $kind eq "assign" } {
+        return $assign_trace_max_depth
+    }
+    if { $kind eq "expr" } {
+        return $assign_expr_trace_max_depth
+    }
+    return ""
+}
+
+proc mark_trace_depth_limit { role kind signal {via ""} } {
+    global driver_trace_depth_limit_markers load_trace_depth_limit_markers
+
+    if { $role ne "driver" && $role ne "load" } {
+        return ""
+    }
+    set limit [trace_depth_limit_value $kind]
+    if { ![string is integer -strict $limit] || $limit < 0 } {
+        return ""
+    }
+    set marker "TRACE_LIMIT_REACHED:${kind}_depth_${limit}"
+    if { $role eq "driver" } {
+        if { [lsearch -exact $driver_trace_depth_limit_markers $marker] < 0 } {
+            lappend driver_trace_depth_limit_markers $marker
+            log_step "TRACE_LIMIT_REACHED role=$role reason=${kind}_depth_$limit signal=$signal via=$via"
+        }
+    } else {
+        if { [lsearch -exact $load_trace_depth_limit_markers $marker] < 0 } {
+            lappend load_trace_depth_limit_markers $marker
+            log_step "TRACE_LIMIT_REACHED role=$role reason=${kind}_depth_$limit signal=$signal via=$via"
+        }
+    }
+    return $marker
+}
+
+proc mark_trace_depth_limit_if_needed { role kind signal {via ""} } {
+    if { [trace_depth_limit_already_marked $role $kind] } {
+        return ""
+    }
+    return [mark_trace_depth_limit $role $kind $signal $via]
+}
+
+proc trace_depth_limit_markers_for_role { role } {
+    global driver_trace_depth_limit_markers load_trace_depth_limit_markers
+    if { $role eq "driver" } {
+        return $driver_trace_depth_limit_markers
+    }
+    if { $role eq "load" } {
+        return $load_trace_depth_limit_markers
+    }
+    return {}
+}
+
+proc trace_depth_limit_already_marked { role kind } {
+    set limit [trace_depth_limit_value $kind]
+    if { ![string is integer -strict $limit] || $limit < 0 } {
+        return 0
+    }
+    set marker "TRACE_LIMIT_REACHED:${kind}_depth_${limit}"
+    return [expr {[lsearch -exact [trace_depth_limit_markers_for_role $role] $marker] >= 0}]
+}
+
+proc append_trace_depth_limit_markers { role all_values_var module_values_var } {
+    upvar 1 $all_values_var all_values
+    upvar 1 $module_values_var module_values
+    foreach marker [trace_depth_limit_markers_for_role $role] {
+        append_unique_signal all_values $marker
+        append_unique_signal module_values $marker
+    }
+}
+
+proc trace_probe_candidate_is_next { candidate signame visited {data_sources {}} } {
+    set candidate [normalize_signal_name $candidate]
+    set signame [normalize_signal_name $signame]
+    if { $candidate eq "" || $candidate eq $signame } {
+        return 0
+    }
+    if { ![is_const_literal_name $candidate] &&
+         [lsearch -exact $visited $candidate] >= 0 } {
+        return 0
+    }
+    if { [llength $data_sources] > 0 &&
+         ![trace_allowed_by_data_sources $candidate $data_sources] } {
+        return 0
+    }
+    return 1
+}
+
+proc trace_probe_handles_have_next { handles signame visited data_sources } {
+    foreach candidate_hdl $handles {
+        if { $candidate_hdl eq "" || $candidate_hdl == 0 } {
+            continue
+        }
+        if { [trace_probe_candidate_is_next \
+                [hdl_to_name $candidate_hdl] $signame $visited $data_sources] } {
+            return 1
+        }
+    }
+    return 0
+}
+
+proc trace_probe_names_have_next { names signame visited data_sources } {
+    foreach candidate $names {
+        if { [trace_probe_candidate_is_next $candidate $signame $visited $data_sources] } {
+            return 1
+        }
+    }
+    return 0
+}
+
+proc trace_endpoint_has_next_hop { role hdl signame kind {srcfile_hint ""} {scope_hint ""} {visited {}} {data_sources {}} } {
+    set signame [normalize_signal_name $signame]
+    if { $signame eq "" || [is_const_literal_name $signame] } {
+        return 0
+    }
+
+    if { $kind eq "assign" && $role eq "driver" &&
+         $hdl ne "" && $hdl != 0 } {
+        if { [trace_probe_handles_have_next \
+                [exact_assign_driver_candidates $hdl] $signame $visited $data_sources] } {
+            return 1
+        }
+    }
+
+    set query_signame [scoped_signal_for_query $signame $scope_hint]
+    set pairs [module_port_high_conn_pairs $hdl $query_signame $role $srcfile_hint]
+    set pair_names {}
+    foreach pair $pairs {
+        lappend pair_names [lindex $pair 1]
+    }
+    if { [trace_probe_names_have_next $pair_names $query_signame $visited $data_sources] } {
+        return 1
+    }
+
+    set traced_handles {}
+    if { $role eq "driver" } {
+        if { [info commands ::npi_L1::npi_nl_trace_driver] ne "" } {
+            catch { ::npi_L1::npi_nl_trace_driver $query_signame traced_handles 0 1 }
+        }
+        if { ![trace_probe_handles_have_next $traced_handles $query_signame $visited $data_sources] &&
+             $hdl ne "" && $hdl != 0 &&
+             [info commands ::npi_L1::npi_nl_trace_driver_by_hdl] ne "" } {
+            set traced_handles {}
+            catch { ::npi_L1::npi_nl_trace_driver_by_hdl $hdl traced_handles 0 1 }
+        }
+    } else {
+        if { [info commands ::npi_L1::npi_nl_trace_load] ne "" } {
+            catch { ::npi_L1::npi_nl_trace_load $query_signame traced_handles 1 1 }
+        }
+        if { ![trace_probe_handles_have_next $traced_handles $query_signame $visited $data_sources] &&
+             $hdl ne "" && $hdl != 0 &&
+             [info commands ::npi_L1::npi_nl_trace_load_by_hdl] ne "" } {
+            set traced_handles {}
+            catch { ::npi_L1::npi_nl_trace_load_by_hdl $hdl traced_handles }
+        }
+    }
+    if { [trace_probe_handles_have_next $traced_handles $query_signame $visited $data_sources] } {
+        return 1
+    }
+
+    set conn_names {}
+    set conn_module_names {}
+    collect_conn_module_ports_by_name $query_signame $role conn_names conn_module_names
+    if { [trace_probe_names_have_next $conn_names $query_signame $visited $data_sources] } {
+        return 1
+    }
+
+    if { $srcfile_hint eq "" && $hdl ne "" && $hdl != 0 } {
+        set srcfile_hint [get_handle_source_file $hdl]
+    }
+    if { $srcfile_hint eq "" } {
+        return 0
+    }
+
+    set source_names {}
+    if { $role eq "driver" } {
+        if { $kind eq "assign" } {
+            set source_names [concat \
+                [source_module_port_driver_sources $srcfile_hint $signame $scope_hint] \
+                [source_assign_driver_sources_core $hdl $signame $srcfile_hint 0 $scope_hint]]
+        } else {
+            set source_names [source_assign_driver_expr_sources_core \
+                $hdl $signame $srcfile_hint $scope_hint]
+        }
+    } else {
+        if { $kind eq "assign" } {
+            set source_names [concat \
+                [source_module_port_load_fanouts $srcfile_hint $signame $scope_hint] \
+                [source_assign_load_fanouts_core $hdl $signame 0 $srcfile_hint $scope_hint]]
+        } else {
+            set source_names [source_assign_load_expr_fanouts_core \
+                $hdl $signame $srcfile_hint $scope_hint]
+        }
+    }
+    return [trace_probe_names_have_next $source_names $signame $visited $data_sources]
+}
+
+proc trace_endpoint_expansion_decision { role hdl signame net_depth expr_depth {srcfile_hint ""} {scope_hint ""} {visited {}} {data_sources {}} } {
+    set assign_expand [should_expand_assign_endpoint $hdl $signame]
+    set expr_expand [should_expand_assign_expr_endpoint $hdl $signame]
+
+    if { $net_depth > 0 && $assign_expand } {
+        return "assign"
+    }
+    if { $expr_depth > 0 && $expr_expand } {
+        return "expr"
+    }
+    if { $assign_expand } {
+        if { ![trace_depth_limit_already_marked $role assign] &&
+             [trace_endpoint_has_next_hop $role $hdl $signame assign \
+                 $srcfile_hint $scope_hint $visited $data_sources] } {
+            mark_trace_depth_limit $role assign $signame [hdl_evidence_name $hdl]
+        }
+    } elseif { $expr_expand && ![trace_depth_limit_already_marked $role expr] &&
+               [trace_endpoint_has_next_hop $role $hdl $signame expr \
+                   $srcfile_hint $scope_hint $visited $data_sources] } {
+        mark_trace_depth_limit $role expr $signame [hdl_evidence_name $hdl]
+    }
+    return ""
 }
 
 proc signal_seen_or_mark { visited_var signame } {
@@ -5069,9 +5567,6 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
     upvar 1 $module_drivers_var module_drivers
     upvar 1 $visited_var visited
 
-    if { $net_depth <= 0 && $expr_depth <= 0 } {
-        return
-    }
     if { $srcfile_hint eq "" } {
         set ctx [source_context_for_signal $signame "" $scope_hint]
         set ctx_srcfile [lindex $ctx 0]
@@ -5089,6 +5584,30 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         return
     }
 
+    if { $net_depth <= 0 } {
+        foreach port_sig [source_module_port_driver_sources $srcfile_hint $signame $scope_hint] {
+            if { [trace_allowed_by_data_sources $port_sig $data_source_restrict] } {
+                mark_trace_depth_limit driver assign $signame $port_sig
+                break
+            }
+        }
+        foreach source_sig [source_assign_driver_sources_core "" $signame $srcfile_hint 0 $scope_hint] {
+            if { [trace_allowed_by_data_sources $source_sig $data_source_restrict] } {
+                mark_trace_depth_limit driver assign $signame $source_sig
+                break
+            }
+        }
+        if { $expr_depth <= 0 } {
+            foreach source_sig [source_assign_driver_expr_sources_core "" $signame $srcfile_hint $scope_hint] {
+                if { [trace_allowed_by_data_sources $source_sig $data_source_restrict] } {
+                    mark_trace_depth_limit driver expr $signame $source_sig
+                    break
+                }
+            }
+            return
+        }
+    }
+
     foreach port_sig [source_module_port_driver_sources $srcfile_hint $signame $scope_hint] {
         if { ![trace_allowed_by_data_sources $port_sig $data_source_restrict] } {
             debug_step "driver_data_source_skip signal=$signame candidate=$port_sig reason=not_data_branch"
@@ -5097,10 +5616,13 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
         append_unique_signal all_drivers $port_sig
         append_unique_signal module_drivers $port_sig
         collect_driver_module_port_high_conns "" $port_sig all_drivers module_drivers $net_depth $expr_depth visited $srcfile_hint
-        if { $net_depth > 0 && ![is_const_literal_name $port_sig] } {
-            log_step "driver_module_port_continue from=$signame via=$port_sig remaining_net_depth=$net_depth"
-            set next_scope_hint [signal_scope_hint_after $port_sig $scope_hint]
-            collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint {}
+        if { ![is_const_literal_name $port_sig] } {
+            set expansion [trace_endpoint_expansion_decision driver "" $port_sig $net_depth $expr_depth $srcfile_hint $scope_hint $visited $data_source_restrict]
+            if { $expansion eq "assign" } {
+                log_step "driver_module_port_continue from=$signame via=$port_sig remaining_net_depth=$net_depth"
+                set next_scope_hint [signal_scope_hint_after $port_sig $scope_hint]
+                collect_drivers_by_name_rec $port_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $srcfile_hint $next_scope_hint {}
+            }
         }
     }
 
@@ -5124,6 +5646,12 @@ proc collect_source_driver_sources { signame srcfile_hint all_drivers_var module
     }
 
     if { $expr_depth <= 0 } {
+        foreach source_sig [source_assign_driver_expr_sources_core "" $signame $srcfile_hint $scope_hint] {
+            if { [trace_allowed_by_data_sources $source_sig $data_source_restrict] } {
+                mark_trace_depth_limit driver expr $signame $source_sig
+                break
+            }
+        }
         return
     }
 
@@ -5232,12 +5760,13 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
                 expr_depth $expr_depth
         }
         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
-        if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+        set expansion [trace_endpoint_expansion_decision driver $hdl $sig $net_depth $expr_depth $srcfile_hint $scope_hint $visited $data_source_restrict]
+        if { $expansion eq "assign" } {
             log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
             set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
             collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint {}
-        } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+        } elseif { $expansion eq "expr" } {
             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
             set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
@@ -5274,12 +5803,13 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
                     expr_depth $expr_depth
             }
             collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
-            if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+            set expansion [trace_endpoint_expansion_decision driver $hdl $sig $net_depth $expr_depth $srcfile_hint $scope_hint $visited $data_source_restrict]
+            if { $expansion eq "assign" } {
                 log_step "driver_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
                 set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
                 collect_drivers_by_name_rec $sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint {}
-            } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+            } elseif { $expansion eq "expr" } {
                 log_step "driver_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 set next_srcfile_hint [trace_source_hint_for_hdl $hdl $srcfile_hint]
                 set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
@@ -5294,13 +5824,14 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
         set all_drivers [filter_by_data_sources $all_drivers $data_source_restrict]
         set module_drivers [filter_by_data_sources $module_drivers $data_source_restrict]
     }
-    if { $net_depth > 0 } {
-        foreach sig [lrange $all_drivers $conn_driver_count_before end] {
-            if { ![trace_allowed_by_data_sources $sig $data_source_restrict] } {
-                debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
-                continue
-            }
-            if { [is_module_boundary_signal $sig] && ![is_const_literal_name $sig] } {
+    foreach sig [lrange $all_drivers $conn_driver_count_before end] {
+        if { ![trace_allowed_by_data_sources $sig $data_source_restrict] } {
+            debug_step "driver_data_source_skip signal=$signame candidate=$sig reason=not_data_branch"
+            continue
+        }
+        if { [is_module_boundary_signal $sig] && ![is_const_literal_name $sig] } {
+            set expansion [trace_endpoint_expansion_decision driver "" $sig $net_depth $expr_depth $srcfile_hint $scope_hint $visited $data_source_restrict]
+            if { $expansion eq "assign" } {
                 collect_driver_module_port_high_conns "" $sig all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
                 log_step "driver_conn_module_port_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 set next_scope_hint [signal_scope_hint_after $sig $scope_hint]
@@ -5338,8 +5869,27 @@ proc collect_source_load_fanouts { hdl signame all_loads_var module_loads_var ne
     }
     set hdl_empty [expr {$hdl eq ""}]
     debug_step "collect_source_load_fanouts_enter signal=$signame net_depth=$net_depth expr_depth=$expr_depth srcfile_hint=$srcfile_hint scope_hint=$scope_hint hdl_empty=$hdl_empty"
+
+    if { $net_depth <= 0 } {
+        set module_fanouts [source_module_port_load_fanouts $srcfile_hint $signame $scope_hint]
+        if { [llength $module_fanouts] > 0 } {
+            mark_trace_depth_limit load assign $signame [lindex $module_fanouts 0]
+        }
+        if { $expr_depth <= 0 } {
+            set direct_fanouts [source_assign_load_fanouts_core $hdl $signame 0 $srcfile_hint $scope_hint]
+            if { [llength $direct_fanouts] > 0 } {
+                mark_trace_depth_limit load assign $signame [lindex $direct_fanouts 0]
+            }
+        }
+    }
+    if { $expr_depth <= 0 } {
+        set expr_fanouts [source_assign_load_expr_fanouts_core $hdl $signame $srcfile_hint $scope_hint]
+        if { [llength $expr_fanouts] > 0 } {
+            mark_trace_depth_limit load expr $signame [lindex $expr_fanouts 0]
+        }
+    }
     if { $net_depth <= 0 && $expr_depth <= 0 } {
-        debug_step "collect_source_load_fanouts_skip signal=$signame reason=depth_exhausted"
+        debug_step "collect_source_load_fanouts_skip signal=$signame reason=depth_exhausted_after_probe"
         return
     }
 
@@ -5468,13 +6018,14 @@ proc append_load_hdl_endpoint { hdl from_sig all_loads_var module_loads_var net_
         set next_net_depth 0
     }
 
-    if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+    set expansion [trace_endpoint_expansion_decision load $hdl $sig $net_depth $expr_depth $next_srcfile_hint $next_scope_hint $visited]
+    if { $expansion eq "assign" } {
         log_step "load_assign_continue from=$from_sig via=$sig remaining_net_depth=$net_depth"
         set edge_status [load_trace_budget_mark_edge $sig $sig "hdl_assign_continue" $next_srcfile_hint $next_scope_hint $next_srcfile_hint $next_scope_hint]
         if { $edge_status == 1 } {
             collect_loads_by_name_rec $sig all_loads module_loads $next_net_depth $expr_depth visited $next_srcfile_hint $next_scope_hint
         }
-    } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+    } elseif { $expansion eq "expr" } {
         log_step "load_assign_expr_continue from=$from_sig via=$sig remaining_expr_depth=$expr_depth"
         set edge_status [load_trace_budget_mark_edge $sig $sig "hdl_assign_expr_continue" $next_srcfile_hint $next_scope_hint $next_srcfile_hint $next_scope_hint]
         if { $edge_status == 1 } {
@@ -5647,10 +6198,11 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
             continue
         }
         collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
-        if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+        set expansion [trace_endpoint_expansion_decision load $hdl $sig $net_depth $expr_depth $next_srcfile_hint $next_scope_hint $visited]
+        if { $expansion eq "assign" } {
             log_step "load_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
             collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
-        } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+        } elseif { $expansion eq "expr" } {
             log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
             collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
         }
@@ -5685,10 +6237,11 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
                 continue
             }
             collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
-            if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+            set expansion [trace_endpoint_expansion_decision load $hdl $sig $net_depth $expr_depth $next_srcfile_hint $next_scope_hint $visited]
+            if { $expansion eq "assign" } {
                 log_step "load_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
-            } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+            } elseif { $expansion eq "expr" } {
                 log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
             }
@@ -5728,10 +6281,11 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
                 continue
             }
             collect_load_module_port_high_conns $hdl $sig all_loads module_loads $net_depth $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
-            if { $net_depth > 0 && [should_expand_assign_endpoint $hdl $sig] } {
+            set expansion [trace_endpoint_expansion_decision load $hdl $sig $net_depth $expr_depth $next_srcfile_hint $next_scope_hint $visited]
+            if { $expansion eq "assign" } {
                 log_step "load_assign_continue from=$signame via=$sig remaining_net_depth=$net_depth"
                 collect_loads_by_name_rec $sig all_loads module_loads [expr {$net_depth - 1}] $expr_depth $visited_var $next_srcfile_hint $next_scope_hint
-            } elseif { $expr_depth > 0 && [should_expand_assign_expr_endpoint $hdl $sig] } {
+            } elseif { $expansion eq "expr" } {
                 log_step "load_assign_expr_continue from=$signame via=$sig remaining_expr_depth=$expr_depth"
                 collect_loads_by_name_rec $sig all_loads module_loads $net_depth [expr {$expr_depth - 1}] $visited_var $next_srcfile_hint $next_scope_hint
             }
@@ -6042,6 +6596,7 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
             dict set kdebug_port_trace_seen_ports "${inst_path}|${portname}" 1
             set current_trace_role driver
             set current_const_driver_evidence_seen {}
+            reset_trace_depth_limit_markers
             if { $trace_select ne "" } {
                 log_step "trace_port_bit instance=$inst_path port=$portname base_port=$base_portname select=$trace_select"
             }
@@ -6310,12 +6865,13 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
                         }
                         set fallback_driver_visited {}
                         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_driver_visited $driver_srcfile_hint
-                        if { [should_expand_assign_endpoint $hdl $sig] } {
+                        set expansion [trace_endpoint_expansion_decision driver $hdl $sig $assign_trace_max_depth $assign_expr_trace_max_depth $driver_srcfile_hint $driver_scope_hint $fallback_driver_visited $driver_data_sources]
+                        if { $expansion eq "assign" } {
                             log_step "driver_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
                             set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
                             collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint $next_scope_hint
-                        } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
+                        } elseif { $expansion eq "expr" } {
                             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
                             set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
@@ -6365,12 +6921,13 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
                         }
                         set fallback_module_driver_visited {}
                         collect_driver_module_port_high_conns $hdl $sig all_drivers module_drivers $assign_trace_max_depth $assign_expr_trace_max_depth fallback_module_driver_visited $driver_srcfile_hint
-                        if { [should_expand_assign_endpoint $hdl $sig] } {
+                        set expansion [trace_endpoint_expansion_decision driver $hdl $sig $assign_trace_max_depth $assign_expr_trace_max_depth $driver_srcfile_hint $driver_scope_hint $fallback_module_driver_visited $driver_data_sources]
+                        if { $expansion eq "assign" } {
                             log_step "driver_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
                             set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
                             collect_drivers_by_name $sig all_drivers module_drivers $next_srcfile_hint $next_scope_hint
-                        } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
+                        } elseif { $expansion eq "expr" } {
                             log_step "driver_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
                             set next_srcfile_hint [trace_source_hint_for_hdl $hdl $driver_srcfile_hint]
                             set next_scope_hint [signal_scope_hint_after $sig $driver_scope_hint]
@@ -6380,6 +6937,8 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
                 }
             }
         }
+
+        append_trace_depth_limit_markers driver all_drivers module_drivers
 
         # Collect all loads
         set all_loads {}
@@ -6475,10 +7034,11 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
                     }
                     set fallback_load_visited {}
                     collect_load_module_port_high_conns $hdl $sig all_loads module_loads $assign_trace_max_depth $assign_expr_trace_max_depth fallback_load_visited $next_load_srcfile_hint $next_load_scope_hint
-                    if { [should_expand_assign_endpoint $hdl $sig] } {
+                    set expansion [trace_endpoint_expansion_decision load $hdl $sig $assign_trace_max_depth $assign_expr_trace_max_depth $next_load_srcfile_hint $next_load_scope_hint $fallback_load_visited]
+                    if { $expansion eq "assign" } {
                         log_step "load_assign_continue from=$signame via=$sig remaining_depth=$assign_trace_max_depth"
                         collect_loads_by_name $sig all_loads module_loads $next_load_srcfile_hint $next_load_scope_hint
-                    } elseif { [should_expand_assign_expr_endpoint $hdl $sig] } {
+                    } elseif { $expansion eq "expr" } {
                         log_step "load_assign_expr_continue from=$signame via=$sig remaining_depth=$assign_expr_trace_max_depth"
                         collect_loads_by_name $sig all_loads module_loads $next_load_srcfile_hint $next_load_scope_hint
                     }
@@ -6490,6 +7050,7 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
             append_unique_signal all_loads $load_limit_marker
             append_unique_signal module_loads $load_limit_marker
         }
+        append_trace_depth_limit_markers load all_loads module_loads
         global load_trace_node_count load_trace_edge_count load_trace_duplicate_edge_count load_trace_limit_hit
         log_step "load_trace_summary instance=$inst_path port=$portname nodes=$load_trace_node_count edges=$load_trace_edge_count duplicate_edges=$load_trace_duplicate_edge_count limit_hit=$load_trace_limit_hit"
 
@@ -6603,7 +7164,8 @@ proc process_instance { inst_path parent_path instname outfh module_outfh } {
 }
 
 proc kdebug_port_trace_int {value fallback} {
-    if { [string is integer -strict $value] && $value >= 0 } {
+    set value [normalize_decimal_uint $value]
+    if { $value ne "" } {
         return $value
     }
     return $fallback
@@ -6657,14 +7219,15 @@ proc kdebug_port_trace_run {
     if { [catch {
         ::npi_L1::npi_find_inst_with_def_wildcard "" $target_mod hdlList
     } find_error] } {
-        return [list 0 MODULE_QUERY_FAILED $find_error 0 0]
+        return [list 0 MODULE_QUERY_FAILED $find_error 0 0 0]
     }
     if { [llength $hdlList] == 0 } {
-        return [list 0 MODULE_NOT_FOUND "no instances of module '$target_mod' found" 0 0]
+        return [list 0 MODULE_NOT_FOUND "no instances of module '$target_mod' found" 0 0 0]
     }
 
     set processed_instances 0
     set skipped_instances 0
+    set failed_instances 0
     set processed_paths {}
     set seen_paths {}
     set full_fh [expr {$include_full ? "__KDEBUG_FULL__" : "__KDEBUG_DISCARD__"}]
@@ -6684,19 +7247,84 @@ proc kdebug_port_trace_run {
             continue
         }
         dict set seen_paths $inst_path 1
-        lappend processed_paths $inst_path
 
         set parts [split $inst_path "."]
         set instname [lindex $parts end]
         set parent_path [join [lrange $parts 0 end-1] "."]
+        set full_count_before [llength $kdebug_port_trace_full_rows]
+        set boundary_count_before [llength $kdebug_port_trace_boundary_rows]
+        set evidence_count_before [llength $kdebug_port_trace_evidence]
+        set full_last_before [lindex $kdebug_port_trace_full_rows end]
+        set boundary_last_before [lindex $kdebug_port_trace_boundary_rows end]
+        set truncated_before $kdebug_port_trace_truncated
+        set row_limit_surfaces_before $kdebug_port_trace_row_limit_surfaces
         if { [catch {
             process_instance $inst_path $parent_path $instname $full_fh $boundary_fh
         } instance_error] } {
+            set failed_ports {}
+            foreach seen_key [dict keys $kdebug_port_trace_seen_ports] {
+                if { [string first "${inst_path}|" $seen_key] == 0 } {
+                    lappend failed_ports [string range $seen_key \
+                        [string length "${inst_path}|"] end]
+                }
+            }
+            if { $full_count_before == 0 } {
+                set kdebug_port_trace_full_rows {}
+            } else {
+                set kdebug_port_trace_full_rows [lrange \
+                    $kdebug_port_trace_full_rows 0 [expr {$full_count_before - 1}]]
+                set kdebug_port_trace_full_rows [lreplace \
+                    $kdebug_port_trace_full_rows end end $full_last_before]
+            }
+            if { $boundary_count_before == 0 } {
+                set kdebug_port_trace_boundary_rows {}
+            } else {
+                set kdebug_port_trace_boundary_rows [lrange \
+                    $kdebug_port_trace_boundary_rows 0 [expr {$boundary_count_before - 1}]]
+                set kdebug_port_trace_boundary_rows [lreplace \
+                    $kdebug_port_trace_boundary_rows end end $boundary_last_before]
+            }
+            if { $evidence_count_before == 0 } {
+                set kdebug_port_trace_evidence {}
+            } else {
+                set kdebug_port_trace_evidence [lrange \
+                    $kdebug_port_trace_evidence 0 [expr {$evidence_count_before - 1}]]
+            }
+            foreach seen_key [dict keys $kdebug_port_trace_seen_ports] {
+                if { [string first "${inst_path}|" $seen_key] == 0 } {
+                    dict unset kdebug_port_trace_seen_ports $seen_key
+                }
+            }
+            set kdebug_port_trace_truncated $truncated_before
+            set kdebug_port_trace_row_limit_surfaces $row_limit_surfaces_before
+            incr failed_instances
             lappend kdebug_port_trace_errors [dict create \
                 scope instance code INSTANCE_TRACE_FAILED message $instance_error \
                 instance $inst_path]
+            set marker_ports $ports
+            if { [llength $marker_ports] == 0 } {
+                set marker_ports [lsort -unique $failed_ports]
+            }
+            foreach requested_port $marker_ports {
+                set parsed_requested_port [split_port_filter_spec $requested_port]
+                set marker_port [lindex $parsed_requested_port 0]
+                if { $requested_port ne "" } {
+                    set marker_port $requested_port
+                }
+                write_trace_row $full_fh $inst_path $marker_port unknown \
+                    driver "ERROR:INSTANCE_TRACE_FAILED"
+                write_trace_row $full_fh $inst_path $marker_port unknown \
+                    load "ERROR:INSTANCE_TRACE_FAILED"
+                if { $boundary_fh ne "" } {
+                    write_trace_row $boundary_fh $inst_path $marker_port unknown \
+                        driver "ERROR:INSTANCE_TRACE_FAILED"
+                    write_trace_row $boundary_fh $inst_path $marker_port unknown \
+                        load "ERROR:INSTANCE_TRACE_FAILED"
+                }
+            }
         } else {
             incr processed_instances
+            lappend processed_paths $inst_path
         }
         catch {npi_release_handle -object $ih}
     }
@@ -6712,8 +7340,10 @@ proc kdebug_port_trace_run {
         }
     }
     if { $processed_instances == 0 } {
-        return [list 0 TRACE_FAILED "port trace failed for every resolved instance" 0 $skipped_instances]
+        return [list 0 TRACE_FAILED \
+            "port trace produced no successful instances; inspect instance_errors" \
+            0 $skipped_instances $failed_instances]
     }
-    log_step "done module=$target_mod processed=$processed_instances skipped=$skipped_instances"
-    return [list 1 "" "" $processed_instances $skipped_instances]
+    log_step "done module=$target_mod processed=$processed_instances failed=$failed_instances skipped=$skipped_instances"
+    return [list 1 "" "" $processed_instances $skipped_instances $failed_instances]
 }

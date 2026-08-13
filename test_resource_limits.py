@@ -298,6 +298,7 @@ class TraceGuiListFileTest(unittest.TestCase):
             "mode": mode,
             "lib": "design/kdb.elab++",
             "module": "Target",
+            "module_file": "",
             "keywords": "",
             "keywords_file": "lists/keywords.list",
             "ports": "",
@@ -366,6 +367,40 @@ class TraceGuiListFileTest(unittest.TestCase):
             cmd, _ = trace_gui.build_command(cfg)
             self.assertNotIn("-ports", cmd)
             self.assertEqual(cmd[cmd.index("-ports-file") + 1], str(port_file.resolve()))
+            self.assertLess(sum(len(item) for item in cmd), 16 * 1024)
+
+    def test_load_module_list_retains_path_for_xlsx_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module_file = Path(tmpdir) / "modules.list"
+            module_file.write_text(
+                "\n".join(large_names("module")) + "\n", encoding="utf-8"
+            )
+            gui = object.__new__(trace_gui.TraceGui)
+            gui.vars = {
+                "module": self.FakeVar("stale_inline"),
+                "module_file": self.FakeVar(""),
+            }
+            gui.filedialog = SimpleNamespace(
+                askopenfilename=lambda **_kwargs: str(module_file)
+            )
+            gui.messagebox = SimpleNamespace(
+                showerror=lambda *_args, **_kwargs: self.fail("unexpected load error")
+            )
+
+            trace_gui.TraceGui._load_module_list(gui)
+
+            self.assertEqual(gui.vars["module"].get(), "")
+            self.assertEqual(gui.vars["module_file"].get(), str(module_file.resolve()))
+            cfg = self.base_config("xlsx")
+            cfg.update({
+                "module": gui.vars["module"].get(),
+                "module_file": gui.vars["module_file"].get(),
+            })
+            cmd, _ = trace_gui.build_command(cfg)
+            self.assertNotIn("-module", cmd)
+            self.assertEqual(
+                cmd[cmd.index("-module-file") + 1], str(module_file.resolve())
+            )
             self.assertLess(sum(len(item) for item in cmd), 16 * 1024)
 
 

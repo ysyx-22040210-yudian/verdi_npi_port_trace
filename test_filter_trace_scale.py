@@ -54,6 +54,10 @@ def reference_signal_belongs(signal_name, instances):
 
 
 class InstanceMatcherTests(unittest.TestCase):
+    def test_error_marker_is_preserved_for_failed_trace_instance(self):
+        matcher = filter_trace.InstanceMatcher(["top.u_keyword"])
+        self.assertTrue(matcher.belongs("ERROR:INSTANCE_TRACE_FAILED"))
+
     def test_indexed_matcher_is_equivalent_to_legacy_predicate(self):
         instances = [
             "tb.top.u_keyword",

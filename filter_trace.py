@@ -106,6 +106,8 @@ class InstanceMatcher:
             return False
         if signal_name.startswith("TRACE_LIMIT_REACHED:"):
             return True
+        if signal_name.startswith("ERROR:"):
+            return True
 
         for prefix in candidate_signal_prefixes(signal_name):
             if prefix not in self.prefixes:

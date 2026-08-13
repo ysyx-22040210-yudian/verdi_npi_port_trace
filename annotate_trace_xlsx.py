@@ -941,6 +941,14 @@ def format_module_params(module: str, param_rows: Sequence[ParamRow]) -> str:
     if not rows:
         return "NO_PARAMETER"
 
+    errors = list(dict.fromkeys(
+        row.param_info or "PARAM_TRACE_FAILED: MODULE_INSPECT_FAILED: module inspection failed"
+        for row in rows
+        if row.param_kind == "error"
+    ))
+    if errors:
+        return "\n".join(errors)
+
     parameters = [
         row for row in rows if row.param_kind not in {"instance", "localparam"}
     ]
@@ -972,12 +980,22 @@ def format_module_params(module: str, param_rows: Sequence[ParamRow]) -> str:
 
 
 def format_instance_params(module: str, inst_full_name: str, param_rows: Sequence[ParamRow]) -> str:
-    rows = [
+    instance_rows = [
         row
         for row in param_rows
         if row.module == module
         and row.inst_full_name == inst_full_name
-        and row.param_kind not in {"instance", "localparam"}
+    ]
+    errors = list(dict.fromkeys(
+        row.param_info or "PARAM_TRACE_FAILED: MODULE_INSPECT_FAILED: module inspection failed"
+        for row in instance_rows
+        if row.param_kind == "error"
+    ))
+    if errors:
+        return "\n".join(errors)
+
+    rows = [
+        row for row in instance_rows if row.param_kind not in {"instance", "localparam"}
     ]
     if not rows:
         return "NO_PARAMETER"
@@ -1285,20 +1303,25 @@ def read_param_rows(path: Path) -> List[ParamRow]:
 
 def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple[List[ParamRow], Path, Optional[str]]:
     out_file = workdir / "module_parameters.csv"
+    modules_file = workdir / "parameter_modules.list"
     remove_intermediate_file(out_file, "stale module parameter output")
     if args.no_params:
         log_step("skip module parameter collection because --no-params is set")
         return [], out_file, "PARAM_SKIPPED"
 
     try:
+        modules_file.write_text(
+            "".join("{}\n".format(module) for module in modules),
+            encoding="utf-8",
+        )
         cmd: List[object] = [
             sys.executable,
             SCRIPT_DIR / "kdebug_backend.py",
             "find-parameters",
             "--lib",
             args.lib,
-            "--modules",
-            ",".join(modules),
+            "--modules-file",
+            modules_file,
             "--output",
             out_file,
         ]
@@ -1630,6 +1653,12 @@ def parse_args():
         help="comma-separated target module definitions; defaults to column A",
     )
     parser.add_argument(
+        "-module-file",
+        "--module-file",
+        default="",
+        help="one target module definition per line",
+    )
+    parser.add_argument(
         "-ports",
         default="",
         help="comma-separated target ports; defaults to the template port columns",
@@ -1843,6 +1872,9 @@ def parse_args():
     args = parser.parse_args()
 
     try:
+        args.module = ",".join(
+            dict.fromkeys(split_csv_arg(args.module) + load_name_list(args.module_file))
+        )
         args.keywords = ",".join(
             dict.fromkeys(split_csv_arg(args.keywords) + load_name_list(args.keywords_file))
         )

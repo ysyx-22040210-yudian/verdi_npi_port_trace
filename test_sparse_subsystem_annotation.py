@@ -542,6 +542,10 @@ class ArtifactIsolationTest(unittest.TestCase):
             def fail_with_partial(cmd, **kwargs):
                 self.assertFalse(output.exists())
                 self.assertEqual(kwargs["timeout_sec"], 10)
+                modules_index = cmd.index("--modules-file")
+                modules_file = Path(cmd[modules_index + 1])
+                self.assertEqual(modules_file.read_text(encoding="utf-8"), "Target\n")
+                self.assertNotIn("--modules", cmd)
                 timeout_index = cmd.index("--timeout-sec")
                 self.assertEqual(cmd[timeout_index + 1], "7")
                 output.write_text(

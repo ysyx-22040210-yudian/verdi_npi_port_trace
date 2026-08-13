@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
     "mode": "xlsx",
     "lib": "",
     "module": "",
+    "module_file": "",
     "keywords": "",
     "keywords_file": "",
     "ports": "",
@@ -1079,6 +1080,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
 
     lib = str(cfg.get("lib", "")).strip()
     module = csv_text(str(cfg.get("module", "")))
+    module_file = str(cfg.get("module_file", "")).strip()
     keywords = csv_text(str(cfg.get("keywords", "")))
     keywords_file = str(cfg.get("keywords_file", "")).strip()
     ports = csv_text(str(cfg.get("ports", "")))
@@ -1116,6 +1118,7 @@ def build_command(config: Dict[str, object]) -> Tuple[List[str], Optional[str]]:
         add_value(cmd, "-keywords", keywords)
         add_value(cmd, "-keywords-file", keywords_file)
         add_value(cmd, "-module", module)
+        add_value(cmd, "-module-file", module_file)
         add_value(cmd, "-ports", ports)
         add_value(cmd, "-ports-file", ports_file)
         add_value(cmd, "-sheet", cfg.get("sheet", ""))
@@ -1911,7 +1914,7 @@ class TraceGui:
             self.messagebox.showerror("Load Failed", str(exc))
 
     def _load_module_list(self) -> None:
-        self._load_list_into("module")
+        self._load_list_into("module", "module_file")
 
     def _load_keyword_list(self) -> None:
         self._load_list_into("keywords", "keywords_file")
@@ -1962,7 +1965,7 @@ class TraceGui:
         try:
             # Older configs predate list-file fields. Clear hidden paths so a
             # previously loaded list cannot leak into the newly loaded config.
-            for key in ("keywords_file", "ports_file"):
+            for key in ("module_file", "keywords_file", "ports_file"):
                 if key not in cfg:
                     self._var(key).set("")
             for key, value in cfg.items():

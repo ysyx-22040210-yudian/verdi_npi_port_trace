@@ -106,6 +106,11 @@ proc fail_data {code message} {
     write_response_raw [json_object_raw [list ok false error [json_object [list code $code message $message]]]]
 }
 
+proc fail_data_with_details {code message details} {
+    write_response_raw [json_object_raw [list ok false error [json_object_raw [list \
+        code [json_string $code] message [json_string $message] details $details]]]]
+}
+
 proc env_or_empty {name} {
     if {[info exists ::env($name)]} {return $::env($name)}
     return ""
@@ -507,33 +512,170 @@ proc module_section_json {module kind max_rows total_var returned_var truncated_
     return [json_array_raw $rows]
 }
 
-proc require_module_object {module} {
-    if {$module eq ""} {
-        fail_data "MISSING_FIELD" "args.module is required"
-        return ""
+proc regexp_quote {text} {
+    return [regsub -all {[][\\.^$*+?(){}|]} $text {\\&}]
+}
+
+proc module_handle_full_name {hdl} {
+    set full_name [string trim [safe_get_str $hdl npiFullName]]
+    if {$full_name ne ""} {return $full_name}
+    foreach command {
+        ::npi_L1::npi_ut_get_hdl_info
+        ::npi_L1::npi_nl_ut_get_hdl_info
+    } {
+        if {![command_available $command]} {continue}
+        if {[catch [list $command $hdl] info]} {continue}
+        set fields [split [string trim $info] ","]
+        if {[llength $fields] >= 2} {
+            set full_name [string trim [lindex $fields 1]]
+            if {$full_name ne ""} {return $full_name}
+        }
     }
-    if {![require_command npi_handle_by_name]} {return ""}
-    set hdl [resolve_language_handle $module ""]
-    if {$hdl eq ""} {
-        fail_data "MODULE_NOT_FOUND" "module instance not found: $module"
-        return ""
-    }
+    return ""
+}
+
+proc module_language_handle {module} {
+    if {![command_available npi_handle_by_name]} {return ""}
+    if {[catch {set hdl [resolve_language_handle $module ""]}]} {return ""}
     return $hdl
 }
 
+proc module_find_exact_handle {module} {
+    set separator [string last "." $module]
+    if {$separator < 0} {
+        set root_scope ""
+        set instance_name $module
+    } else {
+        set root_scope [string range $module 0 [expr {$separator - 1}]]
+        set instance_name [string range $module [expr {$separator + 1}] end]
+    }
+
+    set successful_query 0
+    set available_query 0
+    set last_error ""
+    if {$root_scope ne ""} {
+        foreach command {
+            ::npi_L1::npi_mod_inst_get_instance
+            ::npi_L1::npi_mod_inst_get_instance_in_gen_scope
+        } {
+            if {![command_available $command]} {continue}
+            set available_query 1
+            set handles {}
+            if {[catch [list $command $root_scope handles] query_error]} {
+                set last_error $query_error
+                continue
+            }
+            set successful_query 1
+            set matched ""
+            foreach hdl $handles {
+                set full_name [module_handle_full_name $hdl]
+                if {$matched eq "" && $full_name eq $module} {
+                    set matched $hdl
+                } else {
+                    catch {npi_release_handle -object $hdl}
+                }
+            }
+            if {$matched ne ""} {return [list 1 $matched "" ""]}
+        }
+    }
+
+    set command ::npi_L1::npi_find_inst_regex
+    if {[command_available $command]} {
+        set available_query 1
+        set handles {}
+        set pattern "^[regexp_quote $instance_name]\$"
+        if {[catch [list $command $root_scope $pattern handles] find_error]} {
+            set last_error $find_error
+        } else {
+            set successful_query 1
+            set matched ""
+            foreach hdl $handles {
+                set full_name [module_handle_full_name $hdl]
+                if {$matched eq "" && $full_name eq $module} {
+                    set matched $hdl
+                } else {
+                    catch {npi_release_handle -object $hdl}
+                }
+            }
+            if {$matched ne ""} {return [list 1 $matched "" ""]}
+        }
+    }
+
+    if {$successful_query} {
+        return [list 0 "" MODULE_NOT_FOUND "module instance not found: $module"]
+    }
+    if {$available_query} {
+        return [list -1 "" MODULE_QUERY_FAILED \
+            "module instance lookup failed for $module: $last_error"]
+    }
+    return [list -1 "" NPI_COMMAND_UNAVAILABLE \
+        "no exact module instance lookup command is available"]
+}
+
+proc module_fallback_object_json {module} {
+    set separator [string last "." $module]
+    if {$separator < 0} {
+        set name $module
+    } else {
+        set name [string range $module [expr {$separator + 1}] end]
+    }
+    return [json_object_raw [list object [json_object_raw [list \
+        handle [json_string ""] \
+        name [json_string $name] \
+        full_name [json_string $module] \
+        parent_module [json_string ""] \
+        type [json_string npiModule] \
+        def_name [json_string ""] \
+        file [json_string ""] \
+        def_file [json_string ""] \
+        line null \
+        def_line null \
+        size null \
+        direction [json_string ""] \
+        port_index null \
+        port_type [json_string ""] \
+        const_type [json_string ""] \
+        net_type [json_string ""] \
+        local_param null \
+        signed null \
+        automatic null \
+        top null \
+        cell_instance null \
+        decompiled [json_string ""]]]]]
+}
+
+proc resolve_module_after_query {module module_hdl observed_count} {
+    if {$module_hdl ne ""} {return [list 1 $module_hdl "" ""]}
+    lassign [module_find_exact_handle $module] found exact_hdl code message
+    if {$found == 1} {return [list 1 $exact_hdl "" ""]}
+    if {$observed_count > 0} {
+        return [list 1 "" "" ""]
+    }
+    return [list 0 "" $code $message]
+}
+
 proc module_objects_action {module kind max_rows} {
+    if {$module eq ""} {
+        fail_data "MISSING_FIELD" "args.module is required"
+        return
+    }
     if {$kind eq ""} {
         fail_data "MISSING_FIELD" "args.kind is required"
         return
     }
-    set module_hdl [require_module_object $module]
-    if {$module_hdl eq ""} {return}
+    set module_hdl [module_language_handle $module]
     set items [module_section_json $module $kind $max_rows total returned truncated error_message]
-    catch {npi_release_handle -object $module_hdl}
     if {$error_message ne ""} {
+        if {$module_hdl ne ""} {catch {npi_release_handle -object $module_hdl}}
         fail_data "MODULE_QUERY_FAILED" $error_message
         return
     }
+    lassign [resolve_module_after_query $module $module_hdl $total] found resolved_hdl code message
+    if {!$found} {
+        fail_data $code $message
+        return
+    }
+    if {$resolved_hdl ne ""} {catch {npi_release_handle -object $resolved_hdl}}
     ok_data [list \
         module [json_string $module] \
         kind [json_string $kind] \
@@ -586,15 +728,7 @@ proc module_inspect_result {module sections_text max_rows} {
     if {$module eq ""} {
         return [list 0 "" MISSING_FIELD "args.module is required" 0]
     }
-    if {![command_available npi_handle_by_name]} {
-        return [list 0 "" NPI_COMMAND_UNAVAILABLE "NPI command is unavailable in this Verdi runtime: npi_handle_by_name" 0]
-    }
-    if {[catch {set module_hdl [resolve_language_handle $module ""]} resolve_error]} {
-        return [list 0 "" MODULE_QUERY_FAILED "module instance lookup failed: $resolve_error" 0]
-    }
-    if {$module_hdl eq ""} {
-        return [list 0 "" MODULE_NOT_FOUND "module instance not found: $module" 0]
-    }
+    set module_hdl [module_language_handle $module]
     if {$sections_text eq ""} {
         set sections {instances parameters ports io nets variables generate_scopes}
     } else {
@@ -604,6 +738,7 @@ proc module_inspect_result {module sections_text max_rows} {
     set count_pairs {}
     set returned_pairs {}
     set any_truncated 0
+    set observed_count 0
     foreach kind $sections {
         if {$kind eq ""} {continue}
         set items [module_section_json $module $kind $max_rows total returned truncated error_message]
@@ -614,10 +749,19 @@ proc module_inspect_result {module sections_text max_rows} {
         lappend section_pairs $kind $items
         lappend count_pairs $kind [json_value $total]
         lappend returned_pairs $kind [json_value $returned]
+        incr observed_count $total
         if {$truncated} {set any_truncated 1}
     }
-    set module_object [language_object_json $module_hdl 0 0]
-    catch {npi_release_handle -object $module_hdl}
+    lassign [resolve_module_after_query $module $module_hdl $observed_count] found resolved_hdl code message
+    if {!$found} {
+        return [list 0 "" $code $message 0]
+    }
+    if {$resolved_hdl eq ""} {
+        set module_object [module_fallback_object_json $module]
+    } else {
+        set module_object [language_object_json $resolved_hdl 0 0]
+        catch {npi_release_handle -object $resolved_hdl}
+    }
     set data [json_object_raw [list \
         module [json_string $module] \
         module_object $module_object \
@@ -729,7 +873,7 @@ proc trace_action {mode signal max_rows} {
     write_response_raw [json_object_raw [list ok true data $data]]
 }
 
-proc port_trace_plan_values {plan required label} {
+proc string_plan_values {plan required label} {
     set rows [read_plan_rows $plan 1]
     set values {}
     foreach row $rows {
@@ -739,6 +883,10 @@ proc port_trace_plan_values {plan required label} {
         error "$label must be a non-empty array"
     }
     return $values
+}
+
+proc port_trace_plan_values {plan required label} {
+    return [string_plan_values $plan $required $label]
 }
 
 proc port_trace_dict_value {record key} {
@@ -847,9 +995,26 @@ proc port_trace_batch_action {
         [bool_value $source_fallback] [bool_value $include_full] [bool_value $include_boundary] \
         $max_parent_depth $max_assign_depth $max_expr_depth $max_nodes $max_edges \
         $max_api_results $max_rows [bool_value $debug_enabled]] \
-        succeeded code message processed_instances skipped_instances
+        succeeded code message processed_instances skipped_instances failed_instances
     if {!$succeeded} {
-        fail_data $code $message
+        if {[llength $::kdebug_port_trace_errors] > 0} {
+            set errors {}
+            foreach record $::kdebug_port_trace_errors {
+                lappend errors [port_trace_error_json $record]
+            }
+            set details [json_object_raw [list \
+                module [json_string $module] \
+                requested_ports [json_array $ports] \
+                errors [json_array_raw $errors] \
+                stats [json_object [list \
+                    processed_instances $processed_instances \
+                    failed_instances $failed_instances \
+                    skipped_instances $skipped_instances \
+                    error_count [llength $errors]]]]]
+            fail_data_with_details $code $message $details
+        } else {
+            fail_data $code $message
+        }
         return
     }
 
@@ -880,6 +1045,7 @@ proc port_trace_batch_action {
         truncated $truncated \
         stats [json_object [list \
             processed_instances $processed_instances \
+            failed_instances $failed_instances \
             skipped_instances $skipped_instances \
             full_row_count [llength $full_rows] \
             boundary_row_count [llength $boundary_rows] \
@@ -889,6 +1055,7 @@ proc port_trace_batch_action {
             module $module \
             port_count [llength $ports] \
             processed_instances $processed_instances \
+            failed_instances $failed_instances \
             full_row_count [llength $full_rows] \
             boundary_row_count [llength $boundary_rows] \
             evidence_count [llength $evidence] \
@@ -1087,12 +1254,18 @@ proc value_at_action {fsdb signal time fmt} {
         summary [json_object [list signal $signal time $time status ok]]]
 }
 
-proc value_batch_at_action {fsdb signals time fmt} {
+proc value_batch_at_action {fsdb signal_plan time fmt} {
     if {$fsdb eq ""} {
         fail_data "RESOURCE_REQUIRED" "target.fsdb is required"
         return
     }
-    if {[llength $signals] == 0 || $time eq ""} {
+    if {[catch {
+        set signals [string_plan_values $signal_plan 1 "args.signals"]
+    } plan_error]} {
+        fail_data "INVALID_PLAN" $plan_error
+        return
+    }
+    if {$time eq ""} {
         fail_data "MISSING_FIELD" "args.signals[] and args.time are required"
         return
     }
@@ -2239,7 +2412,7 @@ proc main {} {
     } elseif {$action eq "value.at"} {
         value_at_action [env_or_empty KDEBUG_TCL_FSDB] [env_or_empty KDEBUG_TCL_SIGNAL] [env_or_empty KDEBUG_TCL_TIME] [env_or_empty KDEBUG_TCL_FORMAT]
     } elseif {$action eq "value.batch_at"} {
-        value_batch_at_action [env_or_empty KDEBUG_TCL_FSDB] [split [env_or_empty KDEBUG_TCL_SIGNALS] "\n"] [env_or_empty KDEBUG_TCL_TIME] [env_or_empty KDEBUG_TCL_FORMAT]
+        value_batch_at_action [env_or_empty KDEBUG_TCL_FSDB] [env_or_empty KDEBUG_TCL_SIGNAL_PLAN] [env_or_empty KDEBUG_TCL_TIME] [env_or_empty KDEBUG_TCL_FORMAT]
     } elseif {$action eq "scope.list"} {
         scope_list_action [env_or_empty KDEBUG_TCL_FSDB] [env_or_empty KDEBUG_TCL_SCOPE] [env_or_empty KDEBUG_TCL_MAX_DEPTH] [env_or_empty KDEBUG_TCL_MAX_ROWS]
     } elseif {$action eq "trace.active_driver" || $action eq "trace.active_driver_chain"} {

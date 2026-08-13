@@ -27,6 +27,9 @@ TOOL_VERSION = "0.1.0-tcl"
 FILE_RPC_VERSION = "kdebug-file-rpc-v1"
 DEFAULT_NPI_TIMEOUT_MS = 120000
 SOCKET_READ_CHUNK_BYTES = 65536
+PORT_FILTER_PATTERN = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_$]*)(?:\[([0-9]+)(?::([0-9]+))?\])?$"
+)
 
 
 def home_dir():
@@ -789,6 +792,20 @@ def nonnegative_limit(limits, name, default):
     return value
 
 
+def normalize_port_filter(port):
+    match = PORT_FILTER_PATTERN.match(port)
+    if not match:
+        return None
+    base, left, right = match.groups()
+    if left is None:
+        return base
+    left = left.lstrip("0") or "0"
+    if right is None:
+        return "%s[%s]" % (base, left)
+    right = right.lstrip("0") or "0"
+    return "%s[%s:%s]" % (base, left, right)
+
+
 def prepare_port_trace_environment(args, limits, target, tmpdir):
     module = args.get("module")
     if not isinstance(module, str) or not module:
@@ -804,11 +821,13 @@ def prepare_port_trace_environment(args, limits, target, tmpdir):
     ports = args.get("ports", [])
     if not isinstance(ports, list):
         raise ValueError("args.ports must be an array")
-    port_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(\[[0-9]+(:[0-9]+)?\])?$")
+    normalized_ports = []
     for index, port in enumerate(ports):
-        if not isinstance(port, str) or not port_pattern.match(port):
+        normalized = normalize_port_filter(port) if isinstance(port, str) else None
+        if normalized is None:
             raise ValueError("args.ports[%d] is not a valid port or bit-select" % index)
-    if len(set(ports)) != len(ports):
+        normalized_ports.append(normalized)
+    if len(set(normalized_ports)) != len(normalized_ports):
         raise ValueError("args.ports must not contain duplicates")
 
     stop_instances = args.get("stop_instances", [])
@@ -855,7 +874,10 @@ def prepare_port_trace_environment(args, limits, target, tmpdir):
         if timeout_ms == 0:
             raise ValueError("limits.timeout_ms must be >= 1")
 
-    port_plan = prepare_optional_string_plan(args, "ports", tmpdir, "port-trace-ports.tsv")
+    normalized_args = dict(args)
+    normalized_args["ports"] = normalized_ports
+    port_plan = prepare_optional_string_plan(
+        normalized_args, "ports", tmpdir, "port-trace-ports.tsv")
     stop_plan = prepare_optional_string_plan(
         args, "stop_instances", tmpdir, "port-trace-stop-instances.tsv")
     return {
@@ -1031,9 +1053,6 @@ def run_tcl_npi(request, state):
         env["KDEBUG_TCL_TRACE_MODE"] = "load"
     if action == "trace.driver":
         env["KDEBUG_TCL_TRACE_MODE"] = "driver"
-    signals = args.get("signals")
-    if isinstance(signals, list):
-        env["KDEBUG_TCL_SIGNALS"] = "\n".join([str(s) for s in signals])
     limits = request.get("limits") if isinstance(request.get("limits"), dict) else {}
     env["KDEBUG_TCL_MAX_ROWS"] = str(limits.get("max_rows", limits.get("max_results", 200)))
     env["KDEBUG_TCL_MAX_DEPTH"] = str(args.get("max_depth", limits.get("max_depth", 3)))
@@ -1072,6 +1091,9 @@ def run_tcl_npi(request, state):
     try:
         if action == "port.trace_batch":
             env.update(prepare_port_trace_environment(args, limits, target, tmpdir))
+        elif action == "value.batch_at":
+            env["KDEBUG_TCL_SIGNAL_PLAN"] = prepare_string_batch_plan(
+                args, "signals", tmpdir, "value-batch-signals.tsv")
         elif action == "module.inspect_batch":
             env["KDEBUG_TCL_BATCH_PLAN"] = prepare_string_batch_plan(
                 args, "modules", tmpdir, "inspect-modules.tsv")
@@ -1133,6 +1155,11 @@ def run_tcl_npi(request, state):
                  "message": err.get("message", "Tcl NPI action failed"),
                  "stdout": stdout[-2000:],
                  "stderr": stderr[-2000:]}
+        details = err.get("details")
+        if isinstance(details, dict):
+            for key, value in details.items():
+                if key not in {"code", "message", "stdout", "stderr"}:
+                    error[key] = value
         cleanup_tcl_tmp(tmpdir)
         return False, error
     data = payload.get("data") or {}
@@ -3309,9 +3336,18 @@ def one_shot_engine_action(request):
                                         summary=data.get("summary", {}),
                                         session=session_record_json(record))
         err = engine_resp.get("error") or {}
-        return make_error_response(request, request.get("action", ""),
-                                   err.get("code", "INTERNAL_ENGINE_FAILED"),
-                                   err.get("message", "engine session action failed"))
+        action_error = {
+            "code": err.get("code", "INTERNAL_ENGINE_FAILED"),
+            "message": err.get("message", "engine session action failed"),
+        }
+        details = engine_resp.get("details")
+        if isinstance(details, dict):
+            for key, value in details.items():
+                if key not in {"code", "message"}:
+                    action_error[key] = value
+        return make_action_error_response(
+            request, request.get("action", ""), action_error
+        )
     state = {"session_id": "adhoc", "target": target, "record": None}
     ok, data = run_action(request, state)
     return wrap_public_action_response(request, ok, data, state)

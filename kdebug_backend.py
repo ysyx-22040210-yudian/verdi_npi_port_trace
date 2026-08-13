@@ -58,6 +58,23 @@ NONFATAL_PORT_TRACE_ERROR_CODES = {
     "PORT_NOT_FOUND",
     "TRACE_LIMIT_REACHED",
 }
+PARTIAL_PORT_TRACE_ERROR_CODES = {
+    "INSTANCE_PATH_UNAVAILABLE",
+    "INSTANCE_TRACE_FAILED",
+}
+MODULE_INSPECTION_ERROR_KEY = "_kdebug_error"
+ISOLATED_MODULE_INSPECT_CODES = {"MODULE_NOT_FOUND", "MODULE_QUERY_FAILED"}
+DEFAULT_MODULE_INSPECT_BATCH_SIZE = 256
+PORT_FILTER_PATTERN = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_$]*)(?:\[([0-9]+)(?::([0-9]+))?\])?$"
+)
+SPLITTABLE_MODULE_INSPECT_CODES = {
+    "KDEBUG_INVALID_JSON",
+    "KDEBUG_PROCESS_FAILED",
+    "KDEBUG_PROTOCOL_ERROR",
+    "KDEBUG_TIMEOUT",
+    "KDEBUG_TRUNCATED",
+}
 
 
 class KDebugError(RuntimeError):
@@ -65,6 +82,45 @@ class KDebugError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.response = response
+
+
+def format_kdebug_error_details(response: Any, max_items: int = 10) -> str:
+    if not isinstance(response, dict):
+        return ""
+    error = response.get("error")
+    if not isinstance(error, dict):
+        return ""
+    details = error.get("details")
+    if not isinstance(details, dict) or not details:
+        return ""
+
+    summary: Dict[str, Any] = {}
+    if details.get("module"):
+        summary["module"] = details["module"]
+    if isinstance(details.get("stats"), dict):
+        summary["stats"] = details["stats"]
+    errors = details.get("errors")
+    if isinstance(errors, list):
+        summary["errors"] = errors[:max_items]
+        if len(errors) > max_items:
+            summary["omitted_errors"] = len(errors) - max_items
+    requested_ports = details.get("requested_ports")
+    if isinstance(requested_ports, list):
+        summary["requested_ports"] = requested_ports[:max_items]
+        if len(requested_ports) > max_items:
+            summary["omitted_requested_ports"] = len(requested_ports) - max_items
+    if not summary:
+        summary = {
+            key: value
+            for key, value in details.items()
+            if key not in {"stdout", "stderr"}
+        }
+    if not summary:
+        return ""
+    rendered = json.dumps(summary, sort_keys=True, separators=(",", ":"), default=str)
+    if len(rendered) > 6000:
+        rendered = rendered[:6000] + "..."
+    return " details={}".format(rendered)
 
 
 def log_step(message: str) -> None:
@@ -79,6 +135,24 @@ def split_csv_arg(text: Optional[str]) -> List[str]:
 
 def unique_csv_arg(text: Optional[str]) -> List[str]:
     return list(dict.fromkeys(split_csv_arg(text)))
+
+
+def normalize_port_filter(port: str) -> str:
+    match = PORT_FILTER_PATTERN.match(port)
+    if not match:
+        return port
+    base, left, right = match.groups()
+    if left is None:
+        return base
+    left = left.lstrip("0") or "0"
+    if right is None:
+        return "{}[{}]".format(base, left)
+    right = right.lstrip("0") or "0"
+    return "{}[{}:{}]".format(base, left, right)
+
+
+def normalize_port_filters(ports: Iterable[str]) -> List[str]:
+    return list(dict.fromkeys(normalize_port_filter(port) for port in ports))
 
 
 def nonnegative_int(text: str) -> int:
@@ -515,7 +589,12 @@ class KDebugClient:
                 code = str(error.get("code") or "KDEBUG_ACTION_FAILED")
                 message = str(error.get("message") or "kdebug action failed")
                 raise KDebugError(
-                    "{}: {} (kdebug rc={})".format(code, message, proc.returncode),
+                    "{}: {}{} (kdebug rc={})".format(
+                        code,
+                        message,
+                        format_kdebug_error_details(response),
+                        proc.returncode,
+                    ),
                     code,
                     response,
                 )
@@ -545,7 +624,13 @@ class KDebugClient:
             error = response.get("error") if isinstance(response.get("error"), dict) else {}
             code = str(error.get("code") or "KDEBUG_ACTION_FAILED")
             message = str(error.get("message") or "kdebug action failed")
-            raise KDebugError("{}: {}".format(code, message), code, response)
+            raise KDebugError(
+                "{}: {}{}".format(
+                    code, message, format_kdebug_error_details(response)
+                ),
+                code,
+                response,
+            )
         if response.get("action") != action:
             raise KDebugError(
                 "kdebug response action mismatch: expected {}, got {}".format(
@@ -604,48 +689,228 @@ def inspect_instance(client: KDebugClient, instance: str, sections: Sequence[str
         {"module": instance, "sections": list(sections)},
         {"max_rows": 1000000},
     )
-    return response_data(response)
+    data = response_data(response)
+    if not data:
+        raise KDebugError(
+            "module.inspect response is missing data",
+            "KDEBUG_PROTOCOL_ERROR",
+            response,
+        )
+    reported_module = data.get("module")
+    if reported_module not in (None, "", instance):
+        raise KDebugError(
+            "module.inspect response module mismatch: expected {}, got {}".format(
+                instance, reported_module
+            ),
+            "KDEBUG_PROTOCOL_ERROR",
+            response,
+        )
+    normalized = dict(data)
+    normalized.setdefault("module", instance)
+    return normalized
+
+
+def module_inspection_failure(module: str, code: Any, message: Any) -> Dict[str, Any]:
+    return {
+        "module": str(module),
+        MODULE_INSPECTION_ERROR_KEY: {
+            "code": str(code or "MODULE_INSPECT_FAILED"),
+            "message": str(message or "module inspection failed"),
+        },
+    }
+
+
+def module_inspection_error(item: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(item, dict):
+        return None
+    error = item.get(MODULE_INSPECTION_ERROR_KEY)
+    if not isinstance(error, dict):
+        return None
+    return {
+        "code": str(error.get("code") or "MODULE_INSPECT_FAILED"),
+        "message": str(error.get("message") or "module inspection failed"),
+    }
+
+
+def isolated_inspect_error_message(exc: KDebugError) -> str:
+    message = str(exc)
+    prefix = "{}: ".format(exc.code)
+    if message.startswith(prefix):
+        return message[len(prefix) :]
+    return message
+
+
+def inspect_many_individually(
+    client: KDebugClient, instances: Sequence[str], sections: Sequence[str]
+) -> List[Dict[str, Any]]:
+    normalized = []
+    for instance in instances:
+        try:
+            normalized.append(inspect_instance(client, instance, sections))
+        except KDebugError as exc:
+            if exc.code not in ISOLATED_MODULE_INSPECT_CODES:
+                raise
+            message = isolated_inspect_error_message(exc)
+            log_step(
+                "module.inspect failed instance={} code={} message={}".format(
+                    instance, exc.code, message
+                )
+            )
+            normalized.append(module_inspection_failure(instance, exc.code, message))
+    return normalized
+
+
+def normalize_inspect_batch_items(
+    items: Any, instances: Sequence[str], response: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        raise KDebugError(
+            "module.inspect_batch response is missing data.inspections[]",
+            "KDEBUG_PROTOCOL_ERROR",
+            response,
+        )
+    if len(items) != len(instances):
+        raise KDebugError(
+            "module.inspect_batch response count mismatch: expected {}, got {}".format(
+                len(instances), len(items)
+            ),
+            "KDEBUG_PROTOCOL_ERROR",
+            response,
+        )
+
+    normalized = []
+    for index, item in enumerate(items):
+        expected_module = str(instances[index])
+        if not isinstance(item, dict):
+            raise KDebugError(
+                "module.inspect_batch response item {} is not an object".format(index),
+                "KDEBUG_PROTOCOL_ERROR",
+                response,
+            )
+        reported_module = item.get("module")
+        if reported_module not in (None, "", expected_module):
+            raise KDebugError(
+                "module.inspect_batch response order mismatch at item {}: expected {}, got {}".format(
+                    index, expected_module, reported_module
+                ),
+                "KDEBUG_PROTOCOL_ERROR",
+                response,
+            )
+
+        if item.get("ok") is False:
+            error = item.get("error") if isinstance(item.get("error"), dict) else {}
+            code = str(error.get("code") or "MODULE_INSPECT_FAILED")
+            message = str(error.get("message") or "module inspection failed")
+            module = str(reported_module or expected_module)
+            log_step(
+                "module.inspect_batch failed instance={} code={} message={}".format(
+                    module, code, message
+                )
+            )
+            normalized.append(module_inspection_failure(module, code, message))
+            continue
+
+        if isinstance(item.get("data"), dict):
+            data = dict(item["data"])
+        elif item.get("ok") is True:
+            raise KDebugError(
+                "module.inspect_batch success item {} is missing data".format(index),
+                "KDEBUG_PROTOCOL_ERROR",
+                response,
+            )
+        else:
+            # Compatibility with early backends that returned data objects
+            # directly in data.modules[] or data.results[].
+            data = dict(item)
+
+        data_module = data.get("module")
+        if data_module not in (None, "", expected_module):
+            raise KDebugError(
+                "module.inspect_batch data module mismatch at item {}: expected {}, got {}".format(
+                    index, expected_module, data_module
+                ),
+                "KDEBUG_PROTOCOL_ERROR",
+                response,
+            )
+        data.setdefault("module", expected_module)
+        normalized.append(data)
+    return normalized
+
+
+def inspect_batch(
+    client: KDebugClient, instances: Sequence[str], sections: Sequence[str]
+) -> List[Dict[str, Any]]:
+    response = client.request(
+        "module.inspect_batch",
+        {"modules": list(instances), "sections": list(sections)},
+        {"max_rows": 1000000},
+    )
+    data = response_data(response)
+    items = None
+    for key in ("inspections", "modules", "results"):
+        if key in data:
+            items = data.get(key)
+            break
+    return normalize_inspect_batch_items(items, instances, response)
+
+
+def inspect_batch_isolated(
+    client: KDebugClient, instances: Sequence[str], sections: Sequence[str]
+) -> List[Dict[str, Any]]:
+    try:
+        return inspect_batch(client, instances, sections)
+    except KDebugError as exc:
+        if exc.code in UNKNOWN_ACTION_CODES:
+            raise
+        if len(instances) <= 1 or (
+            exc.code not in SPLITTABLE_MODULE_INSPECT_CODES
+            and not is_timeout_code(exc.code)
+        ):
+            raise
+        midpoint = len(instances) // 2
+        log_step(
+            "module.inspect_batch split count={} left={} right={} code={}".format(
+                len(instances), midpoint, len(instances) - midpoint, exc.code
+            )
+        )
+        return inspect_batch_isolated(
+            client, instances[:midpoint], sections
+        ) + inspect_batch_isolated(client, instances[midpoint:], sections)
 
 
 def inspect_many(
     client: KDebugClient, instances: Sequence[str], sections: Sequence[str]
 ) -> List[Dict[str, Any]]:
+    if not instances:
+        return []
     try:
-        response = client.request(
-            "module.inspect_batch",
-            {"modules": list(instances), "sections": list(sections)},
-            {"max_rows": 1000000},
-        )
-        data = response_data(response)
-        items = data.get("modules") or data.get("results") or data.get("inspections")
-        if not isinstance(items, list):
-            raise KDebugError(
-                "module.inspect_batch response is missing data.modules[]",
-                "KDEBUG_PROTOCOL_ERROR",
-                response,
+        batch_size = int(
+            os.environ.get(
+                "KDEBUG_MODULE_INSPECT_BATCH_SIZE",
+                str(DEFAULT_MODULE_INSPECT_BATCH_SIZE),
             )
-        normalized = []
-        for item in items:
-            if isinstance(item, dict) and item.get("ok") is False:
-                error = item.get("error") if isinstance(item.get("error"), dict) else {}
-                raise KDebugError(
-                    "module.inspect_batch failed for {}: {}".format(
-                        item.get("module", "<unknown>"),
-                        error.get("message", "module inspection failed"),
-                    ),
-                    str(error.get("code") or "MODULE_INSPECT_FAILED"),
-                    item,
-                )
-            if isinstance(item, dict) and isinstance(item.get("data"), dict):
-                item = item["data"]
-            if isinstance(item, dict):
-                normalized.append(item)
+        )
+    except ValueError:
+        batch_size = DEFAULT_MODULE_INSPECT_BATCH_SIZE
+        log_step(
+            "warning invalid KDEBUG_MODULE_INSPECT_BATCH_SIZE; using {}".format(
+                batch_size
+            )
+        )
+    if batch_size <= 0:
+        batch_size = len(instances)
+
+    normalized: List[Dict[str, Any]] = []
+    try:
+        for start in range(0, len(instances), batch_size):
+            chunk = instances[start : start + batch_size]
+            normalized.extend(inspect_batch_isolated(client, chunk, sections))
         return normalized
     except KDebugError as exc:
         if exc.code not in UNKNOWN_ACTION_CODES:
             raise
         log_step("module.inspect_batch unavailable; falling back to individual module.inspect")
-        return [inspect_instance(client, instance, sections) for instance in instances]
+        return inspect_many_individually(client, instances, sections)
 
 
 def log_field(value: Any) -> str:
@@ -1111,8 +1376,8 @@ def run_trace(args: argparse.Namespace) -> int:
     design_input = normalize_design_input(Path(args.lib))
     binary = resolve_kdebug(args.kdebug_bin)
     client = KDebugClient(binary, design_input, args.timeout_sec, bool(args.trace_debug))
-    requested_ports = list(
-        dict.fromkeys(unique_csv_arg(args.ports) + read_port_file(args.ports_file))
+    requested_ports = normalize_port_filters(
+        unique_csv_arg(args.ports) + read_port_file(args.ports_file)
     )
     action_args: Dict[str, Any] = {
         "module": args.module,
@@ -1161,10 +1426,17 @@ def run_trace(args: argparse.Namespace) -> int:
             response,
         )
     errors = validate_port_trace_errors(data.get("errors"))
+    stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+    try:
+        processed_instances = int(stats.get("processed_instances", 0))
+    except (TypeError, ValueError):
+        processed_instances = 0
     fatal_errors = []
     for error in errors:
         code = str(error.get("code") or "PORT_TRACE_ERROR") if isinstance(error, dict) else "PORT_TRACE_ERROR"
-        if code in NONFATAL_PORT_TRACE_ERROR_CODES:
+        if code in NONFATAL_PORT_TRACE_ERROR_CODES or (
+            code in PARTIAL_PORT_TRACE_ERROR_CODES and processed_instances > 0
+        ):
             log_step("warning action=port.trace_batch detail={}".format(error))
         else:
             fatal_errors.append(error)
@@ -1213,7 +1485,6 @@ def run_trace(args: argparse.Namespace) -> int:
         BOUNDARY_HEADER,
         boundary_rows,
     )
-    stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
     log_step(
         "trace_done module={} instances={} ports={} full_rows={} boundary_rows={}".format(
             args.module,
@@ -1285,7 +1556,19 @@ def parameter_value(item: Dict[str, Any]) -> str:
 def run_find_parameters(args: argparse.Namespace) -> int:
     design_input = normalize_design_input(Path(args.lib))
     client = KDebugClient(resolve_kdebug(args.kdebug_bin), design_input, args.timeout_sec, args.debug)
-    definitions = split_csv_arg(args.modules)
+    definitions = list(dict.fromkeys(
+        split_csv_arg(args.modules)
+        + read_cli_name_file(
+            getattr(args, "modules_file", ""),
+            "modules file",
+            "MODULES_FILE_NOT_FOUND",
+        )
+    ))
+    if not definitions:
+        raise KDebugError(
+            "find-parameters requires --modules or --modules-file",
+            "MODULES_REQUIRED",
+        )
     instances_by_module = find_instances(client, definitions)
     owner_by_instance = {
         instance: definition
@@ -1304,6 +1587,21 @@ def run_find_parameters(args: argparse.Namespace) -> int:
         definition = owner_by_instance[instance]
         rows.append([definition, instance, "", "", "instance", "INSTANCE_INVENTORY"])
         inspected = inspected_by_name.get(instance, {})
+        inspection_error = module_inspection_error(inspected)
+        if inspection_error is not None:
+            marker = "PARAM_TRACE_FAILED: {}: {}".format(
+                inspection_error["code"], inspection_error["message"]
+            )
+            rows.append([definition, instance, "", "", "error", marker])
+            log_step(
+                "parameter_inspection_failed definition={} instance={} code={} message={}".format(
+                    definition,
+                    instance,
+                    inspection_error["code"],
+                    inspection_error["message"],
+                )
+            )
+            continue
         sections = inspected.get("sections") if isinstance(inspected.get("sections"), dict) else {}
         for item in sections.get("parameters", []):
             obj = object_data(item)
@@ -1411,7 +1709,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parameters = subparsers.add_parser("find-parameters")
     parameters.add_argument("--lib", required=True)
-    parameters.add_argument("--modules", required=True)
+    parameters.add_argument("--modules", default="")
+    parameters.add_argument("--modules-file", default="")
     parameters.add_argument("--output", required=True)
     parameters.add_argument("--kdebug-bin")
     parameters.add_argument("--timeout-sec", type=int, default=0)

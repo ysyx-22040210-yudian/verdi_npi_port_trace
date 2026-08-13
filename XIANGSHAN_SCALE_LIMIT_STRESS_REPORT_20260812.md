@@ -36,7 +36,13 @@
 
 补充压测的 raw full/boundary 行数为 832/512，其中 128 行是明确的递归深度边界 marker；
 排除 marker 后仍是历史语义基线 768/448。Windows 主工具整仓回归为 128 项通过、
-32 项因 POSIX 条件跳过；VM 干净包回归结果见后续提交记录。
+32 项因 POSIX 条件跳过。主工具提交的干净 archive 在 VM 上用 Python 3.8 再跑为
+128 项通过、14 项环境条件跳过；从 `/tmp` 和符号链接启动随包 launcher 的
+`actions/schema` smoke 均通过。Python 3.6 对 `kdebug_backend.py` 与 engine 的
+`py_compile`、launcher smoke 均通过，并用随包 ELF 对真实 XiangShan `elab++` 完成
+shallow trace：48.41 秒、32 个实例、full/boundary 192/128、0 error。该响应与上游
+Python 3.6/3.8 基线逐字节一致，SHA-256 为
+`9dce1f0711069d6a5b2defea78f2237b9a26a40de8ceded9a7d67ee1fd6828e5`。
 
 ## 结论
 

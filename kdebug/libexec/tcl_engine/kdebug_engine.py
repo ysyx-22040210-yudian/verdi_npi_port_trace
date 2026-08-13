@@ -559,7 +559,32 @@ def vcs_database_path(design_database):
     return path
 
 
-def design_args_for_target(target, action=""):
+def prepare_verdi_define_file(target, tmpdir):
+    filelist = normalized_path(target.get("filelist"))
+    if not filelist:
+        return ""
+    if not os.path.isfile(filelist):
+        raise ValueError("target.filelist does not exist: %s" % filelist)
+    defines = target.get("defines", [])
+    if isinstance(defines, str):
+        defines = [defines]
+    if not isinstance(defines, list) or any(
+        not isinstance(item, str) or not item for item in defines
+    ):
+        raise ValueError("target.defines must be a string or an array of non-empty strings")
+    if any("\n" in item or "\r" in item for item in defines):
+        raise ValueError("target.defines entries must not contain newlines")
+    if not defines:
+        return ""
+
+    path = os.path.join(tmpdir, "verdi-defines.f")
+    with open(path, "w", encoding="utf-8", newline="\n") as fp:
+        for item in defines:
+            fp.write("+define+%s\n" % item)
+    return path
+
+
+def design_args_for_target(target, action="", tmpdir=None):
     args = []
     if action in STANDALONE_TCL_ACTIONS:
         return args
@@ -567,15 +592,13 @@ def design_args_for_target(target, action=""):
     if filelist:
         if not os.path.isfile(filelist):
             raise ValueError("target.filelist does not exist: %s" % filelist)
-        defines = target.get("defines", [])
-        if isinstance(defines, str):
-            defines = [defines]
-        if not isinstance(defines, list) or any(
-            not isinstance(item, str) or not item for item in defines
-        ):
-            raise ValueError("target.defines must be a string or an array of non-empty strings")
-        args.extend("+define+%s" % item for item in defines)
-        args.extend(["-sv", "-f", filelist])
+        define_file = prepare_verdi_define_file(target, tmpdir) if tmpdir else ""
+        if not tmpdir and target.get("defines"):
+            raise ValueError("target.defines require a controlled temporary filelist")
+        args.append("-sv")
+        if define_file:
+            args.extend(["-f", define_file])
+        args.extend(["-f", filelist])
         upf = normalized_path(target.get("upf"))
         if upf:
             if not os.path.isfile(upf):
@@ -769,6 +792,46 @@ def prepare_optional_string_plan(args, field, tmpdir, filename):
         rows.append((hex_plan_field(value),))
     path = os.path.join(tmpdir, filename)
     write_tsv_plan(path, rows)
+    return path
+
+
+def prepare_text_payload(args, field, tmpdir, filename):
+    value = args.get(field)
+    if not isinstance(value, str):
+        raise ValueError("args.%s must be a string" % field)
+    path = os.path.join(tmpdir, filename)
+    with open(path, "w", encoding="utf-8", newline="") as fp:
+        fp.write(value)
+    return path
+
+
+def prepare_scalar_environment_plan(env, tmpdir):
+    # Keep only bounded filesystem paths in the process environment. All other
+    # request settings use one controlled file so a future string field cannot
+    # reintroduce execve's per-environment-string limit.
+    path_keys = {
+        "KDEBUG_TCL_REQUEST_JSON",
+        "KDEBUG_TCL_RESPONSE_JSON",
+        "KDEBUG_TCL_FSDB",
+        "KDEBUG_TCL_FILE",
+        "KDEBUG_TCL_OUTPUT",
+        "KDEBUG_TCL_OUTPUT_DIR",
+        "KDEBUG_TCL_DATABASE",
+        "KDEBUG_TCL_ELAB",
+        "KDEBUG_TCL_CRDB",
+        "KDEBUG_TCL_SOURCE",
+        "KDEBUG_TCL_CONTENT_FILE",
+    }
+    rows = []
+    for key in sorted(list(env)):
+        if not key.startswith("KDEBUG_TCL_"):
+            continue
+        if key in path_keys or key.endswith("_PLAN"):
+            continue
+        rows.append((key, hex_plan_field(env.pop(key))))
+    path = os.path.join(tmpdir, "request-scalars.tsv")
+    write_tsv_plan(path, rows)
+    env["KDEBUG_TCL_SCALAR_PLAN"] = path
     return path
 
 
@@ -1026,9 +1089,11 @@ def run_tcl_npi(request, state):
         json.dump(request, fp)
 
     env = dict(os.environ)
-    # This is an internal per-request selector.  Never inherit a stale value
-    # into a daidir, filelist, or standalone action.
-    env.pop("KDEBUG_TCL_ELAB", None)
+    # KDEBUG_TCL_* is a private per-request namespace. Never inherit a stale
+    # selector, payload, or plan from the parent process.
+    for key in list(env):
+        if key.startswith("KDEBUG_TCL_"):
+            env.pop(key, None)
     env["KDEBUG_TCL_REQUEST_JSON"] = req_path
     env["KDEBUG_TCL_RESPONSE_JSON"] = rsp_path
     env["KDEBUG_TCL_ACTION"] = action
@@ -1067,7 +1132,6 @@ def run_tcl_npi(request, state):
         env["KDEBUG_TCL_SECTIONS"] = "\n".join(str(item) for item in sections)
     env["KDEBUG_TCL_FILE"] = str(args.get("file", ""))
     env["KDEBUG_TCL_LINE"] = str(args.get("line", ""))
-    env["KDEBUG_TCL_CONTENT"] = str(args.get("content", ""))
     env["KDEBUG_TCL_OUTPUT"] = normalized_path(args.get("output", ""))
     env["KDEBUG_TCL_OUTPUT_DIR"] = normalized_path(args.get("output_dir", ""))
     env["KDEBUG_TCL_OVERWRITE"] = "1" if bool_arg(args.get("overwrite", False)) else "0"
@@ -1097,6 +1161,9 @@ def run_tcl_npi(request, state):
         elif action == "module.inspect_batch":
             env["KDEBUG_TCL_BATCH_PLAN"] = prepare_string_batch_plan(
                 args, "modules", tmpdir, "inspect-modules.tsv")
+        if action == "text.replace_line":
+            env["KDEBUG_TCL_CONTENT_FILE"] = prepare_text_payload(
+                args, "content", tmpdir, "replacement.txt")
         elif action == "transaction.writer.create":
             transaction_plan, tag_plan, relation_plan = prepare_transaction_plans(args, tmpdir)
             env["KDEBUG_TCL_TRANSACTION_PLAN"] = transaction_plan
@@ -1114,11 +1181,13 @@ def run_tcl_npi(request, state):
         env["NPIL1_PATH"] = os.path.join(os.environ["VERDI_HOME"], "share", "NPI", "L1", "TCL")
 
     try:
-        design_cli_args = design_args_for_target(target, action)
+        design_cli_args = design_args_for_target(target, action, tmpdir)
         verdi_cwd = design_workdir_for_target(target, action, tmpdir)
     except ValueError as exc:
         cleanup_tcl_tmp(tmpdir)
         return False, {"code": "INVALID_ARGUMENT", "message": str(exc)}
+
+    prepare_scalar_environment_plan(env, tmpdir)
 
     cmd = [verdi, "-batch", "-nologo", "-play", tcl_script_path()]
     cmd.extend(design_cli_args)

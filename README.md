@@ -32,6 +32,9 @@ simv.daidir/kdb.elab++
 - 支持 loader 方向的 fanout / slice / 拼接继续展开，例如 `assign B0 = A[10:0]`、`assign B = {C, A, D}`。
 - 支持 `-ports A[7]` 这种单 bit 端口追踪。
 - `ports` 和 `stop_instances` 不再有 4096 项的人为数量上限；大列表可通过 `-ports-file`、`-keywords-file` 和 `-load-stop-instance-file` 传入。
+- 内置 kdebug 还消除了同类的 define argv、单环境字符串、64 MiB file transport、
+  `PATH_MAX` 工作目录和固定可执行路径缓冲瓶颈；审计与真实 XiangShan 数据见
+  [`XIANGSHAN_SCALE_LIMIT_STRESS_REPORT_20260812.md`](XIANGSHAN_SCALE_LIMIT_STRESS_REPORT_20260812.md)。
 - 支持 XLSX 反标、CSV 过滤、Raw Trace 三种命令行入口。
 - 通过公共 `port.trace_batch` 在一次 KDB 导入中生成 full/boundary 结果；该 action 不可用或失败时直接报错，不回退到浅层 `trace.driver` / `trace.load`。
 - 常量 driver/load 日志包含 `evidence_source` 和目标信号到常量的 `const_full_path`，便于复核证据来源。

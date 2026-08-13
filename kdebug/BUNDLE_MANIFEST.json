@@ -4,22 +4,22 @@
   "version": "0.1.0-tcl",
   "source": {
     "repository": "https://github.com/ysyx-22040210-yudian/kverif.git",
-    "commit": "b4a5c3a1b9f48c46fa8334c44d42626d58138dfe",
-    "commit_date": "2026-08-14T03:29:09+08:00",
-    "subject": "Harden NPI trace failure isolation"
+    "commit": "592b068fcad964ef8121212be3eec1643d4bf13f",
+    "commit_date": "2026-08-14T06:10:50+08:00",
+    "subject": "Remove remaining kdebug scale bottlenecks"
   },
   "bundle_patches": [
     "libexec/kdebug-engine pins KDEBUG_ENGINE_EXE to its executable launcher so session daemons do not depend on the Python file mode"
   ],
   "binary": {
     "path": "kdebug/kdebug",
-    "sha256": "3628bf8a256f81d98e051ccf57f385f40fcdaa3d373ffa38d53325d444002910",
-    "size_bytes": 3464864,
+    "sha256": "95dd0cdb84ea264d46c8dbb6c116d686ae8b3bb18750ed37cea248bee3f7e878",
+    "size_bytes": 3470680,
     "format": "ELF 64-bit LSB executable",
     "os": "Linux",
     "architecture": "x86_64",
     "linkage": "glibc dynamic",
-    "build_id": "663a1c3d5611ede2cafd5cde29385a44a779e22b",
+    "build_id": "01a40f9557b7f92f217a04ca954361195dfa6d5b",
     "minimum_symbol_versions": {
       "GLIBC": "2.14",
       "GLIBCXX": "3.4.19",
@@ -47,14 +47,14 @@
     },
     {
       "path": "kdebug/libexec/tcl_engine/kdebug_engine.py",
-      "sha256": "4ad4d0f6afbc3d93bb5a89c7d60bf772a1023ad221f4ac6e63b57bb0edb6e892",
-      "size_bytes": 144315,
+      "sha256": "12cc30c7fd51bd416352fbea4fb12439a4f831887fad583467bfc92d6945edda",
+      "size_bytes": 146759,
       "text_eol": "lf"
     },
     {
       "path": "kdebug/libexec/tcl_engine/kdebug_npi.tcl",
-      "sha256": "63e4a347819b4257509b2b730be190bf71a40abe7fbd37aa6360c5d8291c0bbf",
-      "size_bytes": 99241,
+      "sha256": "49869ca01ffd85f609f8ec50d8a27b373600b92a0a503fd031df4c957032f852",
+      "size_bytes": 100434,
       "text_eol": "lf"
     },
     {

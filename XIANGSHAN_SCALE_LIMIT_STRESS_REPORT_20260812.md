@@ -1,5 +1,64 @@
 # XiangShan 扩展性限制审计与压测报告（2026-08-12）
 
+## 2026-08-14 同类静态限制补充审计
+
+在解除 `ports` / `stop_instances` 的 4096 项限制后，本轮继续沿完整请求路径审计
+schema、C++ frontend、subprocess、UDS/file transport、Python engine、argv/environment、
+Tcl plan 和文件系统路径。结论是当前生效的 request schema 中没有固定 `maxItems` 或
+`maxLength`；另有五类会把合法大请求误判成失败的瓶颈已经消除：
+
+- 50000 个 `target.defines` 写入私有 Verdi define filelist，不再展开到 argv。
+- 所有非路径 `KDEBUG_TCL_*` 标量统一写入 hex TSV plan，避免 Linux 单环境字符串约
+  128 KiB 的 `execve/E2BIG`；每次请求先清除父环境遗留的全部 `KDEBUG_TCL_*`。
+- `text.replace_line.content` 使用 UTF-8 临时文件，大于 1 MiB 的正文不进入环境变量。
+- file transport JSON 默认不设固定字节上限；只有显式正整数
+  `KDEBUG_FILE_MAX_JSON_BYTES` 才限流，配置类型扩大为 64 位。
+- `getcwd(PATH_MAX)` 和固定 `/proc/self/exe` 缓冲改为动态扩容；大于 4096 字节的真实 cwd
+  回归通过。
+
+保留的 `max_rows/max_nodes/max_edges/depth` 是显式资源预算，命中后必须返回
+`truncated` 或 `TRACE_LIMIT_REACHED:*`。action log 的 4096 字符、KOUT 的 20 项预览、
+session name 的 64 字符和 Unix socket 的约 104 字节路径也不属于 JSON 数据截断：前两者
+带预览 marker，session 路径会稳定 hash，socket 路径会自动转到 `/tmp`。旧 direct-engine
+源码中的固定缓冲不进入当前 Makefile frontend/engine 构建链路。
+
+本轮 bundle 来自已推送的 kdebug 源提交
+`592b068fcad964ef8121212be3eec1643d4bf13f`，VM 干净归档目录为
+`/root/xverif-592b068-clean`。干净构建先重新生成被 `.gitignore` 排除的 FSDB fixture，
+随后得到以下门禁结果：
+
+| 套件 / 压测 | 结果 |
+| --- | --- |
+| infrastructure / schema / examples | 13 / 228 / 223 全部通过 |
+| C++ unit / action specs | 全部通过 / 109 通过 |
+| contract / session | 89 / 24 全部通过 |
+| Python 3.6 runtime | `kdebug_engine.py` `py_compile` 通过 |
+| Windows 大数据通道定向 | 5 通过，1 个 AF_UNIX 平台条件跳过 |
+| 65 MiB file transport | 65 MiB request + 65 MiB response，rc=0，7.45 秒，峰值 RSS 376400 KiB |
+| 2 MiB subprocess | stdin/stdout 同时完整往返 |
+| 大 UDS response | 大于 1 MiB，完整往返 |
+
+最终 scalar-plan 代码在真实 XiangShan `kdb.elab++` 上重跑 50000 个唯一 stop instance：
+
+- 请求 2,350,509 字节，32 个 MSHR 实例全部处理，`error_count=0`，rc=0。
+- 响应 143,966 字节，墙钟 52.91 秒，峰值 RSS 1,394,664 KiB。
+- 响应 SHA-256 为
+  `9dce1f0711069d6a5b2defea78f2237b9a26a40de8ceded9a7d67ee1fd6828e5`，
+  与修复前语义基线逐字节一致。
+- `truncated=true` 只来自用例显式设置的递归深度预算及对应 marker；stop-set、实例列表和
+  JSON 响应均未被数量截断。
+
+真实 Dispatch `module.inspect` 返回 15,675,496 字节、5265 个 ports、
+`truncated=false`，墙钟 61.31 秒。MSHR 常量响应为 501,071 字节；64 条证据仍是
+`0=48`、`1=16`，64 个端口均无 0/1 冲突，全部带 `const_full_path`，source file 均为
+`/root/XiangShan-build/build/rtl/MSHRCtl.sv`。常量响应 SHA-256 为
+`846e0eb1846b32017899edfd96a63bbcf143daf235fa49bda71f7642489ca307`。
+
+新随包 ELF SHA-256 为
+`95dd0cdb84ea264d46c8dbb6c116d686ae8b3bb18750ed37cea248bee3f7e878`，Build ID 为
+`01a40f9557b7f92f217a04ca954361195dfa6d5b`；最低符号版本仍为 GLIBC 2.14、
+GLIBCXX 3.4.19、CXXABI 1.3.2。
+
 ## 2026-08-14 故障隔离补充压测
 
 针对现场出现的

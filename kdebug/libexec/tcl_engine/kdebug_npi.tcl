@@ -1,4 +1,5 @@
 set ::kdebug_npi_script_dir [file dirname [file normalize [info script]]]
+set ::kdebug_scalar_values [dict create]
 
 proc json_escape {s} {
     set out ""
@@ -112,6 +113,9 @@ proc fail_data_with_details {code message details} {
 }
 
 proc env_or_empty {name} {
+    if {[dict exists $::kdebug_scalar_values $name]} {
+        return [dict get $::kdebug_scalar_values $name]
+    }
     if {[info exists ::env($name)]} {return $::env($name)}
     return ""
 }
@@ -1566,6 +1570,29 @@ proc read_plan_rows {path expected_fields} {
     return $rows
 }
 
+proc read_text_file {path} {
+    if {$path eq "" || ![file isfile $path]} {
+        error "controlled text payload is missing: $path"
+    }
+    set fp [open $path r]
+    fconfigure $fp -translation binary -encoding utf-8
+    set content [read $fp]
+    close $fp
+    return $content
+}
+
+proc load_scalar_environment_plan {} {
+    set path [env_or_empty KDEBUG_TCL_SCALAR_PLAN]
+    if {$path eq ""} {return}
+    foreach fields [read_plan_rows $path 2] {
+        set name [lindex $fields 0]
+        if {![regexp {^KDEBUG_TCL_[A-Z0-9_]+$} $name] || $name eq "KDEBUG_TCL_SCALAR_PLAN"} {
+            error "invalid controlled scalar name: $name"
+        }
+        dict set ::kdebug_scalar_values $name [decode_hex_utf8 [lindex $fields 1]]
+    }
+}
+
 proc prepare_output_file {path overwrite} {
     if {$path eq ""} {
         fail_data "MISSING_FIELD" "args.output is required"
@@ -1758,12 +1785,16 @@ proc text_words_action {file_name line_number max_rows} {
         summary [json_object [list file $file_name line $line_number count [llength $rows] truncated [expr {$truncated ? "__JSON_TRUE__" : "__JSON_FALSE__"}]]]]
 }
 
-proc text_replace_line_action {file_name line_number content output overwrite} {
+proc text_replace_line_action {file_name line_number content_file output overwrite} {
     if {$output eq ""} {
         fail_data "MISSING_FIELD" "args.output is required"
         return
     }
     if {![text_line_handles $file_name $line_number file_hdl line_hdl]} {return}
+    if {[catch {set content [read_text_file $content_file]} payload_error]} {
+        fail_data "INVALID_PAYLOAD" $payload_error
+        return
+    }
     set source_full_name [safe_text_property_str $file_hdl npiTextFileFullName]
     if {$source_full_name ne "" && [file normalize $source_full_name] eq [file normalize $output]} {
         fail_data "IN_PLACE_EDIT_FORBIDDEN" "text.replace_line writes a copy; args.output must differ from the source file"
@@ -2372,6 +2403,10 @@ proc npi_capabilities_action {} {
 }
 
 proc main {} {
+    if {[catch {load_scalar_environment_plan} scalar_error]} {
+        fail_data "INVALID_PAYLOAD" $scalar_error
+        return
+    }
     source_l1
     if {![import_elab_if_requested]} {return}
     set action [env_or_empty KDEBUG_TCL_ACTION]
@@ -2444,7 +2479,7 @@ proc main {} {
     } elseif {$action eq "text.words"} {
         text_words_action [env_or_empty KDEBUG_TCL_FILE] [env_or_empty KDEBUG_TCL_LINE] [env_or_empty KDEBUG_TCL_MAX_ROWS]
     } elseif {$action eq "text.replace_line"} {
-        text_replace_line_action [env_or_empty KDEBUG_TCL_FILE] [env_or_empty KDEBUG_TCL_LINE] [env_or_empty KDEBUG_TCL_CONTENT] [env_or_empty KDEBUG_TCL_OUTPUT] [env_or_empty KDEBUG_TCL_OVERWRITE]
+        text_replace_line_action [env_or_empty KDEBUG_TCL_FILE] [env_or_empty KDEBUG_TCL_LINE] [env_or_empty KDEBUG_TCL_CONTENT_FILE] [env_or_empty KDEBUG_TCL_OUTPUT] [env_or_empty KDEBUG_TCL_OVERWRITE]
     } elseif {$action eq "dm.add_net"} {
         dm_add_net_action [env_or_empty KDEBUG_TCL_MODULE] [env_or_empty KDEBUG_TCL_NAME] [env_or_empty KDEBUG_TCL_NET_TYPE] [env_or_empty KDEBUG_TCL_PACKED_LEFT] [env_or_empty KDEBUG_TCL_PACKED_RIGHT] [env_or_empty KDEBUG_TCL_OUTPUT_DIR] [env_or_empty KDEBUG_TCL_OVERWRITE]
     } elseif {$action eq "dm.clone_module"} {

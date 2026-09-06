@@ -48,7 +48,7 @@ echo "[scopefix_pressure] run trace_and_filter"
   -module SFPProbe \
   -lib "$(pwd)/scopefix_pressure_trace_build/simv.daidir/kdb.elab++" \
   -keywords SFPKeySrc,SFPKeySink \
-  -ports drv_chain,drv_concat_bit,drv_nested_bit,drv_const_chain,drv_decoy_bit,load_chain,load_bus,load_bus[7],load_bus[18],load_orphan \
+  -ports drv_chain,drv_concat_bit,drv_nested_bit,drv_const_chain,drv_decoy_bit,load_chain,load_bus,load_bus[7],load_bus[18],load_bus[28],load_orphan \
   -output scopefix_pressure_probe.csv \
   --keyword-batch-size 1 \
   -const-source-fallback 1 \
@@ -89,7 +89,7 @@ required_full = [
     ("load_bus", "load", "u_sibling.u_consumer.u_key_low.in"),
     ("load_bus", "load", "u_sibling.u_consumer.u_key_concat.in"),
     ("load_bus[7]", "load", "u_sibling.u_consumer.u_key_low.in"),
-    ("load_bus[18]", "load", "u_sibling.u_consumer.u_key_concat.in"),
+    ("load_bus[28]", "load", "u_sibling.u_consumer.u_key_concat.in"),
     ("load_orphan", "load", "u_sibling.u_consumer.u_key_orphan.in"),
 ]
 missing = [(p, r, t) for p, r, t in required_full if not full_has(p, r, t)]
@@ -105,7 +105,7 @@ required_filtered = [
     ("load_bus", "load", "u_key_low.in"),
     ("load_bus", "load", "u_key_concat.in"),
     ("load_bus[7]", "load", "u_key_low.in"),
-    ("load_bus[18]", "load", "u_key_concat.in"),
+    ("load_bus[28]", "load", "u_key_concat.in"),
     ("load_orphan", "load", "u_key_orphan.in"),
 ]
 missing_filtered = [(p, r, t) for p, r, t in required_filtered if not filtered_has(p, r, t)]
@@ -121,8 +121,11 @@ if any(r["port_name"] == "drv_decoy_bit" and r["role"] == "driver" for r in filt
 if filtered_has("load_bus[7]", "load", "u_key_concat.in"):
     print("[scopefix_pressure] note: load_bus[7] also reaches whole-bus/concat fanout through NPI load trace")
 
-if filtered_has("load_bus[18]", "load", "u_key_low.in"):
-    print("[scopefix_pressure] note: load_bus[18] also reaches whole-bus/low-slice fanout through NPI load trace")
+if filtered_has("load_bus[18]", "load", "u_key_low.in") or filtered_has("load_bus[18]", "load", "u_key_concat.in"):
+    raise SystemExit("load_bus[18] is an intentionally unused middle-slice bit and must not reach either key sink")
+
+if filtered_has("load_bus[28]", "load", "u_key_low.in"):
+    raise SystemExit("load_bus[28] must reach the concat sink without leaking into the low-slice sink")
 
 if any("u_noise" in r["inst_full_name"] or "u_noise" in r["signal_full_name"] for r in filtered_rows):
     raise SystemExit("noise clusters leaked into keyword-filtered output")

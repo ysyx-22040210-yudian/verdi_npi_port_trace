@@ -186,8 +186,9 @@ if { ![info exists env(NPI_LIB)] || $env(NPI_LIB) eq "" } {
     debExit
 }
 
-if { ![info exists env(NPI_PARAM_MODULES)] || $env(NPI_PARAM_MODULES) eq "" } {
-    puts stderr "ERROR: environment variable NPI_PARAM_MODULES is not set"
+if { (![info exists env(NPI_PARAM_MODULES)] || $env(NPI_PARAM_MODULES) eq "") &&
+     (![info exists env(NPI_PARAM_MODULES_FILE)] || $env(NPI_PARAM_MODULES_FILE) eq "") } {
+    puts stderr "ERROR: NPI_PARAM_MODULES_FILE or NPI_PARAM_MODULES is required"
     debExit
 }
 
@@ -197,7 +198,15 @@ if { ![info exists env(NPI_PARAM_OUTFILE)] || $env(NPI_PARAM_OUTFILE) eq "" } {
 }
 
 set target_modules {}
-foreach item [split $env(NPI_PARAM_MODULES) ","] {
+if {[info exists env(NPI_PARAM_MODULES_FILE)] && $env(NPI_PARAM_MODULES_FILE) ne ""} {
+    set listfh [open $env(NPI_PARAM_MODULES_FILE) r]
+    fconfigure $listfh -encoding utf-8
+    set module_items [split [read $listfh] "\n"]
+    close $listfh
+} else {
+    set module_items [split $env(NPI_PARAM_MODULES) ","]
+}
+foreach item $module_items {
     set item [string trim $item]
     if { $item ne "" } {
         lappend target_modules $item
@@ -230,6 +239,7 @@ csv_put $outfh {module inst_full_name param_name param_value param_kind param_in
 
 set total_instances 0
 set total_params 0
+set collection_errors 0
 foreach target_mod $target_modules {
     set hdlList {}
     log_step "find instances for module definition: $target_mod"
@@ -237,6 +247,7 @@ foreach target_mod $target_modules {
         ::npi_L1::npi_find_inst_with_def_wildcard "" $target_mod hdlList
     } e] } {
         puts stderr "WARNING: npi_find_inst_with_def_wildcard failed for $target_mod: $e"
+        incr collection_errors
         continue
     }
 
@@ -246,6 +257,7 @@ foreach target_mod $target_modules {
         set inst_path [get_instance_path $ih]
         if { $inst_path eq "" } {
             puts stderr "WARNING: could not resolve instance path for handle $ih"
+            incr collection_errors
             continue
         }
         if { [dict exists $seen_paths $inst_path] } {
@@ -262,6 +274,7 @@ foreach target_mod $target_modules {
             set count [::npi_L1::npi_mod_inst_get_parameter $inst_path param_hdl_list]
         } e] } {
             puts stderr "WARNING: npi_mod_inst_get_parameter failed for $inst_path: $e"
+            incr collection_errors
             continue
         }
 
@@ -277,6 +290,7 @@ foreach target_mod $target_modules {
                 log_step "param instance=$inst_path $kind $name=$value"
             } e] } {
                 puts stderr "WARNING: parameter handle failed for $inst_path: $e"
+                incr collection_errors
                 csv_put $outfh [list $target_mod $inst_path UNKNOWN_PARAM UNKNOWN_VALUE parameter "ERROR:$e"]
                 incr total_params
             }
@@ -285,5 +299,10 @@ foreach target_mod $target_modules {
 }
 
 close $outfh
+if {$collection_errors == 0 && [info exists env(NPI_PARAM_STATUS_FILE)] && $env(NPI_PARAM_STATUS_FILE) ne ""} {
+    set statusfh [open $env(NPI_PARAM_STATUS_FILE) w]
+    puts $statusfh "COMPLETE [llength $target_modules] $total_instances $total_params"
+    close $statusfh
+}
 log_step "done instances=$total_instances params=$total_params"
 debExit

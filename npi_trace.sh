@@ -43,6 +43,7 @@ TOP=""
 MODULE=""
 SRCFILE=""
 PORTS=""
+PORTS_FILE=""
 LIB=""
 MODULE_OUT=""
 CONST_SOURCE_FALLBACK="${NPI_CONST_SOURCE_FALLBACK:-1}"
@@ -65,6 +66,7 @@ while [ $# -gt 0 ]; do
         -module)   MODULE="$2";   shift 2 ;;
         -srcfile)  SRCFILE="$2";  shift 2 ;;
         -ports)    PORTS="$2";    shift 2 ;;
+        -ports-file|--ports-file) PORTS_FILE="$2"; shift 2 ;;
         -lib)      LIB="$2";      shift 2 ;;
         -module-out) MODULE_OUT="$2"; shift 2 ;;
         -const-source-fallback|--const-source-fallback) CONST_SOURCE_FALLBACK="$2"; shift 2 ;;
@@ -156,15 +158,20 @@ if [ -d "$LIB" ] && ! find "$LIB" -mindepth 1 -print -quit | grep -q .; then
 fi
 
 TMPOUT="$(mktemp "$PWD/npi_trace_out.XXXXXX.csv")"
+STATUS_FILE="${TMPOUT}.status"
+PORTS_TEMP="${TMPOUT}.ports"
 VERDI_SESSION_FILE="$(mktemp "$PWD/npi_trace_session.XXXXXX")"
 VERDI_TIMEOUT_SENTINEL="$(mktemp "$PWD/npi_trace_timeout.XXXXXX")"
 VERDI_RUNNER_PID=""
 if [ -z "$MODULE_OUT" ]; then
     MODULE_OUT="${MODULE}_module_connections.csv"
 fi
+MODULE_OUT="$("${PYTHON_BIN:-python3}" "$SCRIPT_DIR/runtime_paths.py" --path "$MODULE_OUT" --suffix .csv)" || exit 1
+mkdir -p "$(dirname "$MODULE_OUT")"
+TMPMODULEOUT="$(mktemp "$(dirname "$MODULE_OUT")/.trace_boundary.XXXXXX.csv")" || exit 1
 
 cleanup_failed_trace() {
-    rm -f "$TMPOUT" "$MODULE_OUT" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
+    rm -f "$TMPOUT" "$TMPMODULEOUT" "$MODULE_OUT" "$STATUS_FILE" "$PORTS_TEMP" "$VERDI_SESSION_FILE" "$VERDI_TIMEOUT_SENTINEL"
 }
 
 run_verdi_timeout_wrapper() {
@@ -281,7 +288,9 @@ log_step "script_dir=$SCRIPT_DIR"
 log_step "tcl=$TCL"
 log_step "module=$MODULE"
 log_step "load_mode=lib lib=$LIB"
-if [ -n "$PORTS" ]; then
+if [ -n "$PORTS_FILE" ]; then
+    log_step "port_filter_file=$PORTS_FILE"
+elif [ -n "$PORTS" ]; then
     log_step "port_filter=$PORTS"
 else
     log_step "port_filter=<all ports>"
@@ -308,10 +317,19 @@ rm -f "$MODULE_OUT"
 
 export NPI_MODULE="$MODULE"
 export NPI_SRCFILE="$SRCFILE"
-export NPI_PORTS="$PORTS"
+if [ -n "$PORTS_FILE" ]; then
+    [ -f "$PORTS_FILE" ] || { echo "[ERROR] ports file does not exist: $PORTS_FILE" >&2; exit 1; }
+    case "$PORTS_FILE" in /*) ;; *) PORTS_FILE="$PWD/$PORTS_FILE" ;; esac
+else
+    printf '%s\n' "$PORTS" > "$PORTS_TEMP"
+    PORTS_FILE="$PORTS_TEMP"
+fi
+export NPI_PORTS=""
+export NPI_PORTS_FILE="$PORTS_FILE"
 export NPI_LIB="$LIB"
 export NPI_OUTFILE="$TMPOUT"
-export NPI_MODULE_OUTFILE="$MODULE_OUT"
+export NPI_MODULE_OUTFILE="$TMPMODULEOUT"
+export NPI_STATUS_FILE="$STATUS_FILE"
 export NPI_CONST_SOURCE_FALLBACK="$CONST_SOURCE_FALLBACK"
 export NPI_CONST_TRACE_MAX_DEPTH="$CONST_TRACE_DEPTH"
 export NPI_ASSIGN_TRACE_MAX_DEPTH="$ASSIGN_TRACE_DEPTH"
@@ -387,12 +405,20 @@ if [ "$verdi_rc" -ne 0 ]; then
     exit "$verdi_rc"
 fi
 
-if [ ! -s "$TMPOUT" ]; then
+completion=""
+if [ -s "$STATUS_FILE" ]; then read -r completion completed_instances < "$STATUS_FILE"; fi
+if [ "$completion" != "COMPLETE" ]; then
+    echo "[ERROR] TRACE_INCOMPLETE: Verdi exited without a trace completion record" >&2
+    cleanup_failed_trace
+    exit 1
+fi
+if [ ! -s "$TMPOUT" ] || [ ! -s "$TMPMODULEOUT" ]; then
     echo "[ERROR] no output generated" >&2
     cleanup_failed_trace
     exit 1
 fi
 
+mv -f "$TMPMODULEOUT" "$MODULE_OUT" || { cleanup_failed_trace; exit 1; }
 FULL_LINES=$(wc -l < "$TMPOUT")
 if [ -s "$MODULE_OUT" ]; then
     MODULE_LINES=$(wc -l < "$MODULE_OUT")
@@ -408,5 +434,5 @@ if [ "$cat_rc" -ne 0 ]; then
     cleanup_failed_trace
     exit "$cat_rc"
 fi
-rm -f "$TMPOUT"
+rm -f "$TMPOUT" "$STATUS_FILE" "$PORTS_TEMP"
 log_step "removed temp_full_trace=$TMPOUT"

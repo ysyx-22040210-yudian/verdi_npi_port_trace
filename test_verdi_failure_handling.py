@@ -117,6 +117,7 @@ class VerdiFailureHandlingTest(unittest.TestCase):
                 root,
                 'printf "header\\ncomplete\\n" > "$NPI_OUTFILE"\n'
                 'printf "module complete\\n" > "$NPI_MODULE_OUTFILE"\n'
+                'printf "COMPLETE 1\\n" > "$NPI_STATUS_FILE"\n'
                 "exit 0\n",
             )
 
@@ -139,6 +140,7 @@ class VerdiFailureHandlingTest(unittest.TestCase):
                 root,
                 'printf "header\\ncomplete\\n" > "$NPI_OUTFILE"\n'
                 'printf "module complete\\n" > "$NPI_MODULE_OUTFILE"\n'
+                'printf "COMPLETE 1\\n" > "$NPI_STATUS_FILE"\n'
                 "exit 0\n",
             )
             kdb = root / "kdb.elab++"
@@ -162,6 +164,17 @@ class VerdiFailureHandlingTest(unittest.TestCase):
             self.assertFalse(module_output.exists())
             self.assertEqual(list(root.glob("npi_trace_out.*.csv")), [])
             self.assertEqual(list(root.glob("npi_trace_timeout.*")), [])
+
+    def test_npi_trace_rejects_zero_exit_without_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bindir = self.make_fake_verdi(root, 'printf "header\\npartial\\n" > "$NPI_OUTFILE"\nexit 0\n')
+            proc = self.run_npi_trace(root, bindir)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("TRACE_INCOMPLETE", proc.stderr)
+            self.assertEqual(proc.stdout, "")
+            self.assertFalse((root / "module.csv").exists())
+            self.assertEqual(list(root.glob(".trace_boundary.*")), [])
 
     def test_npi_trace_force_kills_verdi_that_ignores_term(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -361,6 +374,7 @@ class VerdiFailureHandlingTest(unittest.TestCase):
                 "</dev/null >/dev/null 2>&1 &\n"
                 'printf "%s\\n" "$!" > "$FAKE_CHILD_PIDFILE"\n'
                 'printf "top.u0\\n" > "$NPI_INSTANCE_OUTFILE"\n'
+                'printf "COMPLETE 1\\n" > "$NPI_FIND_STATUS_FILE"\n'
                 "exit 0\n",
             )
             outfile = root / "instances.txt"
@@ -388,6 +402,7 @@ class VerdiFailureHandlingTest(unittest.TestCase):
             bindir = self.make_fake_verdi(
                 root,
                 'printf "top.u0\\ntop.u1\\n" > "$NPI_INSTANCE_OUTFILE"\n'
+                'printf "COMPLETE 2\\n" > "$NPI_FIND_STATUS_FILE"\n'
                 "exit 0\n",
             )
             outfile = root / "instances.txt"
@@ -401,6 +416,32 @@ class VerdiFailureHandlingTest(unittest.TestCase):
                 instances = module.run_verdi_find(args, ["FakeModule"], "1", outfile)
 
             self.assertEqual(instances, ["top.u0", "top.u1"])
+
+    def test_instance_finder_rejects_rc_zero_without_completion(self) -> None:
+        module = load_find_instances_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bindir = self.make_fake_verdi(root, 'printf "top.partial\\n" > "$NPI_INSTANCE_OUTFILE"\nexit 0\n')
+            args = SimpleNamespace(lib=root / "kdb.elab++", log_instances=False, verdi_timeout_sec=0)
+            with mock.patch.dict(os.environ, self.base_env(bindir), clear=True):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    module.run_verdi_find(args, ["FakeModule"], "1", root / "instances.txt")
+            self.assertFalse(list(root.glob(".trace-find-*")))
+
+    def test_instance_finder_50000_modules_use_file_request(self) -> None:
+        module = load_find_instances_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bindir = self.make_fake_verdi(root,
+                'test -z "$NPI_FILTER_MODULES" || exit 41\n'
+                'test "$(wc -l < "$NPI_FILTER_MODULES_FILE")" -eq 50000 || exit 42\n'
+                'printf "top.u0\\n" > "$NPI_INSTANCE_OUTFILE"\n'
+                'printf "COMPLETE 1\\n" > "$NPI_FIND_STATUS_FILE"\nexit 0\n')
+            args = SimpleNamespace(lib=root / "kdb.elab++", log_instances=False, verdi_timeout_sec=0)
+            with mock.patch.dict(os.environ, self.base_env(bindir), clear=True):
+                result = module.run_verdi_find(args, ["LongModuleName_{}".format(i) for i in range(50000)], "1", root / "instances.txt")
+            self.assertEqual(result, ["top.u0"])
+            self.assertFalse(list(root.glob(".trace-find-*")))
 
     def test_annotate_runner_kills_child_after_leader_exits_on_term(self) -> None:
         from annotate_trace_xlsx import run_checked

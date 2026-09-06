@@ -45,6 +45,8 @@ LIB=""
 KEYWORDS=""
 OUTPUT=""
 PORTS=""
+PORTS_FILE=""
+PORTS_TEMP=""
 FILELIST=""
 INCDIR=""
 TOP=""
@@ -70,6 +72,7 @@ while [ $# -gt 0 ]; do
         -keywords) KEYWORDS="$2"; shift 2 ;;
         -output)   OUTPUT="$2";   shift 2 ;;
         -ports)    PORTS="$2";    shift 2 ;;
+        -ports-file|--ports-file) PORTS_FILE="$2"; shift 2 ;;
         -filelist) FILELIST="$2"; shift 2 ;;
         -incdir)   INCDIR="$2";   shift 2 ;;
         -top)      TOP="$2";      shift 2 ;;
@@ -169,6 +172,12 @@ INSTANCE_LIST="${MODULE}_${KEYWORDS_SAFE}_instances.txt"
 BOUNDARY_FILTERED="${OUTPUT%.csv}_boundary.csv"
 FULL_FILTERED="${OUTPUT%.csv}_full_owner.csv"
 
+for path_var in OUTPUT FULL_TRACE MODULE_TRACE INSTANCE_LIST BOUNDARY_FILTERED FULL_FILTERED; do
+    original_path="${!path_var}"
+    bounded_path=$("$PYTHON_BIN" "$SCRIPT_DIR/runtime_paths.py" --path "$original_path" --suffix ".${original_path##*.}") || exit 1
+    printf -v "$path_var" '%s' "$bounded_path"
+done
+
 log_step "script_dir=$SCRIPT_DIR"
 log_step "target_module=$MODULE"
 log_step "filter_modules=$KEYWORDS"
@@ -213,6 +222,11 @@ fi
 
 log_step "command: ${FIND_CMD[*]}"
 "${FIND_CMD[@]}"
+find_rc=$?
+if [ "$find_rc" -ne 0 ]; then
+    echo "[ERROR] instance search failed rc=$find_rc" >&2
+    exit "$find_rc"
+fi
 
 if [ ! -s "$INSTANCE_LIST" ]; then
     echo "[ERROR] no instances found for filter modules: $KEYWORDS" >&2
@@ -240,14 +254,24 @@ TRACE_CMD=("$SCRIPT_DIR/npi_trace.sh"
     -load-stop-instance-file "$INSTANCE_LIST"
     -verdi-timeout-sec "$VERDI_TIMEOUT_SEC"
     -trace-debug "$TRACE_DEBUG")
-if [ -n "$PORTS" ]; then
-    TRACE_CMD+=(-ports "$PORTS")
+if [ -n "$PORTS_FILE" ]; then
+    TRACE_CMD+=(-ports-file "$PORTS_FILE")
+elif [ -n "$PORTS" ]; then
+    PORTS_TEMP=$(mktemp "${TMPDIR:-/tmp}/trace-ports.XXXXXX.list") || exit 1
+    trap '[ -z "$PORTS_TEMP" ] || rm -f -- "$PORTS_TEMP"' EXIT
+    printf '%s\n' "$PORTS" > "$PORTS_TEMP"
+    TRACE_CMD+=(-ports-file "$PORTS_TEMP")
 fi
 
 # Run trace
 log_step "step 2/5: run NPI trace for target module"
 log_step "command: ${TRACE_CMD[*]} > $FULL_TRACE"
 "${TRACE_CMD[@]}" > "$FULL_TRACE"
+trace_rc=$?
+if [ "$trace_rc" -ne 0 ]; then
+    echo "[ERROR] trace failed rc=$trace_rc" >&2
+    exit "$trace_rc"
+fi
 
 if [ ! -s "$FULL_TRACE" ]; then
     echo "[ERROR] Trace failed or produced no output" >&2
@@ -266,15 +290,15 @@ log_step "trace_completed full_trace_lines=$TOTAL_LINES module_boundary_lines=$M
 
 log_step "step 3/5: filter module-boundary rows by filter-module ownership"
 log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py $MODULE_TRACE $BOUNDARY_FILTERED --instances $INSTANCE_LIST --normalize-signal-column"
-"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column
+"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$MODULE_TRACE" "$BOUNDARY_FILTERED" --instances "$INSTANCE_LIST" --normalize-signal-column || exit $?
 
 log_step "step 4/5: filter full-trace rows by filter-module ownership"
 log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py $FULL_TRACE $FULL_FILTERED --instances $INSTANCE_LIST"
-"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$FULL_FILTERED" --instances "$INSTANCE_LIST"
+"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" "$FULL_TRACE" "$FULL_FILTERED" --instances "$INSTANCE_LIST" || exit $?
 
 log_step "step 5/5: merge filtered outputs and split by traced target instance when needed"
 log_step "command: $PYTHON_BIN $SCRIPT_DIR/filter_trace.py - $OUTPUT --merge $BOUNDARY_FILTERED $FULL_FILTERED --split-by-trace-instance"
-"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" - "$OUTPUT" --merge "$BOUNDARY_FILTERED" "$FULL_FILTERED" --split-by-trace-instance
+"$PYTHON_BIN" "$SCRIPT_DIR/filter_trace.py" - "$OUTPUT" --merge "$BOUNDARY_FILTERED" "$FULL_FILTERED" --split-by-trace-instance || exit $?
 
 FINAL_LINES=$(wc -l < "$OUTPUT")
 log_step "done final_output=$OUTPUT final_lines=$FINAL_LINES"

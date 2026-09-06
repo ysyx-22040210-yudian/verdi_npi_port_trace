@@ -1193,6 +1193,7 @@ def command_preview(cmd: List[str], stdout_path: Optional[str]) -> str:
 
 
 def resolve_result_file(path_text: str) -> Tuple[Path, str]:
+    from runtime_paths import derived_glob_prefixes
     path = Path(path_text.strip())
     if not path.is_absolute():
         path = (SCRIPT_DIR / path).resolve()
@@ -1203,7 +1204,8 @@ def resolve_result_file(path_text: str) -> Tuple[Path, str]:
     #   out.xlsx -> out__subsys_<name>.xlsx
     # filter_trace.py may also split CSV by target instance:
     #   out.csv -> out__<inst>.csv
-    candidates = sorted(path.parent.glob(f"{path.stem}__*{path.suffix}"))
+    prefixes = derived_glob_prefixes(path, "__") + derived_glob_prefixes(path, "__subsys_")
+    candidates = sorted(p for p in path.parent.iterdir() if p.is_file() and p.name.startswith(prefixes) and p.name.endswith(path.suffix)) if path.parent.is_dir() else []
     if candidates:
         return candidates[0], f"main output not found; opened split output: {candidates[0].name}"
 
@@ -1211,15 +1213,13 @@ def resolve_result_file(path_text: str) -> Tuple[Path, str]:
 
 
 def resolve_subsystem_result_file(path_text: str) -> Optional[Path]:
+    from runtime_paths import derived_glob_prefixes
     path = Path(path_text.strip())
     if not path.is_absolute():
         path = (SCRIPT_DIR / path).resolve()
 
-    candidates = sorted(
-        candidate
-        for candidate in path.parent.glob(f"{path.stem}__subsys_*{path.suffix}")
-        if candidate.is_file()
-    )
+    prefixes = derived_glob_prefixes(path, "__subsys_")
+    candidates = sorted(candidate for candidate in path.parent.iterdir() if candidate.is_file() and candidate.name.startswith(prefixes) and candidate.name.endswith(path.suffix)) if path.parent.is_dir() else []
     return candidates[0] if candidates else None
 
 

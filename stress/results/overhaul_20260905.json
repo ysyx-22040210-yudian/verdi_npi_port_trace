@@ -1,0 +1,32 @@
+{
+  "backend": "direct Verdi NPI",
+  "branch": "codex/trace-reliability-overhaul",
+  "baseline_commit": "2662d77852cdf155d6e67a14f3a721d6c9dfed46",
+  "runtime_deployment": "/root/trace-overhaul-20260905-r8",
+  "status": "PASS listed final content validations; parallel stability not established",
+  "core_sha256": {
+    "npi_port_trace.tcl": "96b6b4cc99a527e7e3e1d24e31d1b5c4afb74fecaa5aefcbcba42105d032711d",
+    "trace_support.tcl": "90fc5980976ee301361f9af1c431e041ac854aeb75836a8416f5d942ae25fc84",
+    "annotate_trace_xlsx.py": "e79d05b047997123bfc5e928e447a3100bf276d52bb2ab1d8434a8c76865ab77"
+  },
+  "cases": {
+    "vm_units": {"passed": 69, "skipped": 0},
+    "windows_units": {"passed": 50, "skipped": 19},
+    "mesh": {"target_instances": 512, "expected_design_module_instances": 5121, "queries": 8704, "errors": 0, "seconds": 260.502, "rss_kib": 430136, "full_data_rows": 81920, "boundary_data_rows": 73216, "result": "/root/trace-scale-final-20260905/mesh_512/trace_r8_serial.validation.json"},
+    "expressions": {"instances": 64, "queries": 1024, "errors": 0, "seconds": 18.837, "rss_kib": 225804, "result": "/root/trace-expression-final-20260905-r8/validation.json"},
+    "fanout": {"exact_sink_bits": 8192, "errors": 0, "seconds": 38.870, "rss_kib": 382604},
+    "limited_fanout": {"node_limit": 1, "required_annotation": "incomplete", "seconds": 24.986, "rss_kib": 346956},
+    "wide_ports": {"ports": 8192, "source_evidence_ports": 8192, "request_bytes": 327680, "errors": 0, "seconds": 120.329, "rss_kib": 316448, "result": "/root/trace-scale-io-final-20260905-r8/summary.json"},
+    "mshr": {"instances": 32, "bit_queries": 256, "zero": 192, "one": 64, "stop_entries": 50000, "seconds": 43.930, "rss_kib": 1384200},
+    "clockgate": {"instances": 279, "queries": 837, "errors": 0, "seconds": 41.183, "rss_kib": 1399636, "result": "/root/xiangshan-clockgate-final-20260905-r8-serial/validation.json"},
+    "xiangshan_xlsx_matrix": {"passed_cases": 5, "artifacts": 84, "stream_nonstream_cells_equal": true, "wrong_absent_subsystem_markers": 0, "watchdog_rc": 124, "result": "/root/xiangshan-final-20260905-r8/summary.json"},
+    "legacy_regressions": {"tool_all_features": "PASS", "scopefix_pressure": "PASS", "loader_pressure": "PASS"},
+    "long_xlsx_evidence": {"characters_roundtripped": 96018, "reconstructed_exactly": true}
+  },
+  "excluded_failed_attempts": [
+    "Initial mesh smoke failed all 68 groups before declaration and bit-mapping fixes.",
+    "r7 mesh failed 1024 concat sink assertions; r8 repairs exact positional mapping without weakening the oracle.",
+    "r7 node-limit test failed because stopped endpoints were not counted; r8 budgets each endpoint.",
+    "r8 parallel mesh and ClockGate exited at 2026-09-05 23:34:26 +0800 without completion records. Wrapper returned rc=1, full stdout remained empty and no boundary was published. Both passed serial reruns without code changes; unique cause of abrupt exit not established."
+  ]
+}

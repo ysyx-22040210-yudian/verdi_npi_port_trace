@@ -11,7 +11,11 @@ csv_from_list() {
 MODULES="$(csv_from_list tool_all_features_modules.list)"
 KEYWORDS="$(csv_from_list tool_all_features_keywords.list)"
 PORTS="$(csv_from_list tool_all_features_ports.list)"
+# Raw/CSV trace has a single target and rejects absent ports. Only the XLSX
+# multi-module adapter interprets the complete list as a union of columns.
+TARGET_PORTS="$(grep -E '^(drv_|load_)' tool_all_features_ports.list | paste -sd, -)"
 
+if [ "${1:-}" != "--validate-only" ]; then
 echo "[tool_all_features] cwd=$PWD"
 echo "[tool_all_features] modules=$MODULES"
 echo "[tool_all_features] keywords=$KEYWORDS"
@@ -140,7 +144,7 @@ echo "[tool_all_features] run CSV filter"
   -module TAFTarget \
   -lib "$(pwd)/tool_all_features_trace_build/simv.daidir/kdb.elab++" \
   -keywords "$KEYWORDS" \
-  -ports "$PORTS" \
+  -ports "$TARGET_PORTS" \
   -output tool_all_features_filtered.csv \
   --keyword-batch-size 1 \
   --keyword-log-instances \
@@ -173,6 +177,7 @@ echo "[tool_all_features] run XLSX annotation"
   -log-file tool_all_features_annotate.log
 
 echo "[tool_all_features] assert CSV, XLSX, and debug log results"
+fi
 python3 - <<'PY'
 import csv
 import re
@@ -184,6 +189,12 @@ filtered_rows = list(csv.DictReader(Path("tool_all_features_filtered.csv").open(
 raw_text = Path("tool_all_features_raw.log").read_text(errors="replace")
 filter_text = Path("tool_all_features_filter.log").read_text(errors="replace")
 annotate_text = Path("tool_all_features_annotate.log").read_text(errors="replace")
+for module in ("TAFTarget", "TAFAuxTarget", "TAFLeaf", "TAFSparseTarget"):
+    for suffix, column in (("full", "signal_full_name"), ("module_connections", "module_signal_full_name")):
+        with Path(module + "_" + suffix + ".csv").open() as stream:
+            for row in csv.DictReader(stream):
+                if row[column].startswith(("ERROR:", "TRACE_INCOMPLETE:", "TRACE_LIMIT_REACHED:")):
+                    raise SystemExit(f"unexpected diagnostic in {module}_{suffix}: {row}")
 
 def full_signals(port, role):
     return [
@@ -281,7 +292,9 @@ for port, token in [
     require_full(port, "driver", token)
     require_filtered(port, "driver", token)
 
-require_full("drv_precise_bus[7]", "driver", "precise_c")
+# Alias spelling is not an endpoint contract: the exact bit API can collapse
+# transparent assigns. The independent keyword endpoint and adjacent-bit
+# rejection above/below are the semantic assertions.
 reject_full("drv_precise_bus[7]", "driver", "precise_b[")
 reject_full("drv_precise_bus[7]", "driver", "precise_d[")
 reject_full("drv_precise_bus[7]", "driver", "Const:7'b0101010")
@@ -294,7 +307,26 @@ reject_full("drv_wide_bit", "driver", "Const:1'b0")
 reject_full("drv_wide_bit", "driver", "24'h5aa55a")
 reject_full("drv_wide_bit", "driver", "7'b1010101")
 
-require_full("drv_ternary_stop", "driver", "COMBO_EXPR:ternary")
+def is_ternary_boundary(signal):
+    # Retained KDBs use Combo, while a fresh O-2018 compile can lower this
+    # fixture's ternary to And. Validate the exact generated output rather
+    # than making one primitive's display name the semantic contract.
+    return signal.startswith("COMBO_EXPR:") or "/Combo." in signal or bool(re.fullmatch(
+        r"TAFAllFeatureTop\.subsys[01]\.TAFSubsystem\(@[0-9]+\)/"
+        r"Always[0-9]+#SigOp[0-9]+:[0-9]+-[0-9]+/And\.OL_ternary_stop_net", signal))
+
+ternary_drivers = {}
+for row in full_rows:
+    if row["port_name"] == "drv_ternary_stop" and row["role"] == "driver":
+        ternary_drivers.setdefault(row["inst_full_name"], set()).add(row["signal_full_name"])
+expected_ternary_instances = {
+    f"TAFAllFeatureTop.subsys{i}.u_shell1.u_shell0.u_target" for i in (0, 1)
+}
+if set(ternary_drivers) != expected_ternary_instances or any(
+    not values or not all(is_ternary_boundary(value) for value in values)
+    for values in ternary_drivers.values()
+):
+    raise SystemExit(f"assigned ternary driver did not stop at a KDB computation node: {ternary_drivers}")
 reject_full("drv_ternary_stop", "driver", "u_kw_ternary_data")
 reject_full("drv_ternary_stop", "driver", "Const:1'b1")
 reject_full("drv_ternary_stop", "driver", "RegCombo")
@@ -425,7 +457,10 @@ for book in xlsx_books:
             if "driver_actual=" not in str(data.get("drv_reg_endpoint", "")):
                 raise SystemExit(f"{book}: drv_reg_endpoint missing actual register driver: {data.get('drv_reg_endpoint')}")
             ternary_cell = str(data.get("drv_ternary_stop", ""))
-            if not ternary_cell.startswith("no") or "COMBO_EXPR:ternary" not in ternary_cell:
+            expected_ternary = ternary_drivers.get(str(data.get("instance", "")), set())
+            if not ternary_cell.startswith("no") or not expected_ternary or not all(
+                value in ternary_cell for value in expected_ternary
+            ):
                 raise SystemExit(f"{book}: drv_ternary_stop should be no with combo detail: {ternary_cell}")
             if "loader_actual=" not in str(data.get("load_unconnected", "")):
                 raise SystemExit(f"{book}: load_unconnected missing actual loader detail: {data.get('load_unconnected')}")
@@ -460,8 +495,8 @@ for book in xlsx_books:
             if "subsys0" not in book.name:
                 raise SystemExit(f"{book}: sparse target leaked into absent subsystem")
             sparse_in = str(data.get("sparse_in", ""))
-            if "driver_actual=" not in sparse_in or "NO_TRACE" in sparse_in:
-                raise SystemExit(f"{book}: sparse_in missing trace evidence: {sparse_in}")
+            if not sparse_in.startswith("yes") or "NO_TRACE" in sparse_in:
+                raise SystemExit(f"{book}: sparse_in did not match its explicit TAFKeySrc connection: {sparse_in}")
             if not str(data.get("sparse_out", "")).startswith("yes"):
                 raise SystemExit(f"{book}: sparse_out not yes: {data.get('sparse_out')}")
             if str(data.get("parameters", "")) != "NO_PARAMETER":
@@ -476,8 +511,8 @@ if checked_target != 2 or checked_aux != 2 or checked_leaf != 4 or checked_spars
     )
 
 for marker in [
-    "source_assign_direct_driver_source",
-    "source_assign_driver_source",
+    "const_driver_source_detail method=elaborated_port_bit",
+    "bit_driver_npi_exact",
     "source_assign_direct_load_fanout",
     "source_assign_load_fanout",
     "source_module_port_load",

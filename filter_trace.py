@@ -17,6 +17,10 @@ import sys
 import csv
 import os
 import re
+from trace_identity import InstanceMatcher, is_diagnostic, is_direct_instance_node as shared_direct_node
+from runtime_paths import bounded_derived_path, configure_csv_field_limit, atomic_text_output
+
+configure_csv_field_limit()
 
 def log_step(message):
     print("[filter_trace] {}".format(message), file=sys.stderr)
@@ -46,6 +50,10 @@ def strip_instance_prefix(signal_name, inst):
     return None
 
 def is_direct_instance_node(rest):
+    return shared_direct_node(rest)
+
+
+def _legacy_is_direct_instance_node(rest):
     if rest is None:
         return False
     if rest == "":
@@ -70,23 +78,7 @@ def is_direct_instance_node(rest):
     return rest.count(".") <= 1
 
 def signal_belongs_to_instance(signal_name, instances):
-    if not signal_name or signal_name.startswith("Const:"):
-        return False
-    if signal_name.startswith("TRACE_LIMIT_REACHED:"):
-        return True
-
-    for inst in instances:
-        if is_direct_instance_node(strip_instance_prefix(signal_name, inst)):
-            return True
-
-        # npi_port_trace.tcl may remove a common top prefix for readability.
-        parts = inst.split(".")
-        for idx in range(1, len(parts)):
-            suffix = ".".join(parts[idx:])
-            if is_direct_instance_node(strip_instance_prefix(signal_name, suffix)):
-                return True
-
-    return False
+    return is_diagnostic(signal_name) or InstanceMatcher(instances, cache_size=0).belongs(signal_name)
 
 def get_signal_column(header):
     if "signal_full_name" in header:
@@ -125,11 +117,12 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
     matched_count = 0
     total_count = 0
     instances = load_instances(instance_file)
+    matcher = InstanceMatcher(instances)
 
     log_step("opening input CSV: {}".format(input_file))
     log_step("opening output CSV: {}".format(output_file))
     with open(input_file, 'r', encoding='utf-8') as infile, \
-         open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+         atomic_text_output(output_file) as outfile:
 
         reader = csv.reader(infile)
         writer = csv.writer(outfile)
@@ -138,6 +131,7 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
         log_step("input_header={}".format(",".join(header)))
         writer.writerow(normalized_header(header) if normalize_header else header)
         signal_idx = get_signal_column(header)
+        instance_idx = header.index("inst_full_name")
         port_dir_idx = header.index("port_dir") if "port_dir" in header else -1
         role_idx = header.index("role") if "role" in header else -1
         log_step("signal_column={} index={}".format(header[signal_idx], signal_idx))
@@ -147,12 +141,14 @@ def filter_csv_by_instances(input_file, output_file, instance_file, normalize_he
 
         for row in reader:
             total_count += 1
+            if len(row) != len(header):
+                raise ValueError('malformed CSV row {}: expected {} fields, got {}'.format(total_count+1, len(header), len(row)))
             if role_idx >= 0 and port_dir_idx >= 0:
                 port_dir = row[port_dir_idx] if len(row) > port_dir_idx else ""
                 role = row[role_idx] if len(row) > role_idx else ""
                 if not role_matches_port_direction(port_dir, role):
                     continue
-            if len(row) > signal_idx and signal_belongs_to_instance(row[signal_idx], instances):
+            if len(row) > signal_idx and (is_diagnostic(row[signal_idx]) or matcher.belongs(row[signal_idx], row[instance_idx])):
                 writer.writerow(row)
                 matched_count += 1
 
@@ -167,7 +163,7 @@ def merge_csvs(output_file, input_files):
     seen = set()
     written = 0
 
-    with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+    with atomic_text_output(output_file) as outfile:
         writer = csv.writer(outfile)
         for input_file in input_files:
             log_step("reading merge input: {}".format(input_file))
@@ -183,6 +179,8 @@ def merge_csvs(output_file, input_files):
                     raise ValueError("CSV headers do not match: {}".format(input_file))
 
                 for row in reader:
+                    if len(row) != len(header):
+                        raise ValueError('malformed CSV row in {}'.format(input_file))
                     key = tuple(row)
                     if key in seen:
                         continue
@@ -221,7 +219,7 @@ def split_csv_by_trace_instance(input_file):
 
     outputs = []
     for inst in sorted(rows_by_inst):
-        out_file = "{}__{}{}".format(base, safe_filename(inst), ext)
+        out_file = str(bounded_derived_path(input_file, "__", inst))
         log_step("writing split output: {} rows={} inst={}".format(
             out_file, len(rows_by_inst[inst]), inst))
         with open(out_file, 'w', encoding='utf-8', newline='') as outfile:
@@ -242,7 +240,7 @@ def filter_csv_by_keywords(input_file, output_file, keywords):
     log_step("opening input CSV: {}".format(input_file))
     log_step("opening output CSV: {}".format(output_file))
     with open(input_file, 'r', encoding='utf-8') as infile, \
-         open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+         atomic_text_output(output_file) as outfile:
         reader = csv.reader(infile)
         writer = csv.writer(outfile)
         header = next(reader)

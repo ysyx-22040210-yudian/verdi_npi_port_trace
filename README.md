@@ -8,12 +8,42 @@ simv.daidir/kdb.elab++
 
 当前不支持 filelist 直接导入。`-filelist`、`-top`、`-incdir` 只作为历史兼容参数名保留，迁移到其他项目时应先用 VCS 带 `-kdb` 生成 KDB。
 
+## 单 bit driver 修复（2026-09-06）
+
+本次仍使用直接 NPI 后端。输入/输出端口先通过 `npi_elaborated.tcl` 获取 KDB 中的完整连接表达式和声明形状，再逐位追踪；不再把 high-connection 操作数列表或当前磁盘上的源码常量合并成 driver 结论。部署时必须一起复制这个新 Tcl 文件。
+
+- 位置式、具名、implicit、`.*`、拼接截断、signed/unsigned 扩展按 elaborated 数据映射；`'1` 与 `1'b1` 分开处理。
+- 旧 NPI 没有名称的 part-select 使用父对象和声明范围恢复。`a[0]` 可能仍为 packed 子向量，冲突检查以 KDB 的实际选择宽度为准。
+- 常量证据包含 `const_full_path`、来源方法、完整目标端口、KDB 来源文件/handle、形式端口宽度及 RHS 位偏移。`const_full_path` 是可审计的证据链，不是虚构的 RTL 常量实例名。
+- 独立 trace 的缺失端口、越界选择不再静默忽略；请求失败会返回非零。Excel 多模块列并集模式显式保留各模块不适用列的 `*_absent_ports.csv` 证据，这些格保留 `NO_TRACE`，不会令有效列一并失败。
+- 列并集只豁免确定缺失/越界的查询，不能吞掉未知位宽、未解析的声明形状或 NPI 调用异常。跨模块 driver 遍历不消耗 assign 深度；`-assign-trace-depth 0` 则确实不展开连续赋值节点。
+- 固定尺寸多维 packed / unpacked 端口的 driver 和 loader 使用同一逐位身份映射：区分 netlist 的内部序号与 RTL 下标；名称快捷接口失败时，从 elaborated 声明计算偏移并按 native index 取得精确 bit。支持已验证的升降序、负索引、多层数组、子向量和跨层拼接，不把失败的单 bit 查询扩大为整个总线。
+- bit-load 返回值必须明确覆盖被查询的那个 bit；只有验证后的零负载结果才输出 `NO_LOAD`。真正的 API 错误、未知 shape 和遍历限额仍明确诊断，不会通过删除 `TRACE_INCOMPLETE` 标记来伪装成功。
+- loader 通过 NPI 精确 assign 对端继续遍历；匿名 LHS 拼接保持 1-bit handle，不能把带逗号的 netlist 拼写当作可查询的 RTL 路径。
+- 新 trace/返标默认只认完整层次身份，不自动把未知 top 的信号重定位。旧缩短路径只可通过 `InstanceMatcher(..., legacy_short_names=True)` 显式启用。
+- 参数模块列表使用文件传输，并检查独立完成标志；CSV 过滤/合并原子发布，失败时保留原完整文件。
+
+最初 driver 修复见 [TRACE_FIX_VALIDATION_20260906.md](TRACE_FIX_VALIDATION_20260906.md)。其中保留的多维 loader 缺口已由后续实现补齐，具体根因、复杂 RTL/大规模 VM 回归和适用边界见 [MULTIDIM_LOADER_FIX_VALIDATION_20260906.md](MULTIDIM_LOADER_FIX_VALIDATION_20260906.md)。
+
+## 可靠性与规模重构（2026-09-05，历史记录）
+
+本轮继续使用直接 Verdi/NPI 后端，不依赖 kdebug。完整变更、实际失败样例、VM 检查结果和适用边界见
+[TRACE_RELIABILITY_OVERHAUL_20260905.md](TRACE_RELIABILITY_OVERHAUL_20260905.md)。
+
+- input 的计算连接（包括嵌套三目、按位运算、取反和调用）停在 `COMBO_EXPR:port_connection`，不会把操作数常量当作端口常量；可独立投影的拼接位仍精确解析。
+- 按每一层端口的声明范围映射 bit，保留完整层次路径。后续审计发现“源码解析到一个结果即视为完整”的缺陷，已由上方 2026-09-06 修复替代。
+- 常量日志保留 `const_full_path`、来源方法、RTL 文件/连接表达式或 NPI handle 证据；冲突、资源限额和运行失败不会被 keyword 命中覆盖为 `yes`。
+- 大端口列表用 `-ports-file ports.list`（每行一个端口或逗号分隔）；运行期文件名用保留身份的短名加哈希。完整信号名仍在 CSV/XLSX 内。
+- 超长 XLSX 结果转存 `TraceEvidence` 分块页并链接，避免 Excel 单元格长度限制导致证据静默截断。
+
+可复现的复杂结构/规模压力入口在 `stress/`，逐项运行方式见上述报告。测试通过指独立预期、完整结果和负例断言通过，不只是 Verdi 返回码为 0。
+
 ## 功能概览
 
 - 查找一个或多个目标 `module` 的所有例化实例。
 - 对目标 module 端口追踪 driver / loader。
 - 用一个或多个 `keywords` module 的例化实例做过滤判断。
-- 识别端口直接 tie 常数、多层父端口回溯后的常数，以及部分源码 fallback 能识别的父层 net 常数 tie。
+- 根据 elaborated KDB 识别 input/output 端口直接 tie、父端口透传及精确 assign 展开后的常数，不要求源码常量 fallback。
 - 支持 `assign B = A` 这类普通透传继续追踪。
 - 支持 driver 方向的拼接表达式继续展开，例如 `assign A = {b0, b1}`。
 - 支持 loader 方向的 fanout / slice / 拼接继续展开，例如 `assign B0 = A[10:0]`、`assign B = {C, A, D}`。
@@ -35,6 +65,8 @@ simv.daidir/kdb.elab++
 | `trace_and_filter.sh` | CSV trace + keywords 过滤入口。 |
 | `npi_trace.sh` | 底层 NPI trace 包装脚本。 |
 | `npi_port_trace.tcl` | 核心端口 trace NPI Tcl 脚本。 |
+| `npi_elaborated.tcl` / `trace_support.tcl` | 必须随核心部署的 elaborated 位映射、精确遍历和 Tcl 公共函数。 |
+| `trace_identity.py` / `runtime_paths.py` | 必须随 Python 入口部署的完整层次身份匹配、文件路径和原子输出支持。 |
 | `npi_find_instances.tcl` | 查找一个或多个 module 定义的所有例化实例。 |
 | `find_instances_batched.py` | 分批查找 `-keywords` module 实例，降低大项目中单个 Verdi 进程资源峰值。 |
 | `npi_find_module_params.tcl` | 采集目标 module 例化 parameter。 |
@@ -54,6 +86,10 @@ simv.daidir/kdb.elab++
 | `run_assign_passthrough_trace_test.sh` | 专门覆盖 `u_child(.a(b)); assign b = c;` 这类普通 assign 透传 driver 追踪。 |
 | `run_assign_loader_slice_trace_test.sh` | 专门覆盖 loader 方向 `assign B=A[10:0]`、`assign C=A[20:11]` 这类切片 fanout 追踪。 |
 | `run_bit_precision_stress_trace_test.sh` | 专门覆盖单 bit trace、宽向量 bit driver、常数按 bit 投影、三目组合逻辑停止、loader slice fanout 和多 keywords 过滤的压测回归。 |
+| `run_vm_stress_matrix.sh` | VM 统一压力入口，串行运行复杂合成 RTL、故障隔离和真实 XiangShan CSV/XLSX 返标场景。 |
+| `run_xiangshan_stress_matrix.sh` | 复用现有 XiangShan `kdb.elab++`，验证 MSHR 精确常量、Uncache 返标、MSHR/LevelGateway subsystem 对照和超时清理。 |
+| `validate_xiangshan_stress.py` | 独立校验 XiangShan CSV、常量全路径证据、XLSX 单元格、subsystem 隔离及 stream/non-stream 一致性。 |
+| `VM_STRESS_MATRIX.md` | 多场景压测内容、通过条件和 VM 运行方法。 |
 | `WORKFLOW_GUIDE_FOR_LLMS.md` | 面向其他大模型的工具工作流程说明。 |
 | `workflow_diagram.svg` | 工具流程图。 |
 
@@ -1123,11 +1159,14 @@ PYTHON_BIN=/path/to/python3 ./trace_gui.sh
 
 ### 为什么常数没有检测出来
 
-先判断是哪种 tie：
+当前 input/output driver 路径按 KDB 追踪，先检查：
 
-- `.a(1'b0)`：NPI 通常能直接识别。
-- 多层父 port 透传到 `.p(1'b0)`：需要 `-const-trace-depth` 足够大。
-- `.a(parent_net)` 且 `assign parent_net = 1'b0`：需要 `-const-source-fallback 1`，并且 KDB 记录的源码路径在当前机器可访问。
+- `.a(1'b0)`：应有 `method=elaborated_port_bit` 的常量证据。
+- 多层父 port 透传：使用完整身份工作队列，不消耗 `-assign-trace-depth`，但会遵守停止实例边界。
+- `.a(parent_net)` 且 `assign parent_net = 1'b0`：需要允许足够的 `-assign-trace-depth`。设为 0 会停在 assign 节点，而非强制穿透。
+- 运算、MUX 或寄存器不是无条件 tie；停在计算节点是预期行为。无法保持精确位映射时应有明确错误，不能将整个表达式的常量操作数作为该 bit 的 driver。
+
+源码隐藏/陈旧不能改变新 input/output driver 的常量结论。`-const-source-fallback` 和下面的旧 `source_*` 标记主要针对保留的兼容路径；loader 的部分 assign fanout 补充仍会读取源码。
 
 ### 怎么确认源码 fallback 是否成功
 
@@ -1158,10 +1197,10 @@ grep -nE "source_|const_driver_from_parent_signal|const_driver_source_detail|mod
 可以用开关对比确认：
 
 ```bash
-# 关闭 assign / fanout / module port 继续展开
+# 关闭 assign / fanout 展开（input/output driver 的模块边界透传仍继续）
 ./trace_and_filter.sh ... -assign-trace-depth 0 -assign-expr-trace-depth 0
 
-# 打开 assign / fanout / module port 继续展开
+# 打开 assign / fanout 展开
 ./trace_and_filter.sh ... -assign-trace-depth 4 -assign-expr-trace-depth 1
 ```
 

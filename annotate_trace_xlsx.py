@@ -44,6 +44,10 @@ from find_instances_batched import (
     cleanup_completed_process_session,
     terminate_timed_out_process,
 )
+from trace_identity import InstanceMatcher, scalar_constant_value, is_direct_instance_node as shared_direct_node
+from runtime_paths import bounded_component, bounded_derived_path, derived_glob_prefixes, fixed_temp_prefix, configure_csv_field_limit
+
+configure_csv_field_limit()
 
 try:
     import openpyxl
@@ -107,7 +111,7 @@ def atomic_save_workbook(
             output_mode = current_umask_file_mode()
     fd, temp_name = tempfile.mkstemp(
         dir=str(output.parent),
-        prefix=f".{output.stem}.",
+        prefix=fixed_temp_prefix("xlsx"),
         suffix=f".tmp{output.suffix}",
     )
     os.close(fd)
@@ -185,13 +189,23 @@ class PortSummary:
     actual_seen: Set[str] = field(default_factory=set)
     actual_blocked_roles: Set[str] = field(default_factory=set)
     matched_roles: Set[str] = field(default_factory=set)
+    diagnostics: Set[str] = field(default_factory=set)
+    scalar_query: bool = False
+    driver_constant_bits: Set[str] = field(default_factory=set)
 
-    def observe(self, role: str, signal: str, matcher: "InstanceMatcher") -> None:
+    def observe(self, role: str, signal: str, matcher: "InstanceMatcher", trace_instance: str = "") -> None:
         self.seen = True
         signal_text = signal or ""
         role_text = role or "unknown"
         relevant_endpoint = should_report_actual_endpoint(self.port_dir, role_text)
-        matched = matcher.belongs(signal_text)
+        if relevant_endpoint and signal_text.startswith(("TRACE_LIMIT_REACHED:", "TRACE_INCOMPLETE:", "ERROR:")):
+            self.diagnostics.add(f"{role_text}={signal_text}")
+            return
+        if self.scalar_query and role_text == "driver" and signal_text.startswith("Const:"):
+            value = scalar_constant_value(signal_text)
+            if value is not None:
+                self.driver_constant_bits.add(value)
+        matched = matcher.belongs(signal_text, trace_instance)
         if self.regcombo_as_keyword and relevant_endpoint and is_regcombo_signal(signal_text):
             matched = True
         if matched and relevant_endpoint:
@@ -206,7 +220,8 @@ class PortSummary:
         elif signal_text.startswith("Const:") and relevant_endpoint:
             if role_text in self.matched_roles:
                 return
-            self.block_actual(role_text)
+            # A literal row does not prove every endpoint is a tie. Preserve
+            # dynamic/operation evidence regardless of CSV row order.
             self.add_detail(f"{role_text}={signal_text}")
         elif (
             signal_text in {"NO_DRIVER", "NO_LOAD", "ERROR:no_connections"}
@@ -222,7 +237,11 @@ class PortSummary:
     def observe_row(self, row: "TraceRow", matcher: "InstanceMatcher") -> None:
         if row.port_dir and self.port_dir in {"", "unknown"}:
             self.port_dir = normalize_port_dir(row.port_dir)
-        self.observe(row.role, row.signal_full_name, matcher)
+        # A suffix such as a[0] may still select a packed sub-vector. The CSV
+        # name alone cannot establish width; authoritative scalar conflicts
+        # are emitted by NPI using the elaborated selected-bit count. Callers
+        # with independent width metadata can still set scalar_query=True.
+        self.observe(row.role, row.signal_full_name, matcher, row.inst_full_name)
 
     def add_actual(self, role: str, signal: str) -> None:
         if not signal:
@@ -279,51 +298,20 @@ class PortSummary:
     def result(self) -> str:
         if not self.seen:
             return "no; NO_TRACE"
+        if len(self.driver_constant_bits) > 1:
+            self.diagnostics.add("driver=ERROR:CONST_DRIVER_CONFLICT:0,1")
+        if self.diagnostics:
+            status = "error" if any("=ERROR:" in value for value in self.diagnostics) else "incomplete"
+            text = status + "; " + "; ".join(sorted(self.diagnostics))
+            if self.matched:
+                text += "; keyword_match=yes"
+            return text
         text = "yes" if self.matched else "no"
         if self.details:
             text += "; " + "; ".join(self.details)
         if not self.matched and self.actual_details:
             text += "; " + "; ".join(self.actual_details)
         return text
-
-
-class InstanceMatcher:
-    def __init__(self, instances: Sequence[str], cache_size: int = 200000) -> None:
-        self.prefixes: Set[str] = set()
-        self.cache: Dict[str, bool] = {}
-        self.cache_size = max(0, cache_size)
-        for inst in instances:
-            self.add_instance(inst)
-
-    def add_instance(self, inst: str) -> None:
-        inst = inst.strip()
-        if not inst:
-            return
-        parts = [part for part in inst.split(".") if part]
-        if not parts:
-            return
-        for idx in range(len(parts)):
-            self.prefixes.add(".".join(parts[idx:]))
-
-    def belongs(self, signal_name: str) -> bool:
-        if not signal_name or signal_name.startswith("Const:") or not self.prefixes:
-            return False
-        cached = self.cache.get(signal_name)
-        if cached is not None:
-            return cached
-
-        result = self._belongs_uncached(signal_name)
-        if self.cache_size and len(self.cache) < self.cache_size:
-            self.cache[signal_name] = result
-        return result
-
-    def _belongs_uncached(self, signal_name: str) -> bool:
-        for prefix in candidate_signal_prefixes(signal_name):
-            if prefix not in self.prefixes:
-                continue
-            if is_direct_instance_node(strip_instance_prefix(signal_name, prefix)):
-                return True
-        return False
 
 
 def log_step(message: str) -> None:
@@ -616,7 +604,7 @@ def prepare_instance_axes(
 
 def set_parameter_cell(sheet, axes: TemplateAxes, row_key: str, result: str) -> None:
     row = axes.row_by_module[row_key]
-    cell = sheet.cell(row=row, column=PARAMETER_COL, value=result)
+    cell = set_evidence_cell(sheet, row, PARAMETER_COL, result, row_key, "parameters")
     copy_cell_style(cell, axes.parameter_style_cell or axes.body_style_cell)
     alignment = copy(cell.alignment)
     alignment.wrap_text = True
@@ -628,11 +616,49 @@ def set_parameter_cell(sheet, axes: TemplateAxes, row_key: str, result: str) -> 
         sheet.column_dimensions["C"].width = 48
 
 
+def set_evidence_cell(sheet, row, col, text, instance, port):
+    # Excel's physical cell limit cannot be removed. Preserve all text in
+    # ordered evidence rows instead of allowing openpyxl to truncate it silently.
+    if len(text.encode("utf-16-le")) // 2 <= 30000:
+        return sheet.cell(row=row, column=col, value=text)
+    workbook = sheet.parent
+    evidence = getattr(workbook, "_trace_evidence_sheet", None)
+    if evidence is None:
+        evidence = workbook.create_sheet("TraceEvidence")
+        workbook._trace_evidence_sheet = evidence
+        evidence.append(["instance", "port", "part", "text"])
+        evidence.column_dimensions["A"].width = 56
+        evidence.column_dimensions["B"].width = 32
+        evidence.column_dimensions["C"].width = 10
+        evidence.column_dimensions["D"].width = 100
+        evidence.freeze_panes = "D2"
+    start = evidence.max_row + 1
+    # 15000 code points also fit if every point requires a UTF-16 surrogate pair.
+    for part, offset in enumerate(range(0, len(text), 15000), 1):
+        evidence.append([instance, port, part, text[offset:offset + 15000]])
+        evidence.cell(evidence.max_row, 4).alignment = openpyxl.styles.Alignment(vertical="top", wrap_text=True)
+    status = text.split(";", 1)[0]
+    cell = sheet.cell(row=row, column=col, value="{}; DETAILS_IN_SHEET={}!D{}; characters={}".format(status, evidence.title, start, len(text)))
+    cell.hyperlink = "#'{}'!D{}".format(evidence.title, start)
+    log_step("long_cell_evidence instance={} port={} characters={} sheet={} first_row={}".format(instance, port, len(text), evidence.title, start))
+    return cell
+
+
 def set_result_cell(sheet, axes: TemplateAxes, row_key: str, port: str, result: str) -> None:
     row = axes.row_by_module[row_key]
     col = axes.col_by_port[port]
-    cell = sheet.cell(row=row, column=col, value=result)
+    cell = set_evidence_cell(sheet, row, col, result, row_key, port)
     copy_cell_style(cell, axes.body_style_cell)
+    alignment = copy(cell.alignment)
+    alignment.wrap_text = True
+    alignment.vertical = "top"
+    cell.alignment = alignment
+    letter = openpyxl.utils.get_column_letter(col)
+    current_width = sheet.column_dimensions[letter].width or 16
+    if current_width <= 28:
+        sheet.column_dimensions[letter].width = max(current_width, min(56, max(24, len(port) + 2, 56 if len(result) > 120 else 0)))
+    if sheet.freeze_panes is None and (sheet.max_row > 10 or sheet.max_column > 8):
+        sheet.freeze_panes = "D2"
 
 
 def subsystem_key(inst_full_name: str, level: int) -> str:
@@ -733,7 +759,7 @@ def instances_from_param_rows(module: str, rows: Sequence[ParamRow]) -> List[Ins
 
 
 def split_output_path(output: Path, subsystem: str) -> Path:
-    return output.with_name(f"{output.stem}__subsys_{safe_name(subsystem)}{output.suffix}")
+    return bounded_derived_path(output, "__subsys_", subsystem)
 
 
 def remove_intermediate_file(path: Path, reason: str) -> None:
@@ -749,7 +775,7 @@ def cleanup_subsystem_outputs(template: Path, output: Path) -> None:
     protected = template.resolve()
     candidates = [output]
     if output.parent.is_dir():
-        prefix = f"{output.stem}__subsys_"
+        prefix = derived_glob_prefixes(output, "__subsys_")
         candidates.extend(
             candidate
             for candidate in output.parent.iterdir()
@@ -772,7 +798,7 @@ def cleanup_subsystem_outputs(template: Path, output: Path) -> None:
 def collect_existing_output_modes(output: Path) -> Dict[Path, int]:
     candidates = [output]
     if output.parent.is_dir():
-        prefix = f"{output.stem}__subsys_"
+        prefix = derived_glob_prefixes(output, "__subsys_")
         candidates.extend(
             candidate
             for candidate in output.parent.iterdir()
@@ -1093,7 +1119,7 @@ def load_instances(path: Path) -> List[str]:
 
 
 def find_filter_instances(args, workdir: Path) -> Tuple[List[str], Path]:
-    out_file = workdir / f"{safe_name(args.keywords)}_instances.txt"
+    out_file = workdir / bounded_component(f"{safe_name(args.keywords)}_instances.txt", suffix="_instances.txt", parent=workdir, identity=args.keywords)
     remove_intermediate_file(out_file, "stale keyword instance output")
     cmd: List[object] = [
         sys.executable,
@@ -1165,7 +1191,13 @@ def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple
 
     env = os.environ.copy()
     env["NPI_LIB"] = args.lib
-    env["NPI_PARAM_MODULES"] = ",".join(modules)
+    modules_file = workdir / "parameter_modules.list"
+    modules_file.write_text("\n".join(modules) + "\n", encoding="utf-8")
+    status_file = workdir / "module_parameters.status"
+    remove_intermediate_file(status_file, "stale parameter completion status")
+    env.pop("NPI_PARAM_MODULES", None)
+    env["NPI_PARAM_MODULES_FILE"] = str(modules_file)
+    env["NPI_PARAM_STATUS_FILE"] = str(status_file)
     env["NPI_PARAM_OUTFILE"] = str(out_file)
 
     try:
@@ -1179,6 +1211,8 @@ def find_module_parameters(args, modules: Sequence[str], workdir: Path) -> Tuple
             raise RuntimeError(
                 f"parameter Verdi completed without a non-empty output: {out_file}"
             )
+        if not status_file.exists() or not status_file.read_text().startswith("COMPLETE "):
+            raise RuntimeError("parameter Verdi did not confirm complete collection")
         rows = read_param_rows(out_file)
     except Exception as exc:
         remove_intermediate_file(out_file, "failed module parameter output")
@@ -1218,6 +1252,10 @@ def candidate_signal_prefixes(signal_name: str) -> Iterable[str]:
 
 
 def is_direct_instance_node(rest: Optional[str]) -> bool:
+    return shared_direct_node(rest)
+
+
+def _legacy_is_direct_instance_node(rest: Optional[str]) -> bool:
     if rest is None:
         return False
     if rest == "":
@@ -1231,20 +1269,7 @@ def is_direct_instance_node(rest: Optional[str]) -> bool:
 
 
 def signal_belongs_to_instance(signal_name: str, instances: Iterable[str]) -> bool:
-    if not signal_name or signal_name.startswith("Const:"):
-        return False
-
-    for inst in instances:
-        if is_direct_instance_node(strip_instance_prefix(signal_name, inst)):
-            return True
-
-        # npi_port_trace.tcl may remove a common top prefix for readability.
-        parts = inst.split(".")
-        for idx in range(1, len(parts)):
-            suffix = ".".join(parts[idx:])
-            if is_direct_instance_node(strip_instance_prefix(signal_name, suffix)):
-                return True
-    return False
+    return InstanceMatcher(instances, cache_size=0).belongs(signal_name)
 
 
 def read_trace_rows(csv_paths: Sequence[Path]) -> List[TraceRow]:
@@ -1283,9 +1308,10 @@ def trace_module(
     ports: Sequence[str],
     workdir: Path,
     stop_instance_file: Optional[Path] = None,
+    allow_absent_ports: bool = False,
 ) -> Tuple[Path, Path]:
-    full_csv = workdir / f"{safe_name(module)}_full.csv"
-    module_csv = workdir / f"{safe_name(module)}_module_connections.csv"
+    full_csv = workdir / bounded_component(f"{safe_name(module)}_full.csv", suffix="_full.csv", parent=workdir, identity=module)
+    module_csv = workdir / bounded_component(f"{safe_name(module)}_module_connections.csv", suffix="_module_connections.csv", parent=workdir, identity=module)
     remove_intermediate_file(full_csv, f"stale full trace output for {module}")
     remove_intermediate_file(module_csv, f"stale boundary trace output for {module}")
     cmd: List[object] = [
@@ -1296,8 +1322,13 @@ def trace_module(
         module_csv,
     ]
     cmd.extend(["-lib", args.lib])
+    port_request_file = None
     if ports:
-        cmd.extend(["-ports", ",".join(ports)])
+        fd, name = tempfile.mkstemp(dir=str(workdir), prefix=fixed_temp_prefix("ports"), suffix=".list")
+        port_request_file = Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(ports) + "\n")
+        cmd.extend(["-ports-file", str(port_request_file)])
     cmd.extend(
         [
             "-const-source-fallback",
@@ -1323,8 +1354,15 @@ def trace_module(
     if stop_instance_file is not None:
         cmd.extend(["-load-stop-instance-file", str(stop_instance_file)])
 
+    env = os.environ.copy()
+    env.pop("NPI_ABSENT_PORTS_FILE", None)
+    if allow_absent_ports:
+        absent_file = workdir / bounded_component(f"{safe_name(module)}_absent_ports.csv", suffix="_absent_ports.csv", parent=workdir, identity=module)
+        absent_file.write_text("inst_full_name,port_name\n", encoding="utf-8")
+        env["NPI_ABSENT_PORTS_FILE"] = str(absent_file)
+        log_step(f"module_column_union={module} absent_port_evidence={absent_file}")
     try:
-        run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv)
+        run_checked(cmd, cwd=RUN_CWD, stdout_path=full_csv, env=env)
         missing = [
             path
             for path in (full_csv, module_csv)
@@ -1339,6 +1377,9 @@ def trace_module(
         remove_intermediate_file(full_csv, f"failed full trace output for {module}")
         remove_intermediate_file(module_csv, f"failed boundary trace output for {module}")
         raise
+    finally:
+        if port_request_file is not None:
+            port_request_file.unlink()
     return full_csv, module_csv
 
 
@@ -1465,6 +1506,7 @@ def parse_args():
         help="comma-separated target ports; defaults to the template port columns",
     )
     parser.add_argument("-lib", required=True, help="KDB path, for example kdb.elab++")
+    parser.add_argument("-ports-file", "--ports-file", default="", help="newline-separated ports; avoids command-line size limits")
     parser.add_argument(
         "-filelist",
         default="",
@@ -1651,6 +1693,11 @@ def parse_args():
     )
     args = parser.parse_args()
 
+    if args.ports_file:
+        if args.ports:
+            parser.error("use either -ports or -ports-file, not both")
+        args.ports = ",".join(Path(args.ports_file).read_text(encoding="utf-8-sig").splitlines())
+
     if sys.version_info < (3, 8):
         parser.error("Python 3.8 or newer is required.")
     if args.filelist or args.top or args.incdir:
@@ -1826,6 +1873,7 @@ def main() -> None:
                         ports,
                         workdir,
                         instance_file,
+                        allow_absent_ports=len(modules) > 1,
                     )
                     log_step(f"module_boundary_debug_csv={module_csv}")
                     if args.subsystem_level:
@@ -1966,6 +2014,7 @@ def main() -> None:
                     ports,
                     workdir,
                     instance_file,
+                    allow_absent_ports=len(modules) > 1,
                 )
                 log_step(f"module_boundary_debug_csv={module_csv}")
                 rows = read_trace_rows([full_csv, module_csv])

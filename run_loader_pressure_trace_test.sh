@@ -33,12 +33,13 @@ echo "[loader_pressure] run trace_and_filter"
   --keyword-batch-size 1 \
   -const-source-fallback 1 \
   -const-trace-depth 4 \
-  -assign-trace-depth 10 \
+  -assign-trace-depth 16 \
   -assign-expr-trace-depth 6 \
   -load-trace-node-limit 50000 \
   -load-trace-edge-limit 200000 \
   -load-trace-api-list-limit 50000 \
   -verdi-timeout-sec 900 \
+  -trace-debug 1 \
   2>&1 | tee loader_pressure_trace.log
 
 echo "[loader_pressure] assert filtered CSV"

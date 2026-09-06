@@ -73,7 +73,11 @@ if { [file isdirectory $npi_lib] && [llength [glob -nocomplain -directory $npi_l
 }
 
 set filter_modules_text ""
-if { [info exists env(NPI_FILTER_MODULES)] && $env(NPI_FILTER_MODULES) ne "" } {
+if {[info exists env(NPI_FILTER_MODULES_FILE)] && $env(NPI_FILTER_MODULES_FILE) ne ""} {
+    set request_fh [open $env(NPI_FILTER_MODULES_FILE) r]
+    set filter_modules_text [string map [list "\n" , "\r" ""] [read $request_fh]]
+    close $request_fh
+} elseif { [info exists env(NPI_FILTER_MODULES)] && $env(NPI_FILTER_MODULES) ne "" } {
     set filter_modules_text $env(NPI_FILTER_MODULES)
 } elseif { [info exists env(NPI_FILTER_MODULE)] && $env(NPI_FILTER_MODULE) ne "" } {
     set filter_modules_text $env(NPI_FILTER_MODULE)
@@ -147,4 +151,9 @@ foreach filter_module $filter_modules {
 }
 close $outfh
 log_step "done module_count=[llength $filter_modules] handle_count=$total_handles written_instances=$written skipped_handles=$skipped"
+if {$skipped == 0 && [info exists env(NPI_FIND_STATUS_FILE)] && $env(NPI_FIND_STATUS_FILE) ne ""} {
+    set status_fh [open $env(NPI_FIND_STATUS_FILE) w]
+    puts $status_fh "COMPLETE $written"
+    close $status_fh
+}
 debExit

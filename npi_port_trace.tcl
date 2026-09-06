@@ -13,6 +13,9 @@
 #
 # All +tclarg_* values are passed as Tcl variables by Verdi's +tclarg mechanism.
 
+source [file join [file dirname [info script]] trace_support.tcl]
+source [file join [file dirname [info script]] npi_elaborated.tcl]
+
 proc log_step {msg} {
     puts stderr "\[npi_port_trace\] $msg"
     flush stderr
@@ -28,8 +31,8 @@ proc debug_step {msg} {
 }
 
 proc split_port_filter_spec { spec } {
-    set spec [string trim $spec]
-    if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)(\[[0-9]+(:[0-9]+)?\])$} $spec -> base select _] } {
+    set spec [canonicalize_numeric_selects [string trim $spec]]
+    if { [regexp {^([A-Za-z_][A-Za-z0-9_$]*)((\[-?[0-9]+(?::-?[0-9]+)?\])+)$} $spec -> base select] } {
         return [list $base $select]
     }
     return [list $spec ""]
@@ -117,8 +120,17 @@ log_step "load_mode=lib lib=$npi_lib"
 # Optional: comma-separated list of ports to filter (empty = all ports)
 set port_filter {}
 set port_filter_select_map {}
-if { [info exists env(NPI_PORTS)] && $env(NPI_PORTS) ne "" } {
-    foreach p [split $env(NPI_PORTS) ","] {
+set port_spec ""
+if {[info exists env(NPI_PORTS_FILE)] && $env(NPI_PORTS_FILE) ne ""} {
+    set pfh [open $env(NPI_PORTS_FILE) r]
+    set port_spec [read $pfh]
+    close $pfh
+    regsub -all {[\r\n]+} $port_spec , port_spec
+} elseif {[info exists env(NPI_PORTS)]} {
+    set port_spec $env(NPI_PORTS)
+}
+if {$port_spec ne ""} {
+    foreach p [split $port_spec ","] {
         set p [string trim $p]
         if { $p ne "" } {
             set parsed [split_port_filter_spec $p]
@@ -131,7 +143,7 @@ if { [info exists env(NPI_PORTS)] && $env(NPI_PORTS) ne "" } {
     set port_filter [lsort -unique $port_filter]
 }
 if { [llength $port_filter] > 0 } {
-    log_step "port_filter=$env(NPI_PORTS)"
+    log_step "port_filter_count=[llength $port_filter]"
 } else {
     log_step "port_filter=<all ports>"
 }
@@ -237,6 +249,7 @@ if { [info exists env(NPI_LOAD_STOP_INSTANCE_FILE)] && $env(NPI_LOAD_STOP_INSTAN
     log_step "load_stop_instance_file=$stop_file"
 }
 log_step "load_stop_instance_count=[llength $load_trace_stop_instances]"
+set load_trace_stop_index [build_stop_instance_index $load_trace_stop_instances]
 
 # Output file (written by shell via NPI_OUTFILE env var)
 if { [info exists env(NPI_OUTFILE)] && $env(NPI_OUTFILE) ne "" } {
@@ -305,48 +318,15 @@ proc add_ansi_ports_to_map { map_var port_text } {
 }
 
 proc build_port_dir_map { srcfile target_mod } {
+    global port_direction_map_cache
     if { $srcfile eq "" || ![file exists $srcfile] } {
         return {}
     }
-    set fh [open $srcfile r]
-    set lines [split [read $fh] "\n"]
-    close $fh
-
-    set map {}
-    set in_module 0
-    set in_header 0
-    set header_text ""
-    foreach line $lines {
-        set t [regsub {//.*$} [string trim $line] ""]
-        if { [regexp {^module\s+([A-Za-z_][A-Za-z0-9_$]*)} $t -> modname] &&
-             $modname eq $target_mod } {
-            set in_module 1
-            set in_header 1
-            set header_text $t
-        } elseif { $in_header } {
-            append header_text " " $t
-        }
-
-        if { $in_header && [regexp {\)\s*;} $header_text] } {
-            set open_idx [string last "(" $header_text]
-            set close_idx [string last ")" $header_text]
-            if { $open_idx >= 0 && $close_idx > $open_idx } {
-                set port_text [string range $header_text [expr {$open_idx + 1}] [expr {$close_idx - 1}]]
-                add_ansi_ports_to_map map $port_text
-            }
-            set in_header 0
-        }
-
-        if { $in_module } {
-            if { [regexp {^\s*(input|output|inout)\s+(.*)} $t -> dir rest] } {
-                add_decl_ports_to_map map $dir $rest
-            }
-            if { [regexp {^endmodule([^A-Za-z0-9_$]|$)} $t] } {
-                set in_module 0
-            }
-        }
+    set key [list $srcfile $target_mod]
+    if {![info exists port_direction_map_cache($key)]} {
+        set port_direction_map_cache($key) [parse_port_directions_text [source_module_text $srcfile $target_mod]]
     }
-    return $map
+    return $port_direction_map_cache($key)
 }
 
 proc get_handle_source_file { hdl } {
@@ -378,7 +358,8 @@ proc get_handle_size { hdl } {
     }
 
     set size ""
-    if { ![catch { set size [::npi_L1::npi_nl_get npiNlSize $hdl] }] &&
+    # npi_mod_inst_get_port returns a structural npiPort, NOT npiNlPort.
+    if { ![catch { set size [npi_get -property npiSize -object $hdl] }] &&
          [string is integer -strict $size] && $size > 0 } {
         return $size
     }
@@ -387,6 +368,27 @@ proc get_handle_size { hdl } {
         return $size
     }
     return ""
+}
+
+proc get_handle_decl_range { hdl } {
+    set size [get_handle_size $hdl]
+    if { ![string is integer -strict $size] || $size <= 1 } {
+        return ""
+    }
+
+    set left ""
+    set right ""
+    catch { set left [::npi_L1::npi_nl_get npiNlLeft $hdl] }
+    catch { set right [::npi_L1::npi_nl_get npiNlRight $hdl] }
+    if { ![string is integer -strict $left] || ![string is integer -strict $right] } {
+        catch { set left [npi_nl_get -property npiNlLeft -object $hdl] }
+        catch { set right [npi_nl_get -property npiNlRight -object $hdl] }
+    }
+    if { ![string is integer -strict $left] || ![string is integer -strict $right] ||
+         abs($left - $right) + 1 != $size } {
+        return ""
+    }
+    return "\[$left:$right\]"
 }
 
 # -----------------------------------------------------------------------
@@ -405,6 +407,10 @@ proc get_io_handles { inst_path } {
 }
 
 proc get_port_handles { inst_path } {
+    global instance_port_handles_cache
+    if {[info exists instance_port_handles_cache($inst_path)]} {
+        return $instance_port_handles_cache($inst_path)
+    }
     set hdlList {}
     if { [catch {
         ::npi_L1::npi_mod_inst_get_port $inst_path hdlList
@@ -412,6 +418,7 @@ proc get_port_handles { inst_path } {
         puts stderr "WARNING: npi_mod_inst_get_port failed for $inst_path: $e"
         return {}
     }
+    set instance_port_handles_cache($inst_path) $hdlList
     return $hdlList
 }
 
@@ -419,10 +426,13 @@ proc get_port_handles { inst_path } {
 # Get port name from port handle
 # -----------------------------------------------------------------------
 proc get_port_name { port_hdl } {
+    global port_handle_name_cache
+    if {[info exists port_handle_name_cache($port_hdl)]} {return $port_handle_name_cache($port_hdl)}
     set info ""
     catch { set info [::npi_L1::npi_ut_get_hdl_info $port_hdl] }
     # format: "npiPort, portname, {file : line}"
     set portname [string trim [lindex [split $info ","] 1]]
+    set port_handle_name_cache($port_hdl) $portname
     return $portname
 }
 
@@ -431,36 +441,29 @@ proc get_port_name { port_hdl } {
 # Returns: "input", "output", "inout", or "unknown"
 # -----------------------------------------------------------------------
 proc get_port_direction { port_hdl } {
-    set dir_val -1
-    if { [catch { set dir_val [::npi_L1::npi_nl_get npiNlDirection $port_hdl] } err] } {
-        return "unknown"
+    global port_handle_direction_cache
+    if {$port_hdl eq "" || $port_hdl eq "0"} {return unknown}
+    if {[info exists port_handle_direction_cache($port_hdl)]} {return $port_handle_direction_cache($port_hdl)}
+    # npi_mod_inst_get_port returns structural npiPort handles, whereas trace
+    # endpoints can be netlist handles. Use each domain's public Tcl API.
+    # There is no ::npi_L1::npi_nl_get in the installed NPI L1 implementation.
+    set direction unknown
+    foreach getter [list [list npi_get_str -property npiDirection -object $port_hdl] [list npi_nl_get_str -property npiNlDirection -object $port_hdl]] {
+        if {![catch {set value [eval $getter]}]} {
+            set direction [canonical_port_direction $value]
+            if {$direction ne "unknown"} {break}
+        }
     }
-
-    if { [string equal -nocase $dir_val "input"] ||
-         [string equal -nocase $dir_val "npiInput"] } {
-        return "input"
-    } elseif { [string equal -nocase $dir_val "output"] ||
-               [string equal -nocase $dir_val "npiOutput"] } {
-        return "output"
-    } elseif { [string equal -nocase $dir_val "inout"] ||
-               [string equal -nocase $dir_val "npiInout"] } {
-        return "inout"
-    }
-
-    # npiInput = 1, npiOutput = 2, npiInout = 3 (standard NPI constants)
-    if { $dir_val == 1 } {
-        return "input"
-    } elseif { $dir_val == 2 } {
-        return "output"
-    } elseif { $dir_val == 3 } {
-        return "inout"
-    } else {
-        return "unknown"
-    }
+    set port_handle_direction_cache($port_hdl) $direction
+    return $direction
 }
 
 proc write_trace_row { fh inst_path portname dir role signal } {
-    puts $fh "$inst_path,$portname,$dir,$role,$signal"
+    set fields {}
+    foreach value [list $inst_path $portname $dir $role $signal] {
+        lappend fields [trace_csv_cell $value]
+    }
+    puts $fh [join $fields ,]
 }
 
 # -----------------------------------------------------------------------
@@ -504,13 +507,13 @@ proc canonicalize_generated_always_input { name } {
 }
 
 proc normalize_signal_name { name } {
-    set name [string trim $name]
-    if { [regexp {^(.+)#\[([0-9]+):([0-9]+)\]$} $name -> base hi lo] } {
-        regsub {\[[0-9]+:[0-9]+\]$} $base "" base
+    set name [canonicalize_numeric_selects [string trim $name]]
+    if { [regexp {^(.+)#\[(-?[0-9]+):(-?[0-9]+)\]$} $name -> base hi lo] } {
+        regsub {\[-?[0-9]+:-?[0-9]+\]$} $base "" base
         return "${base}\[$hi:$lo\]"
     }
-    if { [regexp {^(.+)#\[([0-9]+)\]$} $name -> base bit] } {
-        regsub {\[[0-9]+:[0-9]+\]$} $base "" base
+    if { [regexp {^(.+)#\[(-?[0-9]+)\]$} $name -> base bit] } {
+        regsub {\[-?[0-9]+:-?[0-9]+\]$} $base "" base
         return "${base}\[$bit\]"
     }
     if { [is_const_literal_name $name] && ![string match "Const:*" $name] } {
@@ -570,6 +573,7 @@ proc const_bit_from_based_literal { width base digits bit } {
         if { ![regexp {^[0-9]+$} $digits] } {
             return ""
         }
+        set digits [decimal_index_token $digits]
         return [expr {($digits >> $bit) & 1}]
     } else {
         return ""
@@ -601,14 +605,17 @@ proc project_const_literal_to_bit { value bit } {
     set bit_val ""
     if { [regexp {^'([01xXzZ?])$} $raw -> fill] } {
         set bit_val [string tolower $fill]
-    } elseif { [regexp {^([0-9]+)'[sS]?([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$} $raw -> width base digits] } {
+    } elseif { [regexp {^([0-9]+)'([sS]?)([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$} $raw -> width signed base digits] } {
+        set width [decimal_index_token $width]
+        if {$bit >= $width} {
+            if {$signed eq ""} {return "Const:1'b0"}
+            set bit [expr {$width-1}]
+        }
         set bit_val [const_bit_from_based_literal $width $base $digits $bit]
     } elseif { [regexp {^'[sS]?([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$} $raw -> base digits] } {
         set bit_val [const_bit_from_based_literal "" $base $digits $bit]
     } elseif { [regexp {^-?[0-9]+$} $raw] } {
-        if { $raw < 0 } {
-            return ""
-        }
+        set raw [decimal_index_token $raw]
         set bit_val [expr {($raw >> $bit) & 1}]
     }
 
@@ -878,10 +885,11 @@ proc signal_bit_index { signame } {
 
 proc signal_selected_bits { signame } {
     set signame [normalize_signal_name $signame]
-    if { [regexp {\[([0-9]+)\]$} $signame -> bit] } {
+    if {[regexp {\]\[} $signame]} {return {}}
+    if { [regexp {\[(-?[0-9]+)\]$} $signame -> bit] } {
         return [list $bit]
     }
-    if { [regexp {\[([0-9]+):([0-9]+)\]$} $signame -> hi lo] } {
+    if { [regexp {\[(-?[0-9]+):(-?[0-9]+)\]$} $signame -> hi lo] } {
         set bits {}
         if { $hi >= $lo } {
             for {set bit $lo} {$bit <= $hi} {incr bit} {
@@ -912,7 +920,7 @@ proc effective_selected_bits_for_lhs { selected_bits leaf width_map } {
 
 proc signal_select_suffix { signame } {
     set signame [normalize_signal_name $signame]
-    if { [regexp {(\[[0-9]+(:[0-9]+)?\])$} $signame -> select] } {
+    if { [regexp {((\[-?[0-9]+(?::-?[0-9]+)?\])+)$} $signame -> select] } {
         return $select
     }
     return ""
@@ -920,7 +928,7 @@ proc signal_select_suffix { signame } {
 
 proc signal_scope_prefix { signame } {
     set signame [normalize_signal_name $signame]
-    regsub {\[[^\]]+\]$} $signame "" signame
+    regsub {(\[[^\]]+\])+$} $signame "" signame
     if { [regexp {^(.+)\.[A-Za-z_][A-Za-z0-9_$]*$} $signame -> prefix] } {
         return $prefix
     }
@@ -930,7 +938,7 @@ proc signal_scope_prefix { signame } {
 proc signal_base_without_select { signame } {
     set signame [normalize_signal_name $signame]
     regsub {#\[[^\]]+\]$} $signame "" signame
-    regsub {\[[^\]]+\]$} $signame "" signame
+    regsub {(\[[^\]]+\])+$} $signame "" signame
     return $signame
 }
 
@@ -1886,7 +1894,13 @@ proc source_context_for_signal { signame {srcfile_hint ""} {scope_hint ""} } {
         }
     }
 
-    set cache_key "${prefix}::${srcfile_hint}"
+    # A source file can contain several module definitions with common port
+    # names (for example, many modules have an input named "in").  An
+    # ambiguous lookup for one leaf must not cache an empty module for every
+    # other signal in the same instance.  Include the leaf in the fallback
+    # cache key; the prefix-only cache below is still used once a complete
+    # source/module context has been proven.
+    set cache_key "${prefix}::${srcfile_hint}::${leaf}"
     if { [info exists source_scope_module_context_cache($cache_key)] } {
         return $source_scope_module_context_cache($cache_key)
     }
@@ -2156,6 +2170,145 @@ proc build_signal_range_map_for_module { srcfile module } {
     return $ranges
 }
 
+proc parse_signal_raw_range_text { text } {
+    set ranges {}
+    set flat [string map [list "\r" " " "\n" " "] $text]
+    set replacement "\\1\n\\2"
+    regsub -all {([;,(])\s*((input|output|inout|wire|reg|logic)([^A-Za-z0-9_$]|$))} $flat $replacement flat
+    foreach clause [split $flat "\n"] {
+        set clause [string trim $clause]
+        if { ![regexp {^(input|output|inout|wire|reg|logic)([^A-Za-z0-9_$]|$)(.*)$} $clause -> _ _ rest] } {
+            continue
+        }
+        set semicolon [string first ";" $rest]
+        if { $semicolon >= 0 } {
+            set rest [string range $rest 0 [expr {$semicolon - 1}]]
+        }
+        regsub -all {\m(wire|reg|logic|bit|signed|unsigned)\M} $rest " " rest
+        set select ""
+        if { [regexp {\[\s*([^:]+?)\s*:\s*([^\]]+?)\s*\]} $rest -> left right] } {
+            set select "\[[string trim $left]:[string trim $right]\]"
+        }
+        regsub -all {\[[^\]]+\]} $rest " " rest
+        regsub -all {[;()]} $rest " " rest
+        foreach item [split $rest ","] {
+            regsub {=.*$} $item "" item
+            set item [string trim $item]
+            if { $select ne "" && [regexp {([A-Za-z_][A-Za-z0-9_$]*)$} $item -> name] } {
+                dict set ranges $name $select
+            }
+        }
+    }
+    return $ranges
+}
+
+proc build_signal_raw_range_map_for_module { srcfile module } {
+    global signal_raw_range_map_module_cache
+    if { $srcfile eq "" || ![file exists $srcfile] || $module eq "" } {
+        return {}
+    }
+    set key "${srcfile}::${module}"
+    if { [info exists signal_raw_range_map_module_cache($key)] } {
+        return $signal_raw_range_map_module_cache($key)
+    }
+    set text [source_module_text $srcfile $module]
+    if { $text eq "" } {
+        set ranges {}
+    } else {
+        set ranges [parse_signal_raw_range_text $text]
+    }
+    set signal_raw_range_map_module_cache($key) $ranges
+    return $ranges
+}
+
+proc instance_integer_parameter_map { inst_path } {
+    global instance_integer_parameter_map_cache
+    if { [info exists instance_integer_parameter_map_cache($inst_path)] } {
+        return $instance_integer_parameter_map_cache($inst_path)
+    }
+    set result {}
+    set handles {}
+    if { [info commands ::npi_L1::npi_mod_inst_get_parameter] ne "" &&
+         ![catch { ::npi_L1::npi_mod_inst_get_parameter $inst_path handles }] } {
+        foreach hdl $handles {
+            set name ""
+            catch { set name [string trim [npi_get_str -property npiName -object $hdl]] }
+            if { [string first "${inst_path}." $name] == 0 } {
+                set name [string range $name [expr {[string length $inst_path] + 1}] end]
+            }
+            if { ![regexp {^[A-Za-z_][A-Za-z0-9_]*$} $name] } {
+                continue
+            }
+            set value ""
+            catch { set value [string trim [npi_get_value -format npiIntVal -object $hdl]] }
+            if { [string is integer -strict $value] } {
+                dict set result $name $value
+            }
+        }
+    }
+    set instance_integer_parameter_map_cache($inst_path) $result
+    return $result
+}
+
+proc resolve_parameterized_index_expr { text parameter_map } {
+    set resolved [string trim $text]
+    set identifiers [lsort -unique [regexp -all -inline {[A-Za-z_][A-Za-z0-9_]*} $resolved]]
+    foreach name $identifiers {
+        if { ![dict exists $parameter_map $name] } {
+            return ""
+        }
+        regsub -all "\\m${name}\\M" $resolved [dict get $parameter_map $name] resolved
+    }
+    if { ![regexp {^[0-9+*/%()<> &|^~\t-]+$} $resolved] } {
+        return ""
+    }
+    foreach number [lsort -unique [regexp -all -inline {[0-9]+} $resolved]] {
+        regsub -all "\\m${number}\\M" $resolved [decimal_index_token $number] resolved
+    }
+    set value ""
+    if { [catch { set value [expr $resolved] }] || ![string is integer -strict $value] } {
+        return ""
+    }
+    return $value
+}
+
+proc enrich_child_port_shape_maps_uncached { child_scope child_srcfile module port width_var range_var } {
+    upvar 1 $width_var width_map
+    upvar 1 $range_var range_map
+
+    set child_port_hdl [get_inst_port_handle_by_signal $child_scope "${child_scope}.${port}"]
+    if { $child_port_hdl ne "" } {
+        set child_port_size [get_handle_size $child_port_hdl]
+        if { [string is integer -strict $child_port_size] && $child_port_size > 0 } {
+            dict set width_map $port $child_port_size
+        }
+        set child_port_range [get_handle_decl_range $child_port_hdl]
+        if { $child_port_range ne "" } {
+            dict set range_map $port $child_port_range
+        }
+    }
+    if { [dict exists $range_map $port] || $child_srcfile eq "" } {
+        return
+    }
+
+    set raw_ranges [build_signal_raw_range_map_for_module $child_srcfile $module]
+    if { ![dict exists $raw_ranges $port] } {
+        return
+    }
+    set raw [dict get $raw_ranges $port]
+    if { ![regexp {^\[([^:]+):([^\]]+)\]$} $raw -> left_expr right_expr] } {
+        return
+    }
+    set parameter_map [instance_integer_parameter_map $child_scope]
+    set left [resolve_parameterized_index_expr $left_expr $parameter_map]
+    set right [resolve_parameterized_index_expr $right_expr $parameter_map]
+    if { $left eq "" || $right eq "" } {
+        return
+    }
+    dict set range_map $port "\[$left:$right\]"
+    dict set width_map $port [expr {abs($left - $right) + 1}]
+}
+
 proc conn_references_signal_bit { conn leaf bit } {
     set conn [string trim $conn]
     regsub -all {\s+} $conn "" conn
@@ -2284,24 +2437,35 @@ proc build_instantiation_stmt_list_for_module { srcfile module } {
 }
 
 proc inst_conn_expr_for_port { conn_text portname } {
+    global named_connection_map_cache
+    if {![info exists named_connection_map_cache($conn_text)]} {
+        set named_connection_map_cache($conn_text) [parse_named_connection_map $conn_text]
+    }
+    if {[dict exists $named_connection_map_cache($conn_text) $portname]} {
+        return [dict get $named_connection_map_cache($conn_text) $portname]
+    }
+    return ""
+}
+
+proc parse_named_connection_map {conn_text} {
+    set connections {}
     set idx 0
     set len [string length $conn_text]
     while { $idx < $len } {
         set dot [string first "." $conn_text $idx]
         if { $dot < 0 } {
-            return ""
+            break
         }
         set pos [expr {$dot + 1}]
         while { $pos < $len && [regexp {\s} [string index $conn_text $pos]] } {
             incr pos
         }
-        set rest [string range $conn_text $pos end]
-        if { ![regexp -indices {^[A-Za-z_][A-Za-z0-9_$]*} $rest match_idx] } {
+        if { ![regexp -indices -start $pos {[A-Za-z_][A-Za-z0-9_$]*} $conn_text match_idx] || [lindex $match_idx 0] != $pos } {
             set idx [expr {$dot + 1}]
             continue
         }
-        set name_start [expr {$pos + [lindex $match_idx 0]}]
-        set name_end [expr {$pos + [lindex $match_idx 1]}]
+        set name_start [lindex $match_idx 0]
+        set name_end [lindex $match_idx 1]
         set name [string range $conn_text $name_start $name_end]
         set pos [expr {$name_end + 1}]
         while { $pos < $len && [regexp {\s} [string index $conn_text $pos]] } {
@@ -2322,9 +2486,7 @@ proc inst_conn_expr_for_port { conn_text portname } {
                 incr depth -1
                 if { $depth == 0 } {
                     set expr [string trim [string range $conn_text $expr_start [expr {$pos - 1}]]]
-                    if { $name eq $portname } {
-                        return $expr
-                    }
+                    dict set connections $name $expr
                     break
                 }
             }
@@ -2332,7 +2494,7 @@ proc inst_conn_expr_for_port { conn_text portname } {
         }
         set idx [expr {$pos + 1}]
     }
-    return ""
+    return $connections
 }
 
 proc source_parent_module_for_child_inst { parent_scope parent_srcfile child_instname } {
@@ -2367,8 +2529,6 @@ proc source_port_connection_driver_starts { inst_path parent_path instname portn
     if { [llength $target_bits] == 0 } {
         if { $port_width ne "" && $port_width == 1 } {
             set target_bits [list 0]
-        } else {
-            return {}
         }
     }
 
@@ -2410,14 +2570,17 @@ proc source_port_connection_driver_starts { inst_path parent_path instname portn
         return {}
     }
 
+    set computed_connection [rhs_is_computed_connection $conn_expr]
+    if {[llength $target_bits] == 0} {
+        if {!$computed_connection} {return {}}
+        log_step "driver_combo_stop signal=${inst_path}.${portname}${trace_select} source=$parent_srcfile source_module=$parent_module reason=port_expression expression=$conn_expr"
+        return [list "COMBO_EXPR:port_connection"]
+    }
+
     set width_map [build_signal_width_map_for_module $parent_srcfile $parent_module]
     set range_map [build_signal_range_map_for_module $parent_srcfile $parent_module]
     set starts {}
     foreach bit $target_bits {
-        if { [rhs_has_ternary_expr $conn_expr] } {
-            append_unique_signal starts "COMBO_EXPR:port_connection"
-            continue
-        }
         if { $scalar_port_whole &&
              $bit == 0 &&
              [regexp {^\s*([A-Za-z_][A-Za-z0-9_$]*)\s*$} $conn_expr -> bare_name] &&
@@ -2444,6 +2607,11 @@ proc source_port_connection_driver_starts { inst_path parent_path instname portn
             }
         }
         if { [llength $bit_sources] == 0 } {
+            if {$computed_connection} {
+                log_step "driver_combo_stop signal=${inst_path}.${portname}${trace_select} source=$parent_srcfile source_module=$parent_module reason=port_expression expression=$conn_expr"
+                append_unique_signal starts "COMBO_EXPR:port_connection"
+                continue
+            }
             debug_step "source_port_conn_driver_unresolved inst=$inst_path port=$portname bit=$bit conn=$conn_expr"
             continue
         }
@@ -2454,6 +2622,15 @@ proc source_port_connection_driver_starts { inst_path parent_path instname portn
 
     if { [llength $starts] > 0 } {
         log_step "source_port_conn_driver_start inst=$inst_path port=$portname select=$trace_select width=$port_width conn=$conn_expr starts=[join $starts ,]"
+        foreach value $starts {
+            if {[is_const_literal_name $value]} {
+                log_const_source_detail source_port_bit_mapping $value \
+                    signal "${inst_path}.${portname}${trace_select}" \
+                    source_file $parent_srcfile source_module $parent_module \
+                    source_scope $parent_scope connection_expression $conn_expr \
+                    port_decl_range $port_range
+            }
+        }
     }
     return $starts
 }
@@ -2522,7 +2699,7 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
 
     set sources {}
     debug_step "source_module_port_driver_probe signal=$signame leaf=$leaf selected_bits=[join $selected_bits ,] prefix=$prefix srcfile=$srcfile module=$module"
-    foreach inst [build_instantiation_stmt_list_for_module $srcfile $module] {
+    foreach inst [source_instance_candidates $srcfile $module $leaf] {
         set modname [lindex $inst 0]
         set instname [lindex $inst 1]
         set conn_text [lindex $inst 2]
@@ -2538,21 +2715,15 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
         set child_width_map [build_signal_width_map_for_module $child_srcfile $modname]
         set child_range_map [build_signal_range_map_for_module $child_srcfile $modname]
 
-        foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
+        dict for {port conn} [parse_named_connection_map $conn_text] {
+            if {[lsearch -exact [regexp -all -inline {[A-Za-z_][A-Za-z0-9_$]*} $conn] $leaf] < 0} {continue}
+            enrich_child_port_shape_maps $child_scope $child_srcfile $modname $port child_width_map child_range_map
             set target_bits $selected_bits
             if { [llength $target_bits] == 0 } {
                 set target_bits [list ""]
             }
             foreach bit $target_bits {
-                if { ![conn_references_signal_bit $conn $leaf $bit] } {
-                    continue
-                }
-                set port_select_status 0
-                set port_select [conn_port_select_for_signal_bit $conn $leaf $bit $width_map $range_map $port $child_width_map $child_range_map port_select_status]
-                if { !$port_select_status } {
-                    debug_step "source_module_port_driver_skip signal=$signame inst=$instname port=$port conn=$conn bit=$bit reason=unknown_positional_mapping"
-                    continue
-                }
+              foreach port_select [connection_port_selects $conn $leaf $bit $width_map $range_map $port $child_width_map $child_range_map] {
                 if { $prefix ne "" } {
                     set candidate "${prefix}.${instname}.${port}${port_select}"
                 } else {
@@ -2568,6 +2739,7 @@ proc source_module_port_driver_sources { srcfile signame {scope_hint ""} } {
                 if { [source_module_port_candidate_exists $candidate] } {
                     append_unique_signal sources $candidate
                 }
+              }
             }
         }
     }
@@ -2639,7 +2811,7 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
     set selected_bits [effective_selected_bits_for_lhs $selected_bits $leaf $width_map]
 
     set fanouts {}
-    set inst_list [build_instantiation_stmt_list_for_module $srcfile $module]
+    set inst_list [source_instance_candidates $srcfile $module $leaf]
     debug_step "source_module_port_load_probe signal=$signame leaf=$leaf selected_bits=[join $selected_bits ,] prefix=$prefix srcfile=$srcfile module=$module inst_count=[llength $inst_list]"
     foreach inst $inst_list {
         set modname [lindex $inst 0]
@@ -2657,21 +2829,15 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
         set child_width_map [build_signal_width_map_for_module $child_srcfile $modname]
         set child_range_map [build_signal_range_map_for_module $child_srcfile $modname]
 
-        foreach {_ port conn} [regexp -all -inline {\.([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*([^)]+?)\s*\)} $conn_text] {
+        dict for {port conn} [parse_named_connection_map $conn_text] {
+            if {[lsearch -exact [regexp -all -inline {[A-Za-z_][A-Za-z0-9_$]*} $conn] $leaf] < 0} {continue}
+            enrich_child_port_shape_maps $child_scope $child_srcfile $modname $port child_width_map child_range_map
             set target_bits $selected_bits
             if { [llength $target_bits] == 0 } {
                 set target_bits [list ""]
             }
             foreach bit $target_bits {
-                if { ![conn_references_signal_bit $conn $leaf $bit] } {
-                    continue
-                }
-                set port_select_status 0
-                set port_select [conn_port_select_for_signal_bit $conn $leaf $bit $width_map $range_map $port $child_width_map $child_range_map port_select_status]
-                if { !$port_select_status } {
-                    debug_step "source_module_port_load_skip signal=$signame inst=$instname port=$port conn=$conn bit=$bit reason=unknown_positional_mapping"
-                    continue
-                }
+              foreach port_select [connection_port_selects $conn $leaf $bit $width_map $range_map $port $child_width_map $child_range_map] {
                 if { $prefix ne "" } {
                     set candidate "${prefix}.${instname}.${port}${port_select}"
                 } else {
@@ -2690,6 +2856,7 @@ proc source_module_port_load_fanouts { srcfile signame {scope_hint ""} } {
                 if { $exists } {
                     append_unique_signal fanouts $candidate
                 }
+              }
             }
         }
     }
@@ -3009,15 +3176,6 @@ proc rhs_driver_data_exprs { rhs } {
     return [list $rhs]
 }
 
-proc rhs_has_ternary_expr { rhs } {
-    set rhs [strip_wrapping_parens [string trim $rhs]]
-    set ternary [split_top_level_ternary $rhs]
-    if { [llength $ternary] == 3 } {
-        return 1
-    }
-    return 0
-}
-
 proc const_literal_to_signal { item } {
     set item [string trim $item]
     regsub -all {\s+} $item "" item
@@ -3079,10 +3237,8 @@ proc expr_item_source_signal_for_bit { item bit prefix width_map range_map } {
     set const_sig [const_literal_to_signal $item]
     if { $const_sig ne "" } {
         if { $bit ne "" } {
-            set projected [project_const_literal_to_bit $const_sig $bit]
-            if { $projected ne "" } {
-                return $projected
-            }
+            # A failed bit projection is not proof of the whole literal.
+            return [project_const_literal_to_bit $const_sig $bit]
         }
         return $const_sig
     }
@@ -3150,7 +3306,7 @@ proc expr_item_source_signals { item prefix } {
 }
 
 proc rhs_driver_sources_for_bit { rhs bit prefix width_map range_map } {
-    set rhs [string trim $rhs]
+    set rhs [strip_wrapping_parens [string trim $rhs]]
     regsub -all {\s+} $rhs "" rhs_no_space
 
     set ternary [split_top_level_ternary $rhs_no_space]
@@ -3629,7 +3785,7 @@ proc parent_instance_path { inst_path } {
 
 proc strip_signal_selects { signame } {
     regsub {#\[[^\]]+\]$} $signame "" signame
-    regsub {\[[^\]]+\]$} $signame "" signame
+    regsub {(\[[^\]]+\])+$} $signame "" signame
     return $signame
 }
 
@@ -3686,7 +3842,9 @@ proc is_direct_instance_node { rest } {
             incr dot_count
         }
     }
-    return [expr {$dot_count <= 1}]
+    # A plain child.port belongs to a descendant, not this instance. Generated
+    # operator pins have structural punctuation and remain direct endpoints.
+    return [expr {$dot_count == 0 || ($dot_count == 1 && [signal_has_unbracketed_colon $rest])}]
 }
 
 proc is_immediate_signal_under_instance { signal_name inst } {
@@ -3703,7 +3861,7 @@ proc is_immediate_signal_under_instance { signal_name inst } {
 }
 
 proc signal_belongs_to_stop_instance { signal_name } {
-    global load_trace_stop_instances current_trace_instance
+    global load_trace_stop_instances load_trace_stop_index current_trace_instance
 
     set signal_name [strip_signal_selects [normalize_signal_name $signal_name]]
     if { $signal_name eq "" ||
@@ -3717,21 +3875,9 @@ proc signal_belongs_to_stop_instance { signal_name } {
         return 0
     }
 
-    foreach inst $load_trace_stop_instances {
-        set inst [string trim $inst]
-        if { $inst eq "" } {
-            continue
-        }
-        if { [info exists current_trace_instance] &&
-             $current_trace_instance ne "" &&
-             $inst eq $current_trace_instance } {
-            continue
-        }
-        if { [is_direct_instance_node [strip_instance_prefix $signal_name $inst]] } {
-            return 1
-        }
-    }
-    return 0
+    set current ""
+    if {[info exists current_trace_instance]} {set current $current_trace_instance}
+    return [indexed_stop_instance_match $signal_name $load_trace_stop_index $current]
 }
 
 proc load_trace_stop_at_endpoint { signame {why ""} } {
@@ -3812,25 +3958,34 @@ proc signal_matches_inst_port { signame inst_path portname } {
 }
 
 proc get_inst_port_handle_by_signal { inst_path signame } {
-    foreach port_hdl [get_port_handles $inst_path] {
-        set portname [get_port_name $port_hdl]
-        if { [signal_matches_inst_port $signame $inst_path $portname] } {
-            return $port_hdl
+    global instance_port_name_index
+    if {![info exists instance_port_name_index($inst_path)]} {
+        set index {}
+        foreach port_hdl [get_port_handles $inst_path] {
+            dict set index [get_port_name $port_hdl] $port_hdl
         }
+        set instance_port_name_index($inst_path) $index
+    }
+    set portname [signal_leaf_name $signame]
+    if {[signal_matches_inst_port $signame $inst_path $portname] && [dict exists $instance_port_name_index($inst_path) $portname]} {
+        return [dict get $instance_port_name_index($inst_path) $portname]
     }
     return ""
 }
 
 proc get_high_conn_sigs_for_port_hdl { inst_path target_port_hdl } {
-    set port2highList {}
-    if { [catch { ::npi_L1::npi_inst_port_2_high_conn_sig $inst_path port2highList } e] } {
-        return {}
-    }
-    foreach pair $port2highList {
-        set port_hdl [lindex $pair 0]
-        if { $port_hdl == $target_port_hdl } {
-            return [lindex $pair 1]
+    global instance_high_connection_index
+    if {![info exists instance_high_connection_index($inst_path)]} {
+        set port2highList {}
+        if { [catch { ::npi_L1::npi_inst_port_2_high_conn_sig $inst_path port2highList } e] } {
+            return {}
         }
+        set index {}
+        foreach pair $port2highList {dict set index [lindex $pair 0] [lindex $pair 1]}
+        set instance_high_connection_index($inst_path) $index
+    }
+    if {[dict exists $instance_high_connection_index($inst_path) $target_port_hdl]} {
+        return [dict get $instance_high_connection_index($inst_path) $target_port_hdl]
     }
     return {}
 }
@@ -3880,14 +4035,18 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
         }
         set current_portname [get_port_name $port_hdl]
 
-        set high_sigs [get_high_conn_sigs_for_port_hdl $current_inst $port_hdl]
-        log_step "const_parent_port_trace depth=$depth inst=$current_inst signal=$current_name high_conn_count=[llength $high_sigs]"
-        if { [llength $high_sigs] == 0 } {
+        set pairs [module_port_high_conn_pairs $port_hdl $current_name driver [get_handle_source_file $port_hdl]]
+        log_step "const_parent_port_trace depth=$depth inst=$current_inst signal=$current_name high_conn_count=[llength $pairs]"
+        # A constituent of a vector/logic expression is not proof that the
+        # requested signal is constant. Only follow an exact single mapping.
+        if { [llength $pairs] != 1 } {
             return ""
         }
 
-        foreach high_hdl $high_sigs {
-            set high_name [hdl_to_selected_name $high_hdl [signal_select_suffix $current_name]]
+        foreach pair $pairs {
+            set high_hdl [lindex $pair 0]
+            set high_name [lindex $pair 1]
+            if {[string match "COMBO_EXPR:*" $high_name]} {return ""}
             if { [is_const_literal_name $high_name] } {
                 log_step "const_driver_from_parent_port_chain signal=$current_name inst=$current_inst value=$high_name depth=$depth"
                 set const_chain $trace_chain
@@ -3908,13 +4067,8 @@ proc const_driver_from_parent_ports { sig_hdl signame start_inst max_depth } {
             }
         }
 
-        if { [llength $high_sigs] != 1 } {
-            return ""
-        }
-
-        set current_select [signal_select_suffix $current_name]
-        set current_hdl [select_hdl_for_signal_select [lindex $high_sigs 0] $current_select]
-        set current_name [hdl_to_selected_name [lindex $high_sigs 0] $current_select]
+        set current_hdl $high_hdl
+        set current_name $high_name
         set current_inst [parent_instance_path $current_inst]
         incr depth
     }
@@ -4077,6 +4231,8 @@ proc hdl_to_name { hdl {literal_select ""} } {
     catch { set signame [npi_nl_get_str -property npiNlFullName -object $hdl] }
     set signame [string trim $signame]
     if { $signame ne "" } {
+        set actual_bit [elab_nl_multidim_bit_name $hdl $signame]
+        if {$actual_bit ne ""} {return $actual_bit}
         return [normalize_signal_name $signame]
     }
 
@@ -4326,9 +4482,10 @@ proc expand_exact_assign_driver_handle { hdl depth visited_var } {
     return $expanded
 }
 
-proc bit_driver_handles_by_exact_hdl { hdl signame status_var } {
+proc bit_driver_handles_by_exact_hdl { hdl signame status_var {max_depth ""} } {
     global assign_trace_max_depth
     upvar 1 $status_var status
+    if {$max_depth eq ""} {set max_depth $assign_trace_max_depth}
     set source_count 0
     set immediate [raw_bit_driver_handles_by_hdl $hdl status source_count]
     if { !$status } {
@@ -4339,7 +4496,7 @@ proc bit_driver_handles_by_exact_hdl { hdl signame status_var } {
     set drivers {}
     foreach driver_hdl $immediate {
         set visited {}
-        foreach endpoint [expand_exact_assign_driver_handle $driver_hdl $assign_trace_max_depth visited] {
+        foreach endpoint [expand_exact_assign_driver_handle $driver_hdl $max_depth visited] {
             if { $endpoint ne "" && [lsearch -exact $drivers $endpoint] < 0 } {
                 lappend drivers $endpoint
             }
@@ -4400,9 +4557,7 @@ proc is_module_boundary_signal { signame } {
     }
 
     foreach bad {
-        "/" "(@" "_ExprInst__"
-        "Always" "Initial" "Init" "SigOp" "SigTap"
-        "Combo" "RegCombo" "ComboMemory"
+        "/" "(@" "_ExprInst__:"
     } {
         if { [string first $bad $signame] >= 0 } {
             return 0
@@ -4412,7 +4567,7 @@ proc is_module_boundary_signal { signame } {
         return 0
     }
 
-    return [regexp {^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)(\[[0-9]+(:[0-9]+)?\])?(\.[A-Za-z_][A-Za-z0-9_$]*(\[[0-9]+(:[0-9]+)?\])?)*$} $signame]
+    return [regexp {^[A-Za-z_][A-Za-z0-9_$]*(\[-?[0-9]+(?::-?[0-9]+)?\])*(\.[A-Za-z_][A-Za-z0-9_$]*(\[-?[0-9]+(?::-?[0-9]+)?\])*)+$} $signame]
 }
 
 proc is_generated_logic_signal { signame } {
@@ -4422,9 +4577,7 @@ proc is_generated_logic_signal { signame } {
     }
 
     foreach marker {
-        "/" "(@" "_ExprInst__"
-        "Always" "Initial" "Init"
-        "SigOp" "SigTap" "Combo" "RegCombo" "ComboMemory"
+        "/" "(@" "_ExprInst__:"
     } {
         if { [string first $marker $signame] >= 0 } {
             return 1
@@ -4517,16 +4670,7 @@ proc should_expand_assign_endpoint { hdl signame } {
     # Generated logic and expression instances are real trace endpoints.
     # Module port/pin endpoints are still structural connections, so they are
     # allowed below when the normalized name is a clean module-boundary signal.
-    foreach bad {
-        "/" "_ExprInst__"
-        "Always" "Initial" "Init" "SigOp" "SigTap"
-        "Combo" "RegCombo" "ComboMemory"
-    } {
-        if { [string first $bad $signame] >= 0 } {
-            return 0
-        }
-    }
-    if { [signal_has_unbracketed_colon $signame] } {
+    if { [is_generated_logic_signal $signame] } {
         return 0
     }
 
@@ -4637,6 +4781,39 @@ proc module_port_high_conn_pairs { hdl signame role {srcfile_hint ""} } {
 
     set pairs {}
     set signame_select [signal_select_suffix $signame]
+    if {[info commands npi_handle] ne ""} {
+        set parent [parent_instance_path $inst_path]
+        if {[catch {set starts [elab_port_starts $port_hdl $inst_path $portname $signame_select npiHighConn]} message]} {
+            return [list [list "" "ERROR:ELABORATED_CONNECTION_UNRESOLVED:$message" $srcfile_hint]]
+        }
+        foreach start $starts {lappend pairs [list "" $start $srcfile_hint]}
+        return $pairs
+    }
+    if {$signame_select ne "" || $role eq "driver"} {
+        # Port indices are declaration indices, NOT positions in the parent
+        # expression. Map every boundary separately (ascending/non-zero ranges
+        # and concatenations can all change the index).
+        set ctx [source_context_for_signal $signame $srcfile_hint]
+        set port_src [lindex $ctx 0]
+        set port_module [lindex $ctx 1]
+        set widths [build_signal_width_map_for_module $port_src $port_module]
+        set ranges [build_signal_range_map_for_module $port_src $port_module]
+        enrich_child_port_shape_maps $inst_path $port_src $port_module $portname widths ranges
+        set width ""
+        set range ""
+        if {[dict exists $widths $portname]} {set width [dict get $widths $portname]}
+        if {[dict exists $ranges $portname]} {set range [dict get $ranges $portname]}
+        set parent [parent_instance_path $inst_path]
+        set parent_src [source_file_for_scope_instance $parent ""]
+        set starts [source_port_connection_driver_starts $inst_path $parent [lindex [split $inst_path .] end] $portname $signame_select $width $parent_src $range]
+        foreach start $starts {lappend pairs [list "" $start $parent_src]}
+        if {[llength $pairs]} {return $pairs}
+        debug_step "bit_module_port_high_unresolved role=$role signal=$signame reason=no_exact_mapping"
+        # Applying the same select to each member of the broad high-connection
+        # list can manufacture sibling-bit constants. Leave fallback to the
+        # exact-bit API; never use the whole-bus high list for this query.
+        if {$signame_select ne ""} {return {}}
+    }
     set high_hdls [get_high_conn_sigs_for_port_hdl $inst_path $port_hdl]
     debug_step "module_port_high_probe role=$role signal=$signame inst=$inst_path port=$portname dir=$dir high_count=[llength $high_hdls] select=$signame_select"
     foreach high_hdl $high_hdls {
@@ -4676,6 +4853,8 @@ proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_
     foreach pair [module_port_high_conn_pairs $hdl $signame driver $srcfile_hint] {
         set high_hdl [lindex $pair 0]
         set high_sig [lindex $pair 1]
+        set evidence_src $srcfile_hint
+        if {[llength $pair] > 2} {set evidence_src [lindex $pair 2]}
         append_unique_signal all_drivers $high_sig
         if { [is_module_boundary_signal $high_sig] } {
             append_unique_signal module_drivers $high_sig
@@ -4688,10 +4867,10 @@ proc collect_driver_module_port_high_conns { hdl signame all_drivers_var module_
                 high_signal $high_sig \
                 source_handle_path [hdl_evidence_name $high_hdl] \
                 source_handle_kind [hdl_kind $high_hdl] \
-                source_file $srcfile_hint
+                source_file $evidence_src
         } else {
             log_step "driver_module_port_high_continue from=$signame via=$high_sig remaining_net_depth=$net_depth"
-            set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
+            set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $evidence_src]
             set next_scope_hint [signal_scope_hint_after $high_sig]
             if { $net_depth > 0 } {
                 collect_drivers_by_name_rec $high_sig all_drivers module_drivers [expr {$net_depth - 1}] $expr_depth visited $next_srcfile_hint $next_scope_hint
@@ -4730,7 +4909,9 @@ proc collect_load_module_port_high_conns { hdl signame all_loads_var module_load
         }
         set high_hdl [lindex $pair 0]
         set high_sig [lindex $pair 1]
-        set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $srcfile_hint]
+        set evidence_src $srcfile_hint
+        if {[llength $pair] > 2} {set evidence_src [lindex $pair 2]}
+        set next_srcfile_hint [trace_source_hint_for_hdl $high_hdl $evidence_src]
         set next_scope_hint [signal_scope_hint_after $high_sig $scope_hint]
         set edge_status [load_trace_budget_mark_edge $signame $high_sig "module_port_high" $srcfile_hint $scope_hint $next_srcfile_hint $next_scope_hint]
         if { $edge_status == 0 } {
@@ -4775,15 +4956,7 @@ proc should_expand_assign_expr_endpoint { hdl signame } {
     # used as a new starting point for expression expansion. Source fallback
     # already follows structural assigns from real RTL nets; expanding generated
     # SigTap/Combo endpoints can turn one load into a huge internal logic graph.
-    foreach stop {
-        "/" "RegCombo" "ComboMemory" "_ExprInst__"
-        "Always" "Initial" "Init" "SigOp" "SigTap" "Combo"
-    } {
-        if { [string first $stop $signame] >= 0 } {
-            return 0
-        }
-    }
-    if { [signal_has_unbracketed_colon $signame] } {
+    if { [is_generated_logic_signal $signame] } {
         return 0
     }
 
@@ -4961,7 +5134,7 @@ proc load_trace_should_run_hdl_fallback { signame srcfile_hint scope_hint } {
     if { $signame eq "" || [is_const_literal_name $signame] || [is_generated_logic_signal $signame] } {
         return 0
     }
-    if { [is_module_boundary_signal $signame] } {
+    if { [is_module_boundary_signal $signame] && [signal_select_suffix $signame] eq "" } {
         return 1
     }
 
@@ -5009,6 +5182,7 @@ proc reset_load_trace_budget {} {
     global load_trace_node_count load_trace_edge_count load_trace_limit_hit load_trace_limit_reason
     global load_trace_duplicate_edge_count
     global load_trace_seen_nodes load_trace_seen_expansions load_trace_seen_edges
+    global load_trace_budget_nodes
     set load_trace_node_count 0
     set load_trace_edge_count 0
     set load_trace_duplicate_edge_count 0
@@ -5017,6 +5191,7 @@ proc reset_load_trace_budget {} {
     catch { array unset load_trace_seen_nodes }
     catch { array unset load_trace_seen_expansions }
     catch { array unset load_trace_seen_edges }
+    catch { array unset load_trace_budget_nodes }
 }
 
 proc mark_load_trace_limit { reason } {
@@ -5048,15 +5223,18 @@ proc load_trace_limit_marker {} {
 }
 
 proc load_trace_budget_mark_node { signame } {
-    global load_trace_node_limit load_trace_node_count
+    global load_trace_node_limit load_trace_node_count load_trace_budget_nodes
     if { [load_trace_limited] } {
         return 0
     }
+    set key [normalize_signal_name $signame]
+    if {[info exists load_trace_budget_nodes($key)]} {return 1}
     if { $load_trace_node_limit > 0 && $load_trace_node_count >= $load_trace_node_limit } {
         mark_load_trace_limit "node_limit_$load_trace_node_limit"
         return 0
     }
     incr load_trace_node_count
+    set load_trace_budget_nodes($key) 1
     if { $load_trace_node_count > 0 && $load_trace_node_count % 5000 == 0 } {
         log_step "load_trace_progress nodes=$load_trace_node_count last=$signame"
     }
@@ -5078,6 +5256,9 @@ proc load_trace_budget_mark_edge { from_sig to_sig source {from_srcfile ""} {fro
         mark_load_trace_limit "edge_limit_$load_trace_edge_limit"
         return 0
     }
+    # Stopped keyword endpoints are still graph nodes, even when recursion is
+    # intentionally skipped. Count each identity once, independent of depth.
+    if {![load_trace_budget_mark_node $from_sig] || ![load_trace_budget_mark_node $to_sig]} {return 0}
     if { $edge_key ne "" } {
         set load_trace_seen_edges($edge_key) 1
     }
@@ -5292,7 +5473,11 @@ proc collect_drivers_by_name_rec { signame all_drivers_var module_drivers_var ne
     }
 
     set module_port_query [scoped_signal_for_query $signame $scope_hint]
+    set high_count_before [llength $all_drivers]
     collect_driver_module_port_high_conns "" $module_port_query all_drivers module_drivers $net_depth $expr_depth $visited_var $srcfile_hint
+    if {[llength [signal_selected_bits $signame]] > 0 && [llength $all_drivers] > $high_count_before} {
+        return
+    }
 
     set driverList {}
     set selected_query [expr {[llength [signal_selected_bits $signame]] > 0}]
@@ -5707,6 +5892,54 @@ proc collect_loads_by_name_rec { signame all_loads_var module_loads_var net_dept
     collect_load_module_port_high_conns "" $query_signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint $scope_hint
     collect_source_load_fanouts "" $signame all_loads module_loads $net_depth $expr_depth $visited_var $srcfile_hint $scope_hint
 
+    if {[signal_select_suffix $query_signame] ne ""} {
+        # Source enumeration is not a completeness proof. The bit API supplies
+        # positional/implicit connections and procedural/operator consumers.
+        # Unlike broad trace_load it cannot include sibling bits on this net.
+        set exact_hdl ""
+        set exact_results {}
+        if {[catch {
+            set exact_hdl [elab_exact_bit_handle $query_signame]
+            if {$exact_hdl eq "" || $exact_hdl eq "0" ||
+                ![hdl_matches_selected_signal $exact_hdl [hdl_to_name $exact_hdl] $query_signame]} {
+                error "exact load handle unavailable for $query_signame"
+            }
+            set exact_results [elab_exact_load_rows $exact_hdl $query_signame]
+        } exact_error]} {
+            append_unique_signal all_loads "TRACE_INCOMPLETE:exact_load:$query_signame"
+            append_unique_signal module_loads "TRACE_INCOMPLETE:exact_load:$query_signame"
+            log_step "exact_load_unavailable signal=$query_signame reason=$exact_error"
+            return
+        }
+        foreach result [load_trace_limited_list $exact_results bit_trace_load $query_signame] {
+            foreach endpoint [load_trace_limited_list [lindex $result 1] bit_trace_load_endpoints $query_signame] {
+                append_load_hdl_endpoint $endpoint $query_signame all_loads module_loads $net_depth $expr_depth visited $srcfile_hint $scope_hint 1
+                if {$net_depth > 0 && ![load_trace_limited] &&
+                    ![signal_belongs_to_stop_instance [hdl_to_name $endpoint]]} {
+                    set assign_handles {}
+                    if {[catch {
+                        set assign_net [elab_exact_assign_load_net $endpoint]
+                        if {$assign_net ne ""} {
+                            set opaque_visited {}
+                            set assign_handles [elab_named_load_handles $assign_net [expr {$net_depth-1}] opaque_visited]
+                        }
+                    } assign_error]} {
+                        append_unique_signal all_loads "TRACE_INCOMPLETE:exact_assign_load:$query_signame"
+                        append_unique_signal module_loads "TRACE_INCOMPLETE:exact_assign_load:$query_signame"
+                        log_step "exact_assign_load_unavailable signal=$query_signame reason=$assign_error"
+                    } else {
+                        foreach assign_handle $assign_handles {
+                            log_step "exact_assign_load_continue from=$query_signame via=[hdl_to_name $assign_handle]"
+                            append_load_hdl_endpoint $assign_handle [hdl_to_name $endpoint] all_loads module_loads \
+                                [expr {$net_depth-1}] $expr_depth visited $srcfile_hint $scope_hint 0
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
     set query_hdl ""
     catch { set query_hdl [::npi_L1::npi_nl_ut_get_hdl_by_actual_name $query_signame npiNlUndefined] }
     if { $query_hdl ne "" && $query_hdl != 0 &&
@@ -5850,17 +6083,8 @@ proc format_signal_name { signame inst_path } {
         return $signame
     }
 
-    # Keep enough hierarchy for debugging and downstream matching.  Older
-    # output stripped the whole target parent prefix, so parent-local nets like
-    # Top.u_sub.u_parent.net became bare "net"; on deep projects that made
-    # different scopes indistinguishable and hid where trace stopped.
-    set inst_parts [split $inst_path "."]
-    if { [llength $inst_parts] >= 2 } {
-        set grandparent_prefix [join [lrange $inst_parts 0 end-3] "."]
-        if { $grandparent_prefix ne "" && [string match "${grandparent_prefix}.*" $signame] } {
-            set signame [string range $signame [expr {[string length $grandparent_prefix] + 1}] end]
-        }
-    }
+    # Full hierarchy is the identity. Shortening it here made endpoints from
+    # different tiles indistinguishable to CSV and XLSX keyword matching.
 
     # Simplify the format: extract key information
     # Format: module:block:line:type.signal
@@ -5884,14 +6108,7 @@ proc apply_signal_select { signame select } {
     # Do not append bit selects to generated logic/expression names or to an
     # already-selected connection. Those names are not valid Verilog bit-select
     # roots for NPI string tracing.
-    foreach marker {
-        "/" "_ExprInst__" "Always" "Initial" "Init"
-        "SigOp" "SigTap" "Combo" "RegCombo" "ComboMemory"
-    } {
-        if { [string first $marker $signame] >= 0 } {
-            return $signame
-        }
-    }
+    if {[is_generated_logic_signal $signame]} {return $signame}
     if { [regexp {\[[0-9]+(:[0-9]+)?\]$} $signame] } {
         if { ![regexp {^(.+)(\[[0-9]+(:[0-9]+)?\])$} $signame -> base existing_select _] } {
             return $signame
@@ -5938,10 +6155,22 @@ proc selected_port_names { portname } {
 # -----------------------------------------------------------------------
 # Process one instance: emit CSV rows for all its ports
 # -----------------------------------------------------------------------
+proc record_inapplicable_query {inst_path portname} {
+    global env trace_completed_ports
+    if {![info exists env(NPI_ABSENT_PORTS_FILE)] || $env(NPI_ABSENT_PORTS_FILE) eq ""} {return 0}
+    set absentfh [open $env(NPI_ABSENT_PORTS_FILE) a]
+    puts $absentfh "[trace_csv_cell $inst_path],[trace_csv_cell $portname]"
+    close $absentfh
+    incr trace_completed_ports
+    log_step "PORT_NOT_APPLICABLE instance=$inst_path port=$portname mode=module_column_union"
+    return 1
+}
+
 proc process_instance { inst_path parent_path instname port_filter outfh module_outfh } {
     global target_mod const_trace_max_depth assign_trace_max_depth assign_expr_trace_max_depth
     global current_trace_instance current_trace_port current_trace_port_path
     global current_trace_role current_const_driver_evidence_seen
+    global trace_query_errors trace_completed_ports
 
     set current_trace_instance $inst_path
     log_step "process_instance=$inst_path parent=$parent_path instname=$instname"
@@ -5967,9 +6196,30 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
     set port_hdl_list [get_port_handles $inst_path]
     if { [llength $port_hdl_list] == 0 } {
         puts stderr "WARNING: no ports found for $inst_path"
+        incr trace_query_errors
         return
     }
     log_step "port_handle_count=[llength $port_hdl_list] instance=$inst_path"
+    set available_ports {}
+    foreach ph $port_hdl_list {dict set available_ports [get_port_name $ph] 1}
+    dict for {requested selects} $::port_filter_select_map {
+        if {![dict exists $available_ports $requested]} {
+            if {[record_inapplicable_query $inst_path [lindex [selected_port_names $requested] 0]]} {
+                # The XLSX adapter explicitly requests a union of columns for
+                # different module types. Record inapplicable cells separately;
+                # standalone trace requests remain strict by default.
+                foreach query [lrange [selected_port_names $requested] 1 end] {
+                    record_inapplicable_query $inst_path $query
+                }
+                continue
+            }
+            incr trace_query_errors
+            log_step "ERROR:PORT_NOT_FOUND instance=$inst_path port=$requested"
+            foreach fh [list $outfh $module_outfh] {
+                if {$fh ne ""} {write_trace_row $fh $inst_path $requested unknown driver "ERROR:PORT_NOT_FOUND"}
+            }
+        }
+    }
 
     if { [llength $port_hdl_list] > 0 } {
         set module_srcfile [get_handle_source_file [lindex $port_hdl_list 0]]
@@ -6017,8 +6267,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { $portname eq "" } { continue }
 
         # Skip if port filter is active and this port is not in the list
-        if { [llength $port_filter] > 0 && [lsearch -exact $port_filter $portname] < 0 } {
-            log_step "skip_port port=$portname reason=not_in_filter instance=$inst_path"
+        if { [llength $port_filter] > 0 && ![dict exists $::port_filter_select_map $portname] } {
+            debug_step "skip_port port=$portname reason=not_in_filter instance=$inst_path"
             continue
         }
 
@@ -6051,7 +6301,11 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         if { [dict exists $src_port_range_map $base_portname] } {
             set base_port_range [dict get $src_port_range_map $base_portname]
         }
-        set npi_port_width [get_handle_size $port_hdl]
+        set npi_port_width ""
+        set port_shape_error ""
+        if {[catch {set npi_port_width [elab_bit_width $port_hdl]} port_shape_error]} {
+            log_step "port_shape_unresolved instance=$inst_path port=$base_portname reason=$port_shape_error"
+        } else {set port_shape_error ""}
         if { $npi_port_width ne "" } {
             set base_port_width $npi_port_width
         }
@@ -6063,6 +6317,23 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set current_trace_port_path "${inst_path}.${portname}"
             set current_trace_role driver
             set current_const_driver_evidence_seen {}
+            if {[catch {
+                if {$port_shape_error ne ""} {error $port_shape_error}
+                set query_offsets [elab_offsets $npi_port_width [elab_ranges [elab_relation $port_hdl npiLowConn]] $trace_select]
+            } query_error query_options]} {
+                # Only a proven range mismatch can be an inapplicable union
+                # column. Unknown width/shape or a failed NPI call is a real
+                # trace failure and must not disappear into NO_TRACE.
+                if {[dict get $query_options -errorcode] eq {NPI_QUERY OUT_OF_RANGE} &&
+                    [record_inapplicable_query $inst_path $portname]} {continue}
+                incr trace_query_errors
+                log_step "ERROR:PORT_SELECT_INVALID instance=$inst_path port=$portname reason=$query_error"
+                foreach fh [list $outfh $module_outfh] {
+                    if {$fh ne ""} {write_trace_row $fh $inst_path $portname $dir driver "ERROR:PORT_SELECT_INVALID:$query_error"}
+                }
+                continue
+            }
+            incr trace_completed_ports
             if { $trace_select ne "" } {
                 log_step "trace_port_bit instance=$inst_path port=$portname base_port=$base_portname select=$trace_select"
             }
@@ -6096,6 +6367,29 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_drivers {}
         set module_drivers {}
         set current_trace_role driver
+        if {$dir in {input output}} {
+            set side [expr {$dir eq "input" ? "npiHighConn" : "npiLowConn"}]
+            if {[catch {
+                set starts [elab_port_starts $port_hdl $inst_path $base_portname $trace_select $side]
+                if {[llength $starts]} {
+                    set visited {}
+                    foreach start $starts {
+                        elab_collect_driver $start all_drivers module_drivers $assign_trace_max_depth visited $module_srcfile
+                    }
+                } else {
+                    append_unique_signal all_drivers NO_DRIVER
+                }
+            } mapping_error]} {
+                incr trace_query_errors
+                set diagnostic "ERROR:ELABORATED_DRIVER_UNRESOLVED:$mapping_error"
+                append_unique_signal all_drivers $diagnostic
+                append_unique_signal module_drivers $diagnostic
+                log_step $diagnostic
+            }
+            # Do not merge flattened high-connection operands or source guesses
+            # into the elaborated result, even if a precise API was unavailable.
+            set driver_sigs {}
+        }
         foreach sig_hdl $driver_sigs {
             set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
             set signame [hdl_to_selected_name $sig_hdl $trace_select]
@@ -6129,6 +6423,12 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
             set driver_srcfile_hint [get_handle_source_file $trace_sig_hdl]
             if { $driver_srcfile_hint eq "" } {
                 set driver_srcfile_hint [get_handle_source_file $sig_hdl]
+            }
+            if {$driver_srcfile_hint eq ""} {
+                # Constants have no declaration handle. The target definition
+                # still provides a useful file candidate (notably when parent
+                # and child are defined in one file and the top has no ports).
+                set driver_srcfile_hint $module_srcfile
             }
 
             if { $dir eq "input" && [lsearch -exact $high_sigs $sig_hdl] >= 0 } {
@@ -6404,6 +6704,23 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set module_loads {}
         set current_trace_role load
         reset_load_trace_budget
+        if {$dir in {input output}} {
+            set side [expr {$dir eq "input" ? "npiLowConn" : "npiHighConn"}]
+            if {[catch {
+                set starts [elab_port_starts $port_hdl $inst_path $base_portname $trace_select $side]
+                foreach start $starts {
+                    if {![is_const_literal_name $start]} {
+                        collect_loads_by_name $start all_loads module_loads $module_srcfile [signal_scope_prefix $start]
+                    }
+                }
+            } mapping_error]} {
+                incr trace_query_errors
+                append_unique_signal all_loads "ERROR:ELABORATED_LOAD_UNRESOLVED:$mapping_error"
+                append_unique_signal module_loads "ERROR:ELABORATED_LOAD_UNRESOLVED:$mapping_error"
+                log_step "ERROR:ELABORATED_LOAD_UNRESOLVED:$mapping_error"
+            }
+            set load_sigs {}
+        }
         foreach sig_hdl $load_sigs {
             set trace_sig_hdl [select_hdl_for_signal_select $sig_hdl $trace_select]
             set signame [hdl_to_selected_name $sig_hdl $trace_select]
@@ -6457,7 +6774,8 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
 
             # If string-based tracing returns no endpoint, keep the old
             # handle-based fallback for the direct connection only.
-            if { [llength $all_loads] == 0 && ![load_trace_limited] } {
+            if { [llength $all_loads] == 0 && ![load_trace_limited] &&
+                 [load_trace_should_run_hdl_fallback $signame $load_srcfile_hint $load_scope_hint] } {
                 set loadList {}
                 catch { ::npi_L1::npi_nl_trace_load_by_hdl $trace_sig_hdl loadList }
                 set loadList [load_trace_limited_list $loadList "npi_nl_trace_load_by_hdl_direct_fallback" $signame]
@@ -6501,6 +6819,15 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
                         collect_loads_by_name $sig all_loads module_loads $next_load_srcfile_hint $next_load_scope_hint
                     }
                 }
+            }
+        }
+        # Keep the direct connection as provenance even when deeper sinks were
+        # found. In particular, a top-level alias must not disappear from the
+        # full trace simply because its endpoint traversal succeeded.
+        foreach sig_hdl $load_sigs {
+            set direct_load [hdl_to_selected_name $sig_hdl $trace_select]
+            if {$direct_load ne "" && ![is_self_port_signal $direct_load $inst_path $portname]} {
+                append_unique_signal all_loads $direct_load
             }
         }
         set load_limit_marker [load_trace_limit_marker]
@@ -6548,6 +6875,20 @@ proc process_instance { inst_path parent_path instname port_filter outfh module_
         set all_loads [lsort -unique $all_loads]
         set module_drivers [lsort -unique $module_drivers]
         set module_loads [lsort -unique $module_loads]
+        if {[llength $query_offsets] == 1} {
+            set scalar_values {}
+            foreach sig [concat $all_drivers $module_drivers] {
+                if {[is_const_literal_name $sig]} {
+                    set bit_value [project_const_literal_to_bit $sig 0]
+                    if {[regexp {'b([01])$} $bit_value -> bit]} {dict set scalar_values $bit 1}
+                }
+            }
+            if {[dict size $scalar_values] > 1} {
+                lappend all_drivers "ERROR:CONST_DRIVER_CONFLICT:0,1"
+                lappend module_drivers "ERROR:CONST_DRIVER_CONFLICT:0,1"
+                log_step "CONST_DRIVER_CONFLICT instance=$inst_path port=$portname values=0,1"
+            }
+        }
         foreach sig $all_drivers {
             if { [is_const_literal_name $sig] } {
                 ensure_const_driver_evidence $sig $inst_path $portname $dir
@@ -6647,6 +6988,8 @@ if { $module_outfh ne "" } {
 
 set processed_instances 0
 set skipped_instances 0
+set trace_query_errors 0
+set trace_completed_ports 0
 set seen_paths {}
 foreach ih $hdlList {
     # Get instance full path from npi_ut_get_hdl_info
@@ -6674,9 +7017,14 @@ foreach ih $hdlList {
     process_instance $inst_path $parent_path $instname $port_filter $outfh $module_outfh
     incr processed_instances
 }
-log_step "processed_target_instances=$processed_instances skipped_handles=$skipped_instances"
+log_step "processed_target_instances=$processed_instances skipped_handles=$skipped_instances completed_ports=$trace_completed_ports query_errors=$trace_query_errors"
 
 if { $outfh ne "stdout" } { close $outfh }
 if { $module_outfh ne "" } { close $module_outfh }
+if {$processed_instances > 0 && $skipped_instances == 0 && $trace_completed_ports > 0 && $trace_query_errors == 0 && [info exists env(NPI_STATUS_FILE)] && $env(NPI_STATUS_FILE) ne ""} {
+    set sfh [open $env(NPI_STATUS_FILE) w]
+    puts $sfh "COMPLETE $processed_instances"
+    close $sfh
+}
 log_step "done"
 debExit

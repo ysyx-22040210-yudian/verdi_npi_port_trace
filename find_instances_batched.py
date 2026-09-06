@@ -14,6 +14,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from runtime_paths import bounded_derived_path, bounded_path, fixed_temp_prefix
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -69,7 +70,7 @@ def atomic_write_lines(
             output_mode = 0o666 & ~current_umask
     fd, temp_name = tempfile.mkstemp(
         dir=str(path.parent),
-        prefix=f".{path.name}.",
+        prefix=fixed_temp_prefix("instances"),
         suffix=".tmp",
     )
     temp_path = Path(temp_name)
@@ -91,7 +92,7 @@ def atomic_write_lines(
 
 
 def remove_stale_result_files(path: Path) -> None:
-    error_path = path.with_name(f"{path.stem}_errors.log")
+    error_path = bounded_path(path.with_name(f"{path.stem}_errors.log"), suffix=".log")
     for stale_path in (path, error_path):
         try:
             stale_path.unlink()
@@ -112,7 +113,7 @@ def write_errors(
     errors: Sequence[str],
     output_mode: Optional[int] = None,
 ) -> None:
-    error_path = path.with_name(f"{path.stem}_errors.log")
+    error_path = bounded_path(path.with_name(f"{path.stem}_errors.log"), suffix=".log")
     if not errors:
         try:
             error_path.unlink()
@@ -245,11 +246,20 @@ def cleanup_completed_process_session(proc: subprocess.Popen) -> None:
 
 
 def run_verdi_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -> List[str]:
+    with tempfile.TemporaryDirectory(dir=str(outfile.parent), prefix=fixed_temp_prefix("find")) as tempdir:
+        request = Path(tempdir) / "modules.list"
+        request.write_text("\n".join(modules) + "\n", encoding="utf-8")
+        return _run_verdi_find_request(args, modules, batch_id, outfile, request, Path(tempdir) / "complete")
+
+
+def _run_verdi_find_request(args, modules, batch_id, outfile, request, status_file):
     env = os.environ.copy()
     modules_text = ",".join(modules)
     env["NPI_LIB"] = str(args.lib)
-    env["NPI_FILTER_MODULE"] = modules_text
-    env["NPI_FILTER_MODULES"] = modules_text
+    env["NPI_FILTER_MODULE"] = ""
+    env["NPI_FILTER_MODULES"] = ""
+    env["NPI_FILTER_MODULES_FILE"] = str(request)
+    env["NPI_FIND_STATUS_FILE"] = str(status_file)
     env["NPI_INSTANCE_OUTFILE"] = str(outfile)
     env["NPI_FIND_LOG_INSTANCES"] = "1" if args.log_instances else "0"
 
@@ -258,7 +268,7 @@ def run_verdi_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -
         "batch={} module_count={} modules={} outfile={}".format(
             batch_id,
             len(modules),
-            modules_text,
+            modules_text if len(modules_text) <= 512 else "<file request>",
             outfile,
         )
     )
@@ -286,6 +296,9 @@ def run_verdi_find(args, modules: Sequence[str], batch_id: str, outfile: Path) -
         cleanup_completed_process_session(proc)
     if rc != 0:
         raise subprocess.CalledProcessError(rc, cmd)
+    if not status_file.exists() or not status_file.read_text().startswith("COMPLETE "):
+        log_step("TRACE_INCOMPLETE: instance finder exited without a completion record")
+        raise subprocess.CalledProcessError(1, cmd)
 
     instances = read_instances(outfile)
     log_step(f"batch={batch_id} instances={len(instances)}")
@@ -301,9 +314,7 @@ def split_batches(items: Sequence[str], batch_size: int) -> Iterable[List[str]]:
 
 
 def run_batch_with_retry(args, modules: Sequence[str], batch_id: str) -> Tuple[List[str], List[str]]:
-    batch_file = args.output.with_name(
-        f"{args.output.stem}__batch_{safe_name(batch_id)}{args.output.suffix}"
-    )
+    batch_file = bounded_derived_path(args.output, "__batch_", batch_id)
     try:
         instances = run_verdi_find(args, modules, batch_id, batch_file)
         return instances, []
@@ -405,7 +416,7 @@ def main() -> int:
     log_step(f"verdi_timeout_sec={args.verdi_timeout_sec}")
     log_step(f"output={args.output}")
     output_mode = existing_file_mode(args.output)
-    error_output = args.output.with_name(f"{args.output.stem}_errors.log")
+    error_output = bounded_path(args.output.with_name(f"{args.output.stem}_errors.log"), suffix=".log")
     error_output_mode = existing_file_mode(error_output)
     remove_stale_result_files(args.output)
 
